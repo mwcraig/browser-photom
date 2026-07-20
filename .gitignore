@@ -1,0 +1,11 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# jupyterlite build outputs
+dist/
+_output/
+.jupyterlite.doit.db
+
+# local clone of astrowidgets (fetched by pixi task)
+astrowidgets-src/

@@ -1,0 +1,24 @@
+name: browser-photom
+channels:
+  - https://prefix.dev/emscripten-forge-4x
+  - https://prefix.dev/conda-forge
+dependencies:
+  - xeus-python
+  - numpy
+  # astropy-base = full astropy package without the metapackage's "recommended"
+  # extras (pandas, pyarrow, dask, s3fs, h5py, ...) that astrowidgets doesn't need
+  - astropy-base
+  # pure-Python (noarch); queries need the local CORS proxy — see content/proxy_setup.py
+  - astroquery
+  - matplotlib
+  - pillow
+  - ipywidgets>=8
+  - ipyevents
+  - bqplot>=0.13
+  - bqplot-gl
+  # bqplot-image-gl comes from PyPI below: conda-forge only has 1.9.2, whose
+  # JS targets bqplot 0.12 and silently renders nothing with bqplot 0.13
+  - pip:
+      - bqplot-image-gl==1.10.1
+      - astro-image-display-api
+      - ./astrowidgets-src

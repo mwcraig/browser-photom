@@ -1,0 +1,23 @@
+[workspace]
+authors = ["Matt Craig <mattwcraig@gmail.com>"]
+channels = ["conda-forge"]
+name = "browser-photom"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+fetch-astrowidgets = "git -C astrowidgets-src pull --ff-only 2>/dev/null || git clone https://github.com/astropy/astrowidgets astrowidgets-src"
+build = { cmd = "jupyter lite build --contents content --output-dir dist && python scripts/patch_filesystem_access.py", depends-on = ["fetch-astrowidgets"] }
+serve = "python -m http.server 8000 --directory dist"
+# CORS proxy for astroquery from the browser (see content/proxy_setup.py)
+proxy = "python scripts/cors_proxy.py"
+
+[dependencies]
+python = ">=3.11"
+pip = "*"
+jupyter_server = "*"
+jupyterlite-core = "*"
+jupyterlite-xeus = ">=5"
+# federated labextension auto-bundled by `jupyter lite build`; mounts a local
+# folder via the File System Access API (Chromium-only)
+jupyterlab-filesystem-access = "*"

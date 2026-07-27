@@ -9,3 +9,6 @@ _output/
 
 # local clone of astrowidgets (fetched by pixi task)
 astrowidgets-src/
+
+# python bytecode
+__pycache__/

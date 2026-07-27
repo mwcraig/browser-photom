@@ -70,3 +70,26 @@ partially done; remaining checks listed at the bottom.
   (issue or small PR to `src/drive.ts`); drop the local patch once released.
 - Extend `proxy_setup.use_proxy()` to more services (Gaia TAP, MAST) as needed.
 - `photutils` has an emscripten-forge build when photometry work starts.
+
+# Update: local helper replaces filesystem-access + cors_proxy (2026-07-27)
+
+Both local-access workarounds above are superseded by one process,
+`scripts/local_helper.py` (`pixi run helper DIR`, port 8001):
+
+- Serves a local image directory at `/list` + `/files/<name>` (CORS for the
+  site origin, HTTP Range support) — replaces the jupyterlab-filesystem-access
+  workflow of section 2 entirely. The extension and
+  `scripts/patch_filesystem_access.py` are removed; what the exploration
+  taught us is recorded in `docs/filesystem-access-notes.md`.
+- Absorbs `scripts/cors_proxy.py` (deleted) under `/proxy/<full-url>`, now
+  with an origin allowlist instead of `Access-Control-Allow-Origin: *`.
+- `content/proxy_setup.py` is now `content/helper.py`: same `use_proxy()`
+  plus `list_images()` / `open_fits()` / `fetch()`. New demo notebook:
+  `content/local_images.ipynb`.
+
+The "Remaining browser checks" above are superseded: verify instead by
+running `local_images.ipynb` top to bottom (ideally in Firefox, which the
+old extension could not support) with `pixi run serve` + `pixi run helper
+~/Downloads/ey_uma`. The copies of demo.ipynb / proxy_setup.py staged in
+`~/Downloads/ey_uma/` are obsolete — the notebook no longer needs to live
+in the image folder.

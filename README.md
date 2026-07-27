@@ -14,35 +14,45 @@ pixi run serve   # serve dist/ at http://localhost:8000
 
 Then open <http://localhost:8000>, open `demo.ipynb`, and run it.
 
-### Local file access (Chromium only)
+### Local images (any browser)
 
-The site bundles the `jupyterlab-filesystem-access` extension: a "local filesystem"
-browser in the left sidebar lets you mount a real folder from disk (via the browser's
-File System Access API — Chrome/Edge only, not Safari/Firefox), so FITS files can be
-opened without uploading copies into IndexedDB. Note that opening a file still reads
-the whole file into kernel memory; mounting only avoids the upload/staleness problem.
-
-### astroquery (needs the CORS proxy)
-
-astroquery is installed in the kernel, but astronomy services (SIMBAD, VizieR, Gaia,
-MAST, ...) don't send CORS headers, so the browser blocks direct responses. For local
-use, run the bundled proxy in a second terminal:
+The **local helper** serves a directory of FITS files over localhost HTTP so
+notebooks can list and open them in any browser — no File System Access API, no
+extension, no per-session permission grants. Run it in a second terminal:
 
 ```sh
-pixi run proxy   # CORS proxy on http://localhost:8001
+pixi run helper ~/Downloads/ey_uma   # image server + CORS proxy on http://localhost:8001
 ```
 
-then in a notebook:
+then in a notebook (see `local_images.ipynb` for the full flow):
 
 ```py
-import proxy_setup
-proxy_setup.use_proxy()   # routes SIMBAD + VizieR through the proxy
+import helper
+helper.list_images()
+hdul = helper.open_fits("ey-uma-S001-R001-C001-rp.fit")
+```
+
+Only requests from the site origin (`http://localhost:8000` by default; see
+`--allow-origin`) are served, so other websites can't read your files while the
+helper runs. An earlier approach using the `jupyterlab-filesystem-access`
+extension was removed; see `docs/filesystem-access-notes.md` for what was
+learned.
+
+### astroquery (through the same helper)
+
+astroquery is installed in the kernel, but astronomy services (SIMBAD, VizieR, Gaia,
+MAST, ...) don't send CORS headers, so the browser blocks direct responses. The
+helper proxies them at `/proxy/<full-url>`:
+
+```py
+import helper
+helper.use_proxy()   # routes SIMBAD + VizieR through the proxy
 
 from astroquery.simbad import Simbad
 Simbad.query_object("M31")
 ```
 
-**Caveat:** the proxy only exists locally. A static deployment (GitHub Pages etc.)
+**Caveat:** the helper only exists locally. A static deployment (GitHub Pages etc.)
 would need a hosted CORS proxy instead.
 
 ## Layout
@@ -54,13 +64,18 @@ would need a hosted CORS proxy instead.
   metapackage's "recommended" extras like pandas/pyarrow/dask — pandas still appears because
   bqplot requires it).
 - `astrowidgets-src/` — clone of astropy/astrowidgets `main`, refreshed by `pixi run build`.
-- `content/demo.ipynb` — demo notebook using `astrowidgets.bqplot.ImageWidget`.
-- `content/proxy_setup.py` — notebook helper that routes astroquery (SIMBAD, VizieR) through
-  the local CORS proxy and patches requests via pyodide-http.
-- `scripts/cors_proxy.py` — stdlib-only CORS proxy (`pixi run proxy`, port 8001); forwards
-  `http://localhost:8001/<full-target-url>` and adds `Access-Control-Allow-Origin: *`.
-- `pixi.toml` — host-side build tooling (jupyterlite-core, jupyterlite-xeus,
-  jupyterlab-filesystem-access).
+- `content/demo.ipynb` — demo notebook using `astrowidgets.bqplot.ImageWidget`
+  (synthetic data, no helper needed).
+- `content/local_images.ipynb` — demo notebook loading local FITS files through the helper.
+- `content/helper.py` — notebook-side client for the local helper: `list_images()`,
+  `open_fits()`, and `use_proxy()` (routes astroquery SIMBAD/VizieR through the proxy);
+  also patches requests via pyodide-http.
+- `scripts/local_helper.py` — stdlib-only local helper (`pixi run helper DIR`, port 8001);
+  serves `DIR` at `/list` + `/files/<name>` (with Range support) and CORS-proxies
+  `/proxy/<full-target-url>`, restricted to allowed browser origins.
+- `docs/filesystem-access-notes.md` — record of the abandoned
+  jupyterlab-filesystem-access approach to local file access.
+- `pixi.toml` — host-side build tooling (jupyterlite-core, jupyterlite-xeus).
 
 ## Notes
 

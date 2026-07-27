@@ -1,5 +1,9 @@
 # Plan: local file access, slimmer env, astroquery
 
+> **Superseded in part (2026-07-27):** the filesystem-access approach of item 2 and the
+> standalone CORS proxy of item 3 were replaced by `scripts/local_helper.py`; see
+> PROGRESS.md and `docs/filesystem-access-notes.md`. Historical document, kept as written.
+
 Next steps for browser-photom (written 2026-07-19, pre-context-clear). Current state: working
 JupyterLite + xeus-python site with astrowidgets (bqplot backend) from astropy/astrowidgets main;
 `pixi run build` / `pixi run serve`; details in README.md and in Claude's memory directory.

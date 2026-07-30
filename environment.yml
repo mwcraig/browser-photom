@@ -12,6 +12,15 @@ dependencies:
   - astroquery
   - matplotlib
   - pillow
+  # bandaid pipeline deps with emscripten-forge builds
+  - scipy
+  - photutils
+  - scikit-image
+  # pure-Python noarch; pydantic pins an exact pydantic-core, which must
+  # intersect emscripten-forge's builds — pin pydantic down a version if the
+  # solve fails
+  - pydantic
+  - python-dateutil
   - ipywidgets>=8
   - ipyevents
   - bqplot>=0.13
@@ -22,3 +31,9 @@ dependencies:
       - bqplot-image-gl==1.10.1
       - astro-image-display-api
       - ./astrowidgets-src
+      # jupyterlite-xeus pip does NOT resolve dependencies — deliberately, so
+      # huggingface_hub, jax, and twirl's numpy<2 pin never enter the env
+      - twirl
+      - ./eloy-src
+      - ./bandaid-src
+      - ./aavso-starlist-schema-src

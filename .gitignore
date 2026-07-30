@@ -7,8 +7,11 @@ dist/
 _output/
 .jupyterlite.doit.db
 
-# local clone of astrowidgets (fetched by pixi task)
+# local clones fetched by pixi tasks
 astrowidgets-src/
+bandaid-src/
+eloy-src/
+aavso-starlist-schema-src/
 
 # python bytecode
 __pycache__/

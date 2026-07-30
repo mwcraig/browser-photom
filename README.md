@@ -38,6 +38,44 @@ helper runs. An earlier approach using the `jupyterlab-filesystem-access`
 extension was removed; see `docs/filesystem-access-notes.md` for what was
 learned.
 
+### Local images by drag-and-drop (no helper)
+
+An alternative to the helper that needs **no background service**: drop files
+straight into the file browser and let a running notebook process and delete
+them as they arrive, so browser storage only ever holds a file or two.
+
+1. `pixi run build` + `pixi run serve` (the helper is *not* needed).
+2. Open `watch_uploads.ipynb` and run all cells; the last cell polls the
+   `incoming/` folder once a second.
+3. In the file browser, open `incoming/` and drag a **folder** of FITS files
+   into it. Files inside a dropped folder upload sequentially, which keeps
+   storage bounded; loose files dropped together would upload in parallel, so
+   one notebook cell installs a page-level guard (JS run on the main thread)
+   that rejects loose-file drops on the file browser with a warning.
+4. Each image prints one line (filename + header cards) and then disappears
+   from the file browser. Stop the loop by creating a file named `STOP` in
+   `incoming/`, or let the idle timeout expire.
+
+Unlike the helper this works on a static deployment (GitHub Pages etc.), at
+the cost of copying each image through browser storage once.
+
+### Real photometry on dropped folders
+
+`watch_photometry.ipynb` is the drag-and-drop loop above with the simulated
+processing step replaced by the actual
+[bandaid](https://github.com/mwcraig/bandaid) pipeline (branch `numpy-ballet`,
+whose numpy-only Ballet centroider needs no jax): the first uploaded frame
+drives batch prep (source detection, Gaia-DR2-via-VizieR query, contamination
+flagging), then every frame is plate-solved, photometered, written to a
+per-frame `.star` file in `results/`, and deleted from `incoming/`. A final
+cell plots the light curve of a target star from the accumulated results.
+
+The ~39 MB Ballet CNN weights are downloaded from HuggingFace on first run and
+cached in browser storage (IndexedDB), so later sessions skip the download.
+Both network calls (VizieR, HuggingFace) are CORS-clean — no helper or proxy
+is needed. Note `results/` also lives in browser storage; delete it from the
+file browser when done to reclaim space.
+
 ### astroquery (through the same helper)
 
 astroquery is installed in the kernel, but astronomy services (SIMBAD, VizieR, Gaia,
@@ -67,6 +105,16 @@ would need a hosted CORS proxy instead.
 - `content/demo.ipynb` — demo notebook using `astrowidgets.bqplot.ImageWidget`
   (synthetic data, no helper needed).
 - `content/local_images.ipynb` — demo notebook loading local FITS files through the helper.
+- `content/watch_uploads.ipynb` — drag-and-drop plumbing testbed: polls `incoming/`,
+  prints header cards per uploaded FITS file (simulated photometry), deletes it to
+  keep browser storage bounded.
+- `content/watch_photometry.ipynb` — the same watch loop running the real bandaid
+  pipeline: batch prep off the first frame, per-frame photometry + `.star` output in
+  `results/`, light-curve plot at the end.
+- `content/incoming/` — drop target watched by the two watch notebooks.
+- `bandaid-src/`, `eloy-src/`, `aavso-starlist-schema-src/` — clones fetched by
+  `pixi run build` (bandaid branch `numpy-ballet`, eloy pinned to the commit bandaid
+  pins), installed into the kernel via the `pip:` section.
 - `content/helper.py` — notebook-side client for the local helper: `list_images()`,
   `open_fits()`, and `use_proxy()` (routes astroquery SIMBAD/VizieR through the proxy);
   also patches requests via pyodide-http.

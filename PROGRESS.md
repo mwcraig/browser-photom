@@ -367,7 +367,80 @@ to prior runs. Full day's arc: ~26 s → ~3.4 s/frame (**7.6×**). Remaining
 sinks are genuinely compute: the CNN (~1.5 s wall, now BLAS-bound) and
 photutils annulus stats (~1 s wall, bandaid#103).
 
-**Still open:**
+**Endurance run passed (2026-07-29, full 350-frame Qatar-8 folder)**:
+350/350 photometered, 0 skipped, 0 unreadable; storage stayed bounded and
+the loop exited on the 120 s idle timeout. Two timing signatures vs the
+9-frame run's 3.4 s/frame: (a) steady state was ~6.6 s/frame — suspected
+contention with the concurrent upload stream (~3.5 GB through the main
+thread into IndexedDB for much of the run) plus file-browser churn on a
+300-entry directory; unconfirmed — next run, watch when
+`navigator.storage.estimate()` plateaus (uploads done) and see if [done]
+drops to ~3.4 s. (b) A handful of 17–53 s outliers that coincide with the
+tab being hidden: Chrome throttles the main thread of hidden tabs, and all
+contents-drive I/O is brokered there, so the (unthrottled) kernel worker
+stalls on drive round-trips. Mitigation: keep the tab in its own *visible*
+window — visibility, not focus, is what matters.
 
-1. Optional endurance: the full 350-frame folder (~20 min at ~3.4 s/frame;
-   uploads still outpace processing, so storage grows before draining).
+**Throttle-test run (2026-07-29, full 350-frame folder; cell output and
+8.5 h console log analyzed 2026-07-30)**. Protocol: drop the folder,
+wait for `navigator.storage.estimate()` to plateau, only then start the
+watch loop — monitored with this DevTools snippet (paste in the page
+context, not a worker; re-paste after any reload):
+
+```js
+(() => {
+  const mb = (b) => (b / 1048576).toFixed(1) + ' MB';
+  const t0 = performance.now();
+  window._memWatch = setInterval(async () => {
+    const est = await navigator.storage.estimate();
+    const heap = performance.memory ? mb(performance.memory.usedJSHeapSize) : 'n/a';
+    console.log(`[${String(Math.round((performance.now() - t0) / 1000)).padStart(5)}s] storage: ${mb(est.usage)} of ${mb(est.quota)} | main-thread heap: ${heap}`);
+  }, 5000);
+  console.log('watching every 5 s — clearInterval(window._memWatch) to stop');
+})();
+```
+
+Results:
+
+- **Upload contention refuted.** Uploads finished at ~13 min (storage
+  peaked at 946.7 MB and never rose again); the loop started at ~27 min,
+  so upload and processing had zero overlap — and visible-tab steady
+  state was **still ~6.5 s/frame**, not 3.4. (Correction to the
+  endurance-run note: the folder is 1.4 GB at 4.15 MB/frame, not
+  ~3.5 GB.) Directory size is also exonerated: frames ran the same
+  ~6.5 s with ~350 entries in `incoming` as with ~180.
+- **Hidden-tab throttling confirmed as the slow-frame cause, with a
+  fingerprint.** The watcher is a main-thread 5 s `setInterval`, so
+  Chrome's background clamp shows in its tick spacing: 411 gaps of
+  exactly 5 s vs 478 of exactly 60 s. The visible/hidden windows align
+  exactly with the fast/slow phases in the cell output: ~140 frames at
+  ~6.5 s (visible), ~30 at 35–57 s (hidden), ~25 at ~6.4 s (visible),
+  ~155 at 37–57 s (hidden). Sustained hiding costs ~7× — keeping the
+  tab visible is load-bearing, not a nicety.
+- **Health clean over 8.5 h.** 350/350 photometered, zero kernel
+  exceptions in the log. Heap spiked to ~3.8 GB at the end of the
+  upload phase but fully recovered; session ends at baseline (89.5 MB
+  storage, 93 MB heap). No leak.
+- **The per-frame stderr warning identified**: `FutureWarning` from
+  `eloy/detection.py:70` — skimage's `binary_opening` is deprecated in
+  0.26 (removal 0.28; use `skimage.morphology.opening`). Every
+  occurrence also makes JupyterLab's renderer attempt (and fail) to
+  resolve the source path with a ~170-line async stack — 60k of the
+  62k console-log lines, all on the same main thread that brokers the
+  contents drive.
+
+**Still open / next steps (as of 2026-07-30):**
+
+1. Explain the remaining 6.5 vs 3.4 s/frame gap between the full-folder
+   and 9-frame runs. Prime suspect: frontend output-rendering churn from
+   the per-frame warning (hundreds of accumulated outputs + the
+   path-resolution stacks above). Discriminating test: add
+   `warnings.filterwarnings("ignore", message=".*binary_opening.*",
+   category=FutureWarning)` to the setup cell and re-run the full folder
+   with the tab visible. If still ~6.5 s, next suspect is DevTools
+   itself being open — close it for a run (the watcher keeps running;
+   its output is buffered).
+2. Optional upstream: report/fix the `binary_opening` deprecation in
+   eloy (detection.py:70) before skimage 0.28 removes it.
+3. Operational rule (confirmed): run the tab in its own *visible*
+   window; sustained backgrounding is ~7× slower.

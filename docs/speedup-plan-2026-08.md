@@ -19,9 +19,16 @@ All three browser-verified on the 9-frame Qatar-8 drop. Details in `PROGRESS.md`
    (`gwcs`, `bottleneck`, `regions`) with `sys.modules[name] = None` — Python never
    caches a *failed* import, so astropy/photutils re-scanned `sys.path` every frame
    (~60 stats/frame, 0.7 s). ~5 → ~3.4 s/frame.
-3. **Operational rule** — a hidden tab is ~7× slower. Chrome throttles the main
-   thread, and all contents-drive I/O is brokered there, so the unthrottled kernel
-   worker stalls on drive round-trips. Keep the tab in its own *visible* window.
+3. **Operational rules** — two, both the same mechanism: contents-drive I/O is
+   brokered on the main thread, so anything that occupies or throttles that thread
+   stalls the unthrottled kernel worker on drive round-trips.
+   (a) A hidden tab is ~7× slower (Chrome throttles background main threads) —
+   keep the tab in its own *visible* window.
+   (b) Leaving the dropped folder **open in the file browser** is ~1.9× slower
+   (6.5 vs 3.4 s/frame): an open listing makes JupyterLab re-poll the drive, and
+   every poll is an IndexedDB round trip. Close the folder before running.
+   Confirmed 2026-08-10; this is what the long-open 6.5 vs 3.4 gap turned out to
+   be, and it is why upload contention and directory size both came back refuted.
 
 ## 2. Per-stage profile (2026-08-04, 67 frames)
 
@@ -148,9 +155,20 @@ Baseline is the recorded 9-frame Qatar-8 drop: 388 stars every frame, frame
 1. **Direct centroid A/B, one frame, in-browser.** Validation cell computes both
    full-CNN and fast centroids on the first frame and reports the position-delta
    distribution (median, RMS, p95) split into bright / faint-in-frame / off-frame sets.
-   Accept: p95 ≤ FWHM/3 (~0.9 px at FWHM 2.6) for faint in-frame; exactly zero for the
-   bright and off-frame sets. Confirm the in-frame count lands near the expected ~190
-   of 388 — if not, the margin or the WCS is wrong, not the fit.
+   Accept: exactly zero for the bright set, and an in-frame count near the expected
+   ~190 of 388 — if the count is off, the margin or the WCS is wrong, not the fit.
+
+   Two accept criteria written here on 2026-08-10 were mis-specified; both were
+   measured natively on frame `...203212` and the real expectations are:
+   - *"off-frame exactly zero"* — holds for all but ~9 of 194 rows. Those few sit
+     inside the 8 px margin band, where the **stock** path CNNs a mostly fill-padded
+     cutout and returns garbage (deltas up to 18.9 px, impossible for a 15×15
+     cutout). Declining to trust them is the point of the margin. Judge that set by
+     its median (0.000), not its RMS.
+   - *"faint in-frame p95 ≤ FWHM/3"* — measures 1.14 px and cannot do better: it is
+     a delta against the faint-star CNN, whose own noise is 0.5–1.4 px, and a
+     difference from a noisy reference is not an error. The meaningful test is
+     whether faint light curves get *tighter* — see step 2.
 2. **Photometric equivalence.** Same 9-frame drop twice, `FAST_CENTROID` off then on,
    diff the `results` tables. Accept on frame `...203212`: target `tot_count` within
    0.5% of 24813 (shot noise at SNR 82 is ~1.2%, so this is a tighter bar than the
@@ -162,15 +180,42 @@ Baseline is the recorded 9-frame Qatar-8 drop: 388 stars every frame, frame
    fall roughly by the star-count ratio. `fwhm` (the second CNN pass inside `calib`,
    over *detected* stars, not catalog stars) is untouched and should stay ~0.25 s — a
    useful control.
-4. **Endurance.** Once the 9-frame numbers hold, one full-folder run (350 frames), tab
-   in its own visible window. This also closes the open 6.5 vs 3.4 s/frame question
-   from 2026-07-30: `fc87557` added the `binary_opening` `FutureWarning` filter that
-   was the discriminating test for the output-rendering-churn theory, and it has not
-   been exercised on a full folder yet.
+4. **Endurance.** Once the 9-frame numbers hold, one full-folder run (350 frames)
+   with `FAST_CENTROID` on — tab in its own visible window, watched folder closed
+   in the file browser. Do *not* also run a 350-frame baseline: the A/B is what
+   establishes the delta, and a second full run costs hours for nothing the
+   67-frame profile has not already given us.
+
+   The 6.5 vs 3.4 s/frame question this step used to carry is closed (section 1,
+   rule b): it was the open file-browser listing. Both operational rules must hold
+   for the whole run, and for both halves of the A/B, or they confound the timing.
 
 Run with `pixi run build` then `pixi run serve`. JupyterLite gotcha: after a rebuild
 that changes a notebook, delete the notebook in the file browser and reload, or
 IndexedDB shadows the fresh `dist/` copy.
+
+### Native pre-verification (2026-08-10, 9 real Qatar-8 frames)
+
+Steps 1 and 2 were run natively before touching the browser, against the repo's
+`bandaid-src`/`eloy-src` clones (not the `main` checkout that is pip-installed).
+Correctness is therefore already established; the browser run only has to confirm
+timing.
+
+| | baseline | fast |
+|---|---|---|
+| centroid | 0.18 s/frame | 0.06 s/frame (**2.97×**) |
+| target `tot_count` | 24813 | delta **0.000%** on all 9 frames |
+| star count | 388 | 388 |
+| faintest-third light-curve scatter | 0.1948 | **0.1810** |
+
+Frame `...203212` reproduced the recorded baseline exactly (24813 / 82.2 / 2.62),
+194 of 388 stars were on-frame against the predicted ~190, the brightest-first
+assertion passed on real data (median 3×3 peak 1467 vs 303), and the plane's
+corner-to-corner spread was 3.26 px — consistent with the 1.2–3.5 px gradient the
+native offset experiment measured. The predicted faint-star bonus shows up as the
+scatter improvement above. Native centroid is only 0.18 s/frame because native
+numpy has BLAS; the ~3× ratio is what should carry to the browser, putting
+`centroid` near 0.8 s rather than the 0.6 s estimated in section 5.
 
 ## 6. Still open after this round
 

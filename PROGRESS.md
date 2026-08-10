@@ -434,18 +434,22 @@ per-stage profile (2026-08-04), the offset-coherence experiment, and the
 plan for the next optimization. The items below are superseded where they
 overlap.
 
-**Still open / next steps (as of 2026-07-30):**
+**Still open / next steps (as of 2026-07-30, item 1 resolved 2026-08-10):**
 
-1. Explain the remaining 6.5 vs 3.4 s/frame gap between the full-folder
-   and 9-frame runs. Prime suspect: frontend output-rendering churn from
-   the per-frame warning (hundreds of accumulated outputs + the
-   path-resolution stacks above). Discriminating test: add
-   `warnings.filterwarnings("ignore", message=".*binary_opening.*",
-   category=FutureWarning)` to the setup cell and re-run the full folder
-   with the tab visible. If still ~6.5 s, next suspect is DevTools
-   itself being open — close it for a run (the watcher keeps running;
-   its output is buffered).
+1. ~~Explain the remaining 6.5 vs 3.4 s/frame gap between the full-folder
+   and 9-frame runs.~~ **Resolved 2026-08-10: it is the file browser.**
+   6.5 s/frame is with the dropped FITS folder *open* in the sidebar;
+   3.4 s/frame is with it closed. An open directory listing makes
+   JupyterLab re-poll the contents drive, and every one of those polls is
+   an IndexedDB round trip brokered on the main thread — the same
+   mechanism as the hidden-tab throttling, and the reason upload
+   contention and directory size both came back refuted: the variable was
+   never the files, it was whether anything was watching them. The
+   output-rendering-churn theory (per-frame `FutureWarning`) was in the
+   right family but was not the cause; the filter added in `fc87557` is
+   still worth keeping for log readability.
 2. Optional upstream: report/fix the `binary_opening` deprecation in
    eloy (detection.py:70) before skimage 0.28 removes it.
-3. Operational rule (confirmed): run the tab in its own *visible*
-   window; sustained backgrounding is ~7× slower.
+3. Operational rules (both confirmed): run the tab in its own *visible*
+   window, and keep the watched folder *closed* in the file browser.
+   Sustained backgrounding is ~7× slower; an open listing is ~1.9×.

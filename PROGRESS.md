@@ -429,6 +429,11 @@ Results:
   62k console-log lines, all on the same main thread that brokers the
   contents drive.
 
+**Newer performance work lives in `docs/speedup-plan-2026-08.md`** — the
+per-stage profile (2026-08-04), the offset-coherence experiment, and the
+plan for the next optimization. The items below are superseded where they
+overlap.
+
 **Still open / next steps (as of 2026-07-30):**
 
 1. Explain the remaining 6.5 vs 3.4 s/frame gap between the full-folder

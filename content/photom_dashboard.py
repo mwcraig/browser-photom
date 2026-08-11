@@ -23,6 +23,8 @@ from __future__ import annotations
 import io
 import math
 import os
+import statistics
+import time
 import zipfile
 from pathlib import Path
 
@@ -142,16 +144,33 @@ class RunState:
         self.processed = 0
         self.skipped = 0
         self.skips = []
+        self.frame_times = []
 
     def file_uploaded(self, name):
         self.uploaded += 1
 
-    def frame_ok(self, name):
+    def frame_ok(self, name, seconds=None):
         self.processed += 1
+        if seconds is not None:
+            self.frame_times.append(float(seconds))
 
-    def frame_skipped(self, name, reason):
+    def frame_skipped(self, name, reason, seconds=None):
         self.skipped += 1
         self.skips.append((os.path.basename(str(name)), reason))
+        if seconds is not None:
+            self.frame_times.append(float(seconds))
+
+    @property
+    def median_seconds(self):
+        """Median s/frame so far, or None before the first frame lands.
+
+        Median rather than mean: browser stalls produce occasional multi-second
+        outliers (one 9.1 s frame in the 67-frame profile) that would drag a
+        mean away from the number that actually characterises a run.
+        """
+        if not self.frame_times:
+            return None
+        return statistics.median(self.frame_times)
 
     @property
     def remaining(self):
@@ -164,12 +183,16 @@ class RunState:
         return self.total > 0 and self.processed + self.skipped >= self.total
 
     def summary(self):
-        return (
+        text = (
             f"{self.uploaded}/{self.total} uploaded · "
             f"{self.processed} photometered · "
             f"{self.skipped} skipped · "
             f"{self.remaining} remaining"
         )
+        median = self.median_seconds
+        if median is not None:
+            text += f" · median {median:.1f} s/frame"
+        return text
 
 
 # --------------------------------------------------------------------------
@@ -419,11 +442,16 @@ class PhotometryDashboard:
             return
 
         self.state.file_uploaded(base)
+        # Timed here rather than inside process_frame, so the number covers
+        # everything a frame costs the kernel -- including the MEMFS cleanup
+        # -- and so an injected test processor needs no timing code at all.
+        started = time.monotonic()
         ok, reason = self.frames.run(path, base)
+        elapsed = time.monotonic() - started
         if ok:
-            self.state.frame_ok(base)
+            self.state.frame_ok(base, elapsed)
         else:
-            self.state.frame_skipped(base, reason)
+            self.state.frame_skipped(base, reason, elapsed)
         self._send(
             self.drop_zone,
             {"type": "file_done", "name": base, "ok": ok, "reason": reason},
@@ -595,11 +623,12 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
     os.makedirs(results_dir, exist_ok=True)
     # Batch prep is built from the first frame, exactly as the bandaid CLI
     # does with the first file of a batch.
-    batch = {"prep": None}
+    batch = {"prep": None, "n": 0}
 
     def process_frame(path, name):
         # `path` is already the MEMFS copy -- unlike the watch loop there is
         # nothing to copy off the contents drive first.
+        started = time.monotonic()
         if batch["prep"] is None:
             try:
                 batch["prep"] = prepare_batch(path, cnn=cnn, config=config)
@@ -625,6 +654,13 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
             write_starlist_set(by_filter, _Path(results_dir) / (_Path(name).stem + ".star"))
         except FrameError as exc:
             return str(exc)
+        # One line per frame, the same shape the watch notebook printed. The
+        # dashboard's counters alone cannot answer "is this actually faster
+        # than 3.4 s/frame?", which is the whole reason for this design.
+        batch["n"] += 1
+        l4 = by_filter["L4"]
+        log(f"[{batch['n']:>3d}] {time.monotonic() - started:5.1f}s  {name}  "
+            f"{len(l4)} stars  fwhm={l4.meta['fwhm']:.2f}px")
         return None
 
     return process_frame

@@ -88,6 +88,40 @@ def test_summary_reports_every_counter(state):
     assert "skip" in text.lower()
 
 
+def test_frame_times_are_optional(state):
+    state.frame_ok("a.fit")
+    assert state.frame_times == []
+    assert state.median_seconds is None
+    assert "s/frame" not in state.summary()
+
+
+def test_median_seconds_covers_skipped_frames_too(state):
+    # A skipped frame still cost the kernel its time; leaving it out would
+    # flatter the median exactly when frames are failing.
+    state.frame_ok("a.fit", 3.0)
+    state.frame_skipped("b.fit", "no stars", 5.0)
+    state.frame_ok("c.fit", 7.0)
+    assert state.median_seconds == 5.0
+
+
+def test_median_is_robust_to_a_browser_stall(state):
+    for seconds in (3.2, 3.4, 3.3, 41.0):
+        state.frame_ok("x.fit", seconds)
+    assert state.median_seconds == pytest.approx(3.35)
+
+
+def test_summary_reports_the_median_once_frames_have_landed(state):
+    state.frame_ok("a.fit", 3.4)
+    assert "3.4 s/frame" in state.summary()
+
+
+def test_seed_clears_frame_times(state):
+    state.frame_ok("a.fit", 3.4)
+    state.seed(MANIFEST)
+    assert state.frame_times == []
+    assert state.median_seconds is None
+
+
 def test_skip_reasons_are_kept_in_order(state):
     state.frame_skipped("a.fit", "first")
     state.frame_skipped("b.fit", "second")

@@ -127,6 +127,28 @@ def test_a_full_run_reaches_done_and_reports_run_done(tmp_path):
     assert len(drop.of_type("run_done")) == 1
 
 
+def test_every_frame_is_timed_so_the_run_can_report_s_per_frame(tmp_path):
+    # Verification item (d): without this the dashboard can report progress
+    # but not whether it is any faster than the notebook path it replaces.
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}, {"name": "b.fit", "size": 4}])
+    send_file(drop, "a.fit", b"aaaa")
+    send_file(drop, "b.fit", b"bbbb")
+
+    assert len(dash.state.frame_times) == 2
+    assert all(t >= 0 for t in dash.state.frame_times)
+    assert "s/frame" in dash.state.summary()
+
+
+def test_a_skipped_frame_is_timed_too(tmp_path):
+    dash, drop, _, _ = make_dashboard(
+        tmp_path, process_frame=lambda path, name: "too few stars"
+    )
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    send_file(drop, "a.fit", b"aaaa")
+    assert len(dash.state.frame_times) == 1
+
+
 def test_the_memfs_copy_does_not_survive_the_frame(tmp_path):
     _, drop, _, _ = make_dashboard(tmp_path)
     send_manifest(drop, [{"name": "a.fit", "size": 4}])

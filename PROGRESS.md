@@ -534,8 +534,9 @@ resolves in both the host build env (`dash`) and the emscripten kernel env
 (`environment.yml`) at the same pinned version, the exact failure mode the
 version-pin comments above are guarding against.
 
-**Explicitly browser-unverified** — this is the important part, since none
-of the above touches a real browser:
+**Browser status** — (b) below was settled in the browser on 2026-08-11;
+(a), (c) and (d) are still open. Nothing in the host verification above
+touches a real browser, so these are the items that matter:
 
 (a) That a 4 MB binary comm buffer round-trips on xeus-wasm under Voici at
     all, and at what throughput. `content/spike_comm.ipynb` is written to
@@ -543,10 +544,19 @@ of the above touches a real browser:
     real ~4.15 MB Seestar frame size) but has not been run in the browser
     yet — its results table is still blank. The measured MB/s in each
     direction needs to be recorded here once it has been.
-(b) That anywidget custom comm messages (`model.send`/`model.on('msg:custom'
-    ...)`, binary buffers, the ack/back-pressure protocol in
-    `PhotometryDashboard`) behave identically under Voici as they do under
-    plain JupyterLab — untested combination.
+(b) ~~That anywidget custom comm messages behave identically under Voici as
+    under plain JupyterLab.~~ **Resolved 2026-08-11, in the browser.** The
+    dashboard rendered at `/voici/render/photometry_dashboard.html`, the
+    metadata form armed the drop zone, a dropped folder uploaded over the
+    comm, and the pipeline ran: weights downloaded (39.2 MB), fast
+    centroiding installed, batch prep produced 388 photometry stars, and
+    the one-shot ordering check reported `194/388 stars on-frame, CNN on
+    100`. That on-frame count matches the native measurement in
+    `docs/speedup-plan-2026-08.md` §3 exactly, so the WCS projection and
+    the 8 px margin behave the same in the browser as natively. This was
+    the largest single unknown in the design — anywidget under JupyterLite
+    is documented to work only when installed in the distribution, and
+    Voici adds Voilà's rendering layer on top of that; both hold.
 (c) The acceptance criterion for correctness: unzip the downloaded
     starlists and `diff -r` against `results/*.star` from a
     `watch_photometry.ipynb` run on the same Qatar-8 folder with the same
@@ -556,6 +566,17 @@ of the above touches a real browser:
     filesystem-sink-fixed steady state, PROGRESS.md 2026-07-29) if taking
     images off the contents drive entirely is the free speedup it looks
     like on paper. Not yet measured; the number belongs here once it is.
+    **The first browser run could not answer this**: the dashboard logged
+    only skips, so successful frames left no trace but an advancing
+    counter. Fixed in `9132dc6` — `PhotometryDashboard` now times each
+    frame around `FrameProcessor.run`, `RunState` keeps the times and
+    exposes a median (median, not mean: browser stalls throw multi-second
+    outliers, one 9.1 s frame in the 67-frame profile), the progress line
+    shows `median N.N s/frame`, and `make_bandaid_processor` logs the
+    per-frame detail line the watch notebook printed (index, seconds,
+    name, star count, FWHM). `dist-dash/` was rebuilt against this, so the
+    next run reports its own timing. Note frame 1 carries batch prep and
+    the Gaia cone search and will be far slower than the steady state.
 
 **Known accepted regressions** relative to the watch-loop notebooks:
 

@@ -17,6 +17,11 @@ serve = "python -m http.server 8000 --directory dist"
 # Image file server + CORS proxy on :8001 (see content/helper.py), e.g.
 #   pixi run helper ~/Downloads/ey_uma
 helper = "python scripts/local_helper.py"
+test = "pytest"
+# The glob is quoted so node expands it: node >= 22 treats a bare directory
+# positional as a glob pattern and matches the directory itself, not the
+# files under it.
+test-js = "node --test 'tests/js/**/*.test.mjs'"
 
 [dependencies]
 python = ">=3.11"
@@ -24,3 +29,25 @@ pip = "*"
 jupyter_server = "*"
 jupyterlite-core = "*"
 jupyterlite-xeus = ">=5"
+# anywidget must be pinned to the SAME version in environment.yml: `jupyter
+# lite build` copies the prebuilt labextension out of this env's
+# share/jupyter/labextensions, and the front end silently fails to register
+# the widget if that build differs from the one the kernel imports.
+anywidget = "==0.11.0"
+pytest = "*"
+nodejs = "*"
+
+# Voici lives in its own environment on purpose: voici 0.10 -> voici-core pins
+# jupyterlite-core >=0.7,<0.8, and the default environment resolves 0.8.x.
+# Putting voici in [dependencies] would silently downgrade the JupyterLab dev
+# site that `pixi run build` produces.
+[feature.dash.dependencies]
+voici = "*"
+anywidget = "==0.11.0"
+
+[feature.dash.tasks]
+build-dash = { cmd = "voici build --contents content --output-dir dist-dash", depends-on = ["fetch-astrowidgets", "fetch-bandaid", "fetch-eloy", "fetch-starlist-schema"] }
+serve-dash = "python -m http.server 8010 --directory dist-dash"
+
+[environments]
+dash = ["dash"]

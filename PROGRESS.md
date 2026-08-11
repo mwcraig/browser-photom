@@ -453,3 +453,120 @@ overlap.
 3. Operational rules (both confirmed): run the tab in its own *visible*
    window, and keep the watched folder *closed* in the file browser.
    Sustained backgrounding is ~7× slower; an open listing is ~1.9×.
+
+# Voici dashboard for non-Jupyter users (2026-08-11)
+
+Built a Voici dashboard (`content/photometry_dashboard.ipynb`) that a
+non-Jupyter user can drive directly: instructions + metadata form + folder
+drop zone → live progress → a button that downloads a zip of the `.star`
+starlists. `watch_photometry.ipynb` is unchanged and stays as the
+developer/debug path.
+
+Instead of the file browser uploading images to the JupyterLite contents
+drive, a custom `anywidget` drop zone (`content/dropzone.py` +
+`content/dropzone.js`) enumerates the dropped folder in JS and streams each
+image over the widget comm in 1 MiB chunks straight into the kernel's own
+MEMFS at `/tmp`. Images therefore never touch the contents drive; only the
+`.star` outputs still go there, in `results/`. This removes the "keep the
+dropped folder closed in the file browser" rule from the section above —
+there is no contents-drive listing to re-poll — but the visible-tab rule
+(sustained backgrounding ~7× slower) still applies, since the browser main
+thread still brokers whatever IndexedDB reads/writes JupyterLite itself
+does.
+
+New files: `content/photom_dashboard.py` (kernel logic — metadata
+validation, run state, chunk assembly into MEMFS, per-frame processing, zip
+building, the message handler, and `make_bandaid_processor()` which lazily
+builds the real bandaid pipeline so the page renders before the 39 MB CNN
+weights download starts), `content/dashboard_view.py` (the ipywidgets shell:
+three panels — setup/running/done — in one `VBox`, shown and hidden rather
+than swapped so the drop zone's front end is never torn down mid-upload),
+`content/dropzone.py` + `content/dropzone.js` (the two anywidgets and their
+shared ESM front end), `content/fast_centroid.py` (the `FAST_CENTROID` code
+from `docs/speedup-plan-2026-08.md` §5, lifted verbatim out of
+`watch_photometry.ipynb` cell 5 so both paths share it),
+`content/spike_comm.ipynb` (times binary comm buffers in both directions so
+`CHUNK_BYTES` can be set from data), `docs/dashboard.md` (architecture +
+protocol + known limits), `pytest.ini`, `tests/` (80 Python tests in 5
+files) and `tests/js/dropzone.test.mjs` (11 tests, `node --test`, no npm
+deps).
+
+Config: `pixi.toml` gained `anywidget==0.11.0`, `pytest` and `nodejs` in
+`[dependencies]`, `test`/`test-js` tasks, and a separate `dash` feature
+environment carrying `voici` — `voici 0.10.0` pins `jupyterlite-core
+>=0.7,<0.8` while the default env resolves `0.8.1`, so putting voici in the
+default environment would silently downgrade the JupyterLab dev site.
+`environment.yml` gained `anywidget==0.11.0` in the conda `dependencies:`
+block (noarch, as are its three deps) pinned to match — a version mismatch
+between the two fails silently, because `jupyter lite build` copies the
+prebuilt front end out of the host env while the kernel imports the other
+one. `.gitignore` gained `dist-dash/`.
+
+**What the tests cover, and what they deliberately don't.** The 80 Python
+tests (`tests/test_chunk_assembly.py`, `test_dashboard_flow.py`,
+`test_metadata.py`, `test_run_state.py`, `test_zip.py`) exercise
+`content/photom_dashboard.py` end to end against a `FakeWidget` standing in
+for anywidget's comm and an injected `process_frame` callable standing in
+for bandaid — metadata validation, out-of-order/duplicate/malformed chunk
+handling, the manifest→chunk→ack→file_done→run_done message sequence,
+cancel, and zip building. They deliberately do **not** touch
+`content/dashboard_view.py` (the ipywidgets shell — untestable without a
+running front end and explicitly out of scope per its own module
+docstring), the real bandaid pipeline (`make_bandaid_processor`, which
+imports numpy/astropy/bandaid and is only reachable in the browser), or
+anything that needs an actual browser (anywidget's JS side, MEMFS, comm
+buffers). The 11 JS tests (`tests/js/dropzone.test.mjs`, Node's built-in
+`node --test`) cover `content/dropzone.js`'s pure functions —
+`isFitsName`, `collectEntries` (including Chromium's 100-entries-per-call
+`readEntries()` batching), `sliceChunks` — against faked
+`FileSystemEntry`/`DataTransferItem` objects, not a real drag-and-drop or a
+real anywidget model.
+
+**Verified on this machine**: `pixi run test` → 80 passed; `pixi run
+test-js` → 11 passed. The two pixi environments resolve as designed:
+default resolves `jupyterlite-core 0.8.1` + `anywidget 0.11.0`; the `dash`
+environment resolves `jupyterlite-core 0.7.6` + `voici 0.10.0` +
+`voici_core 0.10.0` + `anywidget 0.11.0`. **The build gate passed**:
+`dist-dash/` exists (`pixi run build-dash` has been run), including
+`dist-dash/voici/render/photometry_dashboard.html` and
+`dist-dash/files/photometry_dashboard.ipynb` — this proves `anywidget`
+resolves in both the host build env (`dash`) and the emscripten kernel env
+(`environment.yml`) at the same pinned version, the exact failure mode the
+version-pin comments above are guarding against.
+
+**Explicitly browser-unverified** — this is the important part, since none
+of the above touches a real browser:
+
+(a) That a 4 MB binary comm buffer round-trips on xeus-wasm under Voici at
+    all, and at what throughput. `content/spike_comm.ipynb` is written to
+    settle this (down/up timings at 64 KiB, 256 KiB, 1 MiB, 4 MiB, and a
+    real ~4.15 MB Seestar frame size) but has not been run in the browser
+    yet — its results table is still blank. The measured MB/s in each
+    direction needs to be recorded here once it has been.
+(b) That anywidget custom comm messages (`model.send`/`model.on('msg:custom'
+    ...)`, binary buffers, the ack/back-pressure protocol in
+    `PhotometryDashboard`) behave identically under Voici as they do under
+    plain JupyterLab — untested combination.
+(c) The acceptance criterion for correctness: unzip the downloaded
+    starlists and `diff -r` against `results/*.star` from a
+    `watch_photometry.ipynb` run on the same Qatar-8 folder with the same
+    metadata, expecting byte-identical output. Not yet run.
+(d) The per-frame time, which is the whole performance premise for this
+    dashboard: it should beat 3.4 s/frame (the notebook path's
+    filesystem-sink-fixed steady state, PROGRESS.md 2026-07-29) if taking
+    images off the contents drive entirely is the free speedup it looks
+    like on paper. Not yet measured; the number belongs here once it is.
+
+**Known accepted regressions** relative to the watch-loop notebooks:
+
+- **No resume across a page reload.** `watch_uploads.ipynb`/
+  `watch_photometry.ipynb` process files already sitting in the contents
+  drive's `incoming/`, backed by IndexedDB, so a reload just restarts
+  polling against whatever's still there. The dashboard's drop is a
+  one-shot JS enumeration streamed straight into MEMFS; a reload loses the
+  in-flight run with no way to pick back up mid-folder.
+- **Cancel lands at frame granularity (~3.4 s).** A frame runs synchronously
+  inside a single comm message handler (`PhotometryDashboard._on_chunk`),
+  and the kernel only processes comm messages while idle, so a `cancel`
+  message sent mid-frame is not observed until that frame's handler
+  returns.

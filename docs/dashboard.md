@@ -273,15 +273,44 @@ real Seestar frame's on-disk size) in both directions, and its final code cell
 computes a verdict from the ratio of per-byte cost at 1 MiB vs 4 MiB: below 1.2×,
 1 MiB chunking is already close to free and `CHUNK_BYTES` should stay; above that,
 raising `CHUNK_BYTES` is worth the extra peak memory (spike_comm.ipynb, driver and
-verdict cells). As of this writing the notebook has not yet been run in a browser
-— the results table in its final markdown cell is blank. `CHUNK_BYTES` is 1 MiB by
-default (`photom_dashboard.py:42-46`) precisely so the dashboard's design does not
+verdict cells).
+
+**Run in the browser on 2026-08-11 — half settled.** Every size round-tripped
+with `ok=True` in both directions, including a single 4 MiB buffer and the real
+4,150,000-byte frame size. **Binary comm on xeus-wasm under Voici works and does
+not truncate**, so the base64 fallback below is not needed and nothing rules out a
+larger `CHUNK_BYTES`.
+
+The throughput half did **not** survive scrutiny, and the notebook's own printed
+verdict ("4 MiB is meaningfully cheaper per byte — raising `CHUNK_BYTES` would pay
+off") should be disregarded. **A stale `dist/` was served.** The driver cell in
+`content/` keeps exactly one transfer in flight at a time (`_pump`/`_QUEUE`, whose
+comment explains that firing all ten at once makes every round trip after the
+first include the time spent draining the earlier payloads), but that pacing
+landed at 10:22 and the `dist/` build being served was from 10:19 — so
+`pixi run serve` handed the browser a pre-pacing copy that fires all ten requests
+in a single burst. The result is visible in the output: all ten round trips took
+0.038–0.053 s, a 1.4× spread across a 64× range of sizes. Those are ten timestamps
+taken as one queue drained in a ~50 ms window, not ten independent transfer
+measurements. The `MB/s` column is therefore `nbytes / 0.045 s`, and the reported
+"3.98× cheaper per byte at 4 MiB" is that constant divisor restated, not a
+property of the serialization path.
+
+So **throughput in either direction remains unmeasured**, and `CHUNK_BYTES` stays
+at 1 MiB (`photom_dashboard.py:42-46`) — not because 1 MiB was shown to be
+optimal, but because no data argues for moving it. The dashboard's design does not
 depend on this measurement coming back favorably; the number can be raised later
-if the data says to. If binary comm turns out to be broken outright (not just
-slow — truncated, wrong, or a wedged kernel), the documented fallback is base64
-over the existing JSON `msg:custom` channel, at roughly 33% size overhead — that
+if a clean run says to. To get one: **`pixi run build` first** (a stale `dist/` is
+what invalidated the 2026-08-11 run), then `pixi run serve` → `localhost:8000` →
+run the cells in order, and record the per-size `seconds` column here. With pacing
+in place those times should climb with transfer size; if they sit flat again, the
+served build is stale.
+
+If binary comm had turned out to be broken outright (not just slow — truncated,
+wrong, or a wedged kernel), the documented fallback would have been base64 over
+the existing JSON `msg:custom` channel, at roughly 33% size overhead — that
 changes the transport underneath `ChunkAssembler` and the JS chunk loop, not the
-chunking protocol itself.
+chunking protocol itself. The 2026-08-11 run rules this out.
 
 ## 9. Known limits and open questions
 

@@ -534,16 +534,48 @@ resolves in both the host build env (`dash`) and the emscripten kernel env
 (`environment.yml`) at the same pinned version, the exact failure mode the
 version-pin comments above are guarding against.
 
-**Browser status** — (b) below was settled in the browser on 2026-08-11;
-(a), (c) and (d) are still open. Nothing in the host verification above
-touches a real browser, so these are the items that matter:
+**Browser status** — (b) was settled in the browser on 2026-08-11 and (a)
+was half settled the same day; (c) and (d) are still open. Nothing in the
+host verification above touches a real browser, so these are the items
+that matter:
 
 (a) That a 4 MB binary comm buffer round-trips on xeus-wasm under Voici at
-    all, and at what throughput. `content/spike_comm.ipynb` is written to
-    settle this (down/up timings at 64 KiB, 256 KiB, 1 MiB, 4 MiB, and a
-    real ~4.15 MB Seestar frame size) but has not been run in the browser
-    yet — its results table is still blank. The measured MB/s in each
-    direction needs to be recorded here once it has been.
+    all, and at what throughput. **The "at all" half is resolved
+    2026-08-11, in the browser: it does.** `content/spike_comm.ipynb` was
+    run at all five sizes (64 KiB, 256 KiB, 1 MiB, 4 MiB, 4,150,000 B — a
+    real Seestar frame) in both directions and every one reported
+    `ok=True`, i.e. received length matched requested length, including a
+    single 4 MiB buffer. Binary comm does not truncate or wedge here, so
+    the documented base64-over-JSON fallback (~33% overhead) is not
+    needed.
+
+    **The throughput half is still open, because a stale `dist/` was
+    served, and the notebook's own printed verdict on it is wrong.** It
+    concluded "4 MiB is meaningfully cheaper per byte — raising
+    `CHUNK_BYTES` would pay off"; that does not follow from the run. The
+    driver cell in `content/` keeps one transfer in flight at a time
+    (`_pump`/`_QUEUE`) specifically so each row is an independent round
+    trip — its comment spells out that firing all ten at once makes every
+    trip after the first include the cost of draining the earlier
+    payloads. That pacing was added to `content/spike_comm.ipynb` at
+    10:22:19; the `dist/` that `pixi run serve` was serving had been built
+    at 10:19:31, so the browser got a pre-pacing copy that fires all ten
+    requests in one burst (the executed notebook's code cells are
+    byte-identical to `dist/files/spike_comm.ipynb`; `dist-dash/` was
+    current and would have been fine). The output shows the consequence:
+    all ten round trips took 0.038–0.053 s, a 1.4× spread across a 64×
+    range of sizes, i.e. ten timestamps from one queue draining in a
+    single ~50 ms window rather than ten measurements. The `MB/s` column
+    is just `nbytes / 0.045 s`, and the "3.98× cheaper per byte at 4 MiB"
+    figure is that fixed divisor restated.
+
+    So MB/s in each direction is still unmeasured and still needs to be
+    recorded here. `CHUNK_BYTES` stays at `1 << 20` — not shown optimal,
+    just unchallenged. To settle it: **`pixi run build` first**, then
+    `pixi run serve` → `localhost:8000` → run the cells in order. The
+    per-size `seconds` column is the output that matters, not `MB/s`, and
+    it should climb with transfer size; flat ~45 ms across all five sizes
+    means the served build is stale again.
 (b) ~~That anywidget custom comm messages behave identically under Voici as
     under plain JupyterLab.~~ **Resolved 2026-08-11, in the browser.** The
     dashboard rendered at `/voici/render/photometry_dashboard.html`, the

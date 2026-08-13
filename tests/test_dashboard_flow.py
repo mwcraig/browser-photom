@@ -313,3 +313,40 @@ def test_a_chunk_with_no_buffer_is_an_error(tmp_path):
     send_manifest(drop, [{"name": "a.fit", "size": 4}])
     drop.receive({"type": "chunk", "name": "a.fit", "index": 0, "nchunks": 1}, [])
     assert drop.of_type("error")
+
+
+# --- no handler may raise instead of replying -----------------------------
+#
+# The front end's waiters have no timeout: an `error` (or `zip_error`) message
+# is the only thing that ever unwinds the upload loop. A handler that raised
+# would hang the browser with the drop zone hidden, so every one of these must
+# come back as a message rather than a traceback.
+
+
+def test_a_manifest_entry_with_no_name_is_an_error_not_a_traceback(tmp_path):
+    _, drop, _, _ = make_dashboard(tmp_path)
+    drop.receive({"type": "manifest", "files": [{"size": 4}]})
+    assert drop.of_type("error")
+
+
+def test_a_failing_zip_build_comes_back_on_the_zip_channel(tmp_path):
+    # `rglob("*.star")` matches by name, directories included, so this makes
+    # build_results_zip raise IsADirectoryError -- not the ValueError the
+    # empty-results case raises.
+    _, drop, zipw, _ = make_dashboard(tmp_path)
+    (tmp_path / "results" / "a.star").mkdir(parents=True)
+    zipw.receive({"type": "zip_request"})
+    assert zipw.types() == ["zip_error"]
+    assert drop.sent == []  # must not go to the drop zone: the button waits here
+
+
+def test_a_frame_that_raises_is_a_skip_and_the_run_still_finishes(tmp_path):
+    def explode(path, name):
+        raise RuntimeError("bandaid fell over")
+
+    dash, drop, _, _ = make_dashboard(tmp_path, process_frame=explode)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    send_file(drop, "a.fit", b"aaaa")
+    assert dash.phase == "done"
+    assert dash.state.skipped == 1
+    assert "run_done" in drop.types()

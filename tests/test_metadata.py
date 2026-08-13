@@ -44,6 +44,34 @@ def test_elevation_must_be_numeric():
     assert any("number" in e.lower() for e in errors)
 
 
+@pytest.mark.parametrize("text", ["nan", "NaN", "inf", "-inf", "infinity"])
+def test_non_finite_elevation_is_rejected(text):
+    # float() accepts all of these, and nothing downstream would catch them:
+    # site_elev has no range check at all.
+    meta, errors = validate_metadata(observer="LGEB", site_elev=text)
+    assert "site_elev" not in meta
+    assert any("number" in e.lower() for e in errors)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_lat_lon_are_rejected(value):
+    # The range check is `abs(value) > limit`, which is False for NaN -- so
+    # without an explicit finiteness test a NaN latitude passes validation.
+    meta, errors = validate_metadata(
+        observer="LGEB", site_elev=1675, site_lat=value, site_lon=value
+    )
+    assert "site_lat" not in meta
+    assert "site_lon" not in meta
+    assert len(errors) == 2
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_booleans_are_not_numbers(flag):
+    meta, errors = validate_metadata(observer="LGEB", site_elev=flag)
+    assert "site_elev" not in meta
+    assert any("number" in e.lower() for e in errors)
+
+
 def test_negative_elevation_is_allowed():
     # Below sea level is a real place to observe from (Dead Sea, Death Valley).
     meta, errors = validate_metadata(observer="LGEB", site_elev=-50)

@@ -226,42 +226,53 @@ function renderDropZone({ model, el }) {
       return;
     }
 
-    const entries = [...ev.dataTransfer.items]
-      .filter((item) => item.kind === 'file')
-      .map((item) => item.webkitGetAsEntry())
-      .filter(Boolean);
-
-    // Loose-file drops are rejected on purpose: the workflow is "drop a
-    // folder of frames", and a single stray file is almost always a
-    // mistake worth catching early rather than uploading as a 1-frame run.
-    if (entries.every((entry) => entry.isFile)) {
-      setStatus('Drop a folder of FITS images, not loose files.');
-      return;
-    }
-
-    let found;
-    try {
-      found = await collectEntries(entries);
-    } catch (err) {
-      setStatus(`Error reading folder: ${err && err.message ? err.message : err}`);
-      return;
-    }
-
-    if (found.length === 0) {
-      setStatus('No FITS files (.fit/.fits/.fts) found in that folder.');
-      return;
-    }
-
+    // Claimed before the first await, not after enumeration: walking a folder
+    // of hundreds of frames takes long enough that a second drop landing in
+    // that window would otherwise pass isArmed() and start a concurrent
+    // upload, and the kernel resets its assembler on every manifest -- which
+    // would pull the first run's state out from under it.
     uploading = true;
     paint();
-    setStatus(`Uploading 0 / ${found.length}...`);
 
-    model.send({
-      type: 'manifest',
-      files: found.map((f) => ({ name: basename(f.path), size: f.file.size })),
-    });
-
+    // Once the manifest is out, the kernel is at phase "running" and the view
+    // hides this widget (status line included) until the run ends. So any
+    // failure after that point has to be reported to the kernel, not just
+    // written here where nobody can see it.
+    let manifestSent = false;
     try {
+      const entries = [...ev.dataTransfer.items]
+        .filter((item) => item.kind === 'file')
+        .map((item) => item.webkitGetAsEntry())
+        .filter(Boolean);
+
+      // Loose-file drops are rejected on purpose: the workflow is "drop a
+      // folder of frames", and a single stray file is almost always a
+      // mistake worth catching early rather than uploading as a 1-frame run.
+      if (entries.every((entry) => entry.isFile)) {
+        setStatus('Drop a folder of FITS images, not loose files.');
+        return;
+      }
+
+      let found;
+      try {
+        found = await collectEntries(entries);
+      } catch (err) {
+        setStatus(`Error reading folder: ${err && err.message ? err.message : err}`);
+        return;
+      }
+
+      if (found.length === 0) {
+        setStatus('No FITS files (.fit/.fits/.fts) found in that folder.');
+        return;
+      }
+
+      setStatus(`Uploading 0 / ${found.length}...`);
+      model.send({
+        type: 'manifest',
+        files: found.map((f) => ({ name: basename(f.path), size: f.file.size })),
+      });
+      manifestSent = true;
+
       for (let i = 0; i < found.length; i++) {
         const { path, file } = found[i];
         const name = basename(path);
@@ -287,6 +298,19 @@ function renderDropZone({ model, el }) {
       setStatus(`Uploaded ${found.length} file${found.length === 1 ? '' : 's'}.`);
     } catch (err) {
       setStatus(`Error: ${err && err.message ? err.message : err}`);
+      // Read errors (the file moved, permission lapsed), a dead comm, anything
+      // -- the kernel has no other way to learn this loop died, and would sit
+      // at "running" forever with the drop zone hidden and no download button.
+      // `cancel` is idempotent, so the extra one sent when the kernel's own
+      // error message is what unwound us is harmless.
+      if (manifestSent) {
+        try {
+          model.send({ type: 'cancel' });
+        } catch (sendErr) {
+          // Comm is gone; nothing left to tell it with. Reload is the only
+          // recovery, and the status line above says so as well as it can.
+        }
+      }
     } finally {
       uploading = false;
       paint();
@@ -370,7 +394,15 @@ function renderZip({ model, el }) {
     statusEl.textContent = '';
     button.disabled = true;
     button.textContent = 'Preparing…';
-    model.send({ type: 'zip_request' });
+    try {
+      model.send({ type: 'zip_request' });
+    } catch (err) {
+      // Only a `zip`/`zip_error` reply re-enables the button, and a send that
+      // threw will never get one -- so undo the disable here rather than
+      // leaving the user stuck at "Preparing…" until they reload.
+      statusEl.textContent = `Error: ${err && err.message ? err.message : err}`;
+      paint();
+    }
   });
 
   model.on('change:label', paint);

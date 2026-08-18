@@ -64,14 +64,20 @@ def _as_number(value):
     if value is None or isinstance(value, bool):
         return ("blank", None) if value is None else ("bad", None)
     if isinstance(value, (int, float)):
-        return ("bad", None) if math.isnan(value) else ("ok", float(value))
+        return ("ok", float(value)) if math.isfinite(value) else ("bad", None)
     text = str(value).strip()
     if not text:
         return "blank", None
     try:
-        return "ok", float(text)
+        number = float(text)
     except ValueError:
         return "bad", None
+    # `float()` accepts "nan"/"inf"/"-inf", and neither survives downstream:
+    # site_elev has no range check to catch them, and the lat/lon bound check
+    # is `abs(value) > limit`, which is False for NaN -- so a typed "nan" would
+    # sail through validation and into USER_META, and from there into every
+    # frame's airmass transform.
+    return ("ok", number) if math.isfinite(number) else ("bad", None)
 
 
 def validate_metadata(observer=None, site_elev=None, site_lat=None, site_lon=None):
@@ -426,15 +432,24 @@ class PhotometryDashboard:
 
     def handle_message(self, content, buffers=()):
         kind = (content or {}).get("type")
-        if kind == "manifest":
-            self._on_manifest(content)
-        elif kind == "chunk":
-            self._on_chunk(content, buffers or [])
-        elif kind == "zip_request":
-            self._on_zip_request()
-        elif kind == "cancel":
-            self._on_cancel()
-        # Anything else is ignored: an unknown message must not kill the run.
+        try:
+            if kind == "manifest":
+                self._on_manifest(content)
+            elif kind == "chunk":
+                self._on_chunk(content, buffers or [])
+            elif kind == "zip_request":
+                self._on_zip_request()
+            elif kind == "cancel":
+                self._on_cancel()
+            # Anything else is ignored: an unknown message must not kill the run.
+        except Exception as exc:  # noqa: BLE001 - deliberately broad; see below
+            # The front end's waiters have no timeout: the only thing that ever
+            # rejects one is an error message from here. A handler that raised
+            # instead of replying would leave the upload loop waiting forever
+            # on an ack that is never coming -- and for the whole of phase
+            # "running" the view hides the drop zone, so the user sees a frozen
+            # progress line and nothing else. Report it and let the JS unwind.
+            self._report_failure(kind, f"{type(exc).__name__}: {exc}")
 
     # -- handlers ----------------------------------------------------------
 
@@ -557,6 +572,26 @@ class PhotometryDashboard:
         self._changed()
 
     # -- helpers -----------------------------------------------------------
+
+    def _report_failure(self, kind, reason):
+        """Tell the browser a handler died, on the channel it is listening to.
+
+        A `zip_request` failure has to come back as `zip_error`: the download
+        button is re-enabled only by a `zip`/`zip_error` reply, and an `error`
+        on the drop zone would leave it stuck at "Preparing...". Everything
+        else goes to the drop zone, whose upload loop treats `error` as
+        "reject every pending waiter and cancel the run".
+        """
+        if kind == "zip_request":
+            target, message = self.zip_widget, {"type": "zip_error", "reason": reason}
+        else:
+            target, message = self.drop_zone, {"type": "error", "reason": reason}
+        try:
+            self._send(target, message)
+        except Exception:  # noqa: BLE001 - the comm itself is gone
+            # Nothing left to report with, and raising here would only replace
+            # one silent failure with another.
+            pass
 
     def _send(self, widget, content, buffers=None):
         widget.send(content, buffers=buffers)

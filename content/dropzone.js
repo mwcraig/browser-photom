@@ -353,6 +353,17 @@ function renderDropZone({ model, el }) {
       setStatus(`Uploaded ${files.length} file${files.length === 1 ? '' : 's'}.${skippedSuffix}`);
     } catch (err) {
       setStatus(`Error: ${err && err.message ? err.message : err}`);
+      // Read errors (the file moved, permission lapsed), a dead comm, anything
+      // -- the kernel has no other way to learn this loop died, and would sit
+      // at "running" forever with the drop zone hidden and no download button.
+      // `cancel` is idempotent, so the extra one sent when the kernel's own
+      // error message is what unwound us is harmless.
+      try {
+        model.send({ type: 'cancel' });
+      } catch (sendErr) {
+        // Comm is gone; nothing left to tell it with. Reload is the only
+        // recovery, and the status line above says so as well as it can.
+      }
     } finally {
       uploading = false;
       paint();
@@ -384,58 +395,73 @@ function renderDropZone({ model, el }) {
       return;
     }
 
-    const entries = [...ev.dataTransfer.items]
-      .filter((item) => item.kind === 'file')
-      .map((item) => item.webkitGetAsEntry())
-      .filter(Boolean);
-
-    // Nothing usable was dropped (dragged text/image, or every
-    // webkitGetAsEntry() came back null). Must be checked before the
-    // loose-file check below: [].every(...) is vacuously true, so without
-    // this an empty drop would get the misleading "loose files" message.
-    if (entries.length === 0) {
-      setStatus('Nothing usable was dropped — drag a folder of FITS images.');
-      return;
-    }
-
-    // Loose-file drops are rejected on purpose: the workflow is "drop a
-    // single folder of frames". Using .some() (not .every()) here also
-    // catches a folder dropped together with a stray extra file, which
-    // .every() would let through as a silent partial upload.
-    if (entries.some((entry) => entry.isFile)) {
-      setStatus('Drop a single folder of FITS images, not loose files.');
-      return;
-    }
-
-    // Two or more folders dropped together: a file in one folder could
-    // share a basename with a file in the other, and the kernel flattens
-    // everything to basenames -- so one would silently clobber the other's
-    // results. One folder at a time sidesteps that entirely.
-    if (entries.length > 1) {
-      setStatus('Drop one folder at a time.');
-      return;
-    }
-
-    let found;
+    // Claimed before the first await, not after enumeration: walking a folder
+    // of hundreds of frames takes long enough that a second drop landing in
+    // that window would otherwise pass isArmed() and start a concurrent
+    // upload, and the kernel resets its assembler on every manifest -- which
+    // would pull the first run's state out from under it.
+    uploading = true;
+    paint();
     try {
-      found = await collectEntries(entries);
-    } catch (err) {
-      setStatus(`Error reading folder: ${err && err.message ? err.message : err}`);
-      return;
-    }
+      const entries = [...ev.dataTransfer.items]
+        .filter((item) => item.kind === 'file')
+        .map((item) => item.webkitGetAsEntry())
+        .filter(Boolean);
 
-    if (found.length === 0) {
-      setStatus('No FITS files (.fit/.fits/.fts) found in that folder.');
-      return;
-    }
+      // Nothing usable was dropped (dragged text/image, or every
+      // webkitGetAsEntry() came back null). Must be checked before the
+      // loose-file check below: [].every(...) is vacuously true, so without
+      // this an empty drop would get the misleading "loose files" message.
+      if (entries.length === 0) {
+        setStatus('Nothing usable was dropped — drag a folder of FITS images.');
+        return;
+      }
 
-    const result = validateFound(found);
-    if (!result.ok) {
-      setStatus(result.message);
-      return;
-    }
+      // Loose-file drops are rejected on purpose: the workflow is "drop a
+      // single folder of frames". Using .some() (not .every()) here also
+      // catches a folder dropped together with a stray extra file, which
+      // .every() would let through as a silent partial upload.
+      if (entries.some((entry) => entry.isFile)) {
+        setStatus('Drop a single folder of FITS images, not loose files.');
+        return;
+      }
 
-    await startUpload(result.files, result.emptyCount);
+      // Two or more folders dropped together: a file in one folder could
+      // share a basename with a file in the other, and the kernel flattens
+      // everything to basenames -- so one would silently clobber the other's
+      // results. One folder at a time sidesteps that entirely.
+      if (entries.length > 1) {
+        setStatus('Drop one folder at a time.');
+        return;
+      }
+
+      let found;
+      try {
+        found = await collectEntries(entries);
+      } catch (err) {
+        setStatus(`Error reading folder: ${err && err.message ? err.message : err}`);
+        return;
+      }
+
+      if (found.length === 0) {
+        setStatus('No FITS files (.fit/.fits/.fts) found in that folder.');
+        return;
+      }
+
+      const result = validateFound(found);
+      if (!result.ok) {
+        setStatus(result.message);
+        return;
+      }
+
+      await startUpload(result.files, result.emptyCount);
+    } finally {
+      // startUpload clears this too, but the guards above return before it
+      // ever runs -- without this a rejected drop would leave the zone
+      // dimmed and dead until reload.
+      uploading = false;
+      paint();
+    }
   });
 
   pickerButton.addEventListener('click', () => {
@@ -545,7 +571,15 @@ function renderZip({ model, el }) {
     statusEl.textContent = '';
     button.disabled = true;
     button.textContent = 'Preparing…';
-    model.send({ type: 'zip_request' });
+    try {
+      model.send({ type: 'zip_request' });
+    } catch (err) {
+      // Only a `zip`/`zip_error` reply re-enables the button, and a send that
+      // threw will never get one -- so undo the disable here rather than
+      // leaving the user stuck at "Preparing…" until they reload.
+      statusEl.textContent = `Error: ${err && err.message ? err.message : err}`;
+      paint();
+    }
   });
 
   model.on('change:label', paint);

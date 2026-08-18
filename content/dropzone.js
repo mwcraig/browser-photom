@@ -144,16 +144,21 @@ export function validateFound(found) {
   return { ok: true, files, emptyCount };
 }
 
-// An ack needs only the transport plus a dict update, so 60s is generous
-// slack for a backgrounded/throttled tab without masking a genuinely wedged
-// kernel for very long.
-const ACK_TIMEOUT_MS = 60_000;
+// One timeout tier for every wait. The first frame of a run legitimately
+// takes minutes: a ~39MB weights download, a Gaia cone search, and batch
+// prep all happen before the first file_done, and all of that is slower
+// still on a throttled background tab. With windowed sending (see
+// startUpload) acks share this tier too -- an ack now legitimately arrives
+// a whole frame's compute (or that first-frame setup) after its chunk went
+// out, so the old fast transport-only tier would cancel healthy runs.
+const KERNEL_TIMEOUT_MS = 600_000;
 
-// The first frame of a run legitimately takes minutes: a ~39MB weights
-// download, a Gaia cone search, and batch prep all happen before the first
-// file_done, and all of that is slower still on a throttled background tab.
-// A short timeout here would cancel perfectly healthy runs mid-setup.
-const FILE_DONE_TIMEOUT_MS = 600_000;
+// How many files may have their file_done outstanding before the sender
+// waits. 2 = the frame the kernel is computing plus the one file queued
+// behind it: the sender stays exactly one file ahead, the kernel's unread
+// backlog stays bounded to about one file's bytes, and every pending
+// timeout above spans at most a frame or two rather than a whole run.
+const DONE_LOOKAHEAD = 2;
 
 /**
  * Drop-zone widget: drag a folder of FITS frames in, stream them to the
@@ -309,11 +314,15 @@ function renderDropZone({ model, el }) {
   }
   model.on('msg:custom', onCustomMessage);
 
-  // Shared by the drag-and-drop path and the folder-picker path: send the
-  // manifest, then stream every file's chunks sequentially, waiting for the
-  // kernel's ack/file_done before sending more (it's single-threaded and
-  // each frame takes ~3.4s to process, so flooding the comm would just
-  // pile up unread messages).
+  // Shared by the drag-and-drop path and the folder-picker path. The kernel
+  // is single-threaded and photometers a frame the moment its last chunk
+  // arrives, so a sender that awaited every ack inline would sit idle for
+  // the whole ~3.4s of each frame's compute. Sends are windowed instead:
+  // the sender runs up to one file ahead of the kernel (DONE_LOOKAHEAD), so
+  // the next file is read and queued while the current frame computes, and
+  // acks are collected asynchronously -- they exist to catch a wedged
+  // kernel (each carries a timeout that cancels the run), not to pace
+  // individual chunks.
   async function startUpload(files, emptyCount) {
     uploading = true;
     paint();
@@ -325,31 +334,67 @@ function renderDropZone({ model, el }) {
       files: files.map((f) => ({ name: basename(f.path), size: f.file.size })),
     });
 
+    // First failure wins. Waiters this loop is not currently awaiting must
+    // never reject unobserved (that's an unhandled rejection and a lost
+    // error), so everything stored is guarded: the guard records the first
+    // failure and swallows the rest, and rethrow() surfaces it at the next
+    // point the loop can act on it.
+    let failure = null;
+    const guard = (promise) =>
+      promise.catch((err) => {
+        if (!failure) failure = err;
+      });
+    const rethrow = () => {
+      if (failure) throw failure;
+    };
+
+    const pendingAcks = [];
+    const pendingDone = [];
+
     try {
       for (let i = 0; i < files.length; i++) {
+        while (pendingDone.length >= DONE_LOOKAHEAD) {
+          await pendingDone.shift();
+          rethrow();
+        }
         const { path, file } = files[i];
         const name = basename(path);
         const chunks = sliceChunks(file.size, model.get('chunk_bytes'));
         for (const c of chunks) {
           const buf = await file.slice(c.start, c.end).arrayBuffer();
+          rethrow(); // a kernel error may have landed during the read
           model.send(
             { type: 'chunk', name, index: c.index, nchunks: chunks.length },
             null,
             [buf]
           );
-          await waitFor(
-            (m) => m.type === 'ack' && m.name === name && m.index === c.index,
-            ACK_TIMEOUT_MS,
-            'ack'
+          pendingAcks.push(
+            guard(
+              waitFor(
+                (m) => m.type === 'ack' && m.name === name && m.index === c.index,
+                KERNEL_TIMEOUT_MS,
+                'ack'
+              )
+            )
           );
         }
-        await waitFor(
-          (m) => m.type === 'file_done' && m.name === name,
-          FILE_DONE_TIMEOUT_MS,
-          'file_done'
+        pendingDone.push(
+          guard(
+            waitFor(
+              (m) => m.type === 'file_done' && m.name === name,
+              KERNEL_TIMEOUT_MS,
+              'file_done'
+            )
+          )
         );
-        setStatus(`Uploading ${i + 1} / ${files.length}...`);
+        setStatus(`Uploading ${i + 1} / ${files.length}...${skippedSuffix}`);
       }
+      // Everything is sent; now drain. The guards never reject, so these
+      // awaits always complete and rethrow() reports the first real error.
+      while (pendingAcks.length > 0) await pendingAcks.shift();
+      rethrow(); // a wedged kernel fails here, not after the done drain below
+      while (pendingDone.length > 0) await pendingDone.shift();
+      rethrow();
       setStatus(`Uploaded ${files.length} file${files.length === 1 ? '' : 's'}.${skippedSuffix}`);
     } catch (err) {
       setStatus(`Error: ${err && err.message ? err.message : err}`);

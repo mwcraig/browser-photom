@@ -143,7 +143,8 @@ class RunState:
         self.seed([])
 
     def seed(self, manifest_files):
-        self.names = [os.path.basename(str(f["name"])) for f in manifest_files]
+        self.names = [protocol_name(f["name"]) for f in manifest_files]
+        self.name_set = set(self.names)
         self.total = len(self.names)
         self.total_bytes = sum(int(f.get("size", 0)) for f in manifest_files)
         self.uploaded = 0
@@ -206,6 +207,20 @@ class RunState:
 # --------------------------------------------------------------------------
 
 
+def protocol_name(name):
+    """Reduce a browser-supplied file name to its basename.
+
+    Splits on backslashes as well as slashes: this kernel's os.path is posix
+    (Emscripten), so a Windows-style relative path from a foreign front end
+    would otherwise stay one opaque component -- and never match between the
+    manifest, the chunks, and the ``.star`` it produces.
+    """
+    key = os.path.basename(str(name).replace("\\", "/"))
+    if not key or key in (".", ".."):
+        raise ProtocolError(f"unusable file name {name!r}")
+    return key
+
+
 class ChunkAssembler:
     """Append incoming chunks to ``<tmpdir>/<name>``.
 
@@ -236,10 +251,7 @@ class ChunkAssembler:
         # The name comes from the browser, and /tmp is the kernel's own
         # filesystem: reduce it to a basename so a crafted manifest cannot
         # write outside tmpdir.
-        key = os.path.basename(str(name).replace("\\", "/"))
-        if not key or key in (".", ".."):
-            raise ProtocolError(f"unusable file name {name!r}")
-        return key
+        return protocol_name(name)
 
     def add(self, name, index, nchunks, data):
         """Append one chunk. Returns the finished path, or None if more remain."""
@@ -431,8 +443,12 @@ class PhotometryDashboard:
         self.handle_message(content, buffers)
 
     def handle_message(self, content, buffers=()):
-        kind = (content or {}).get("type")
+        kind = None
         try:
+            # Inside the try on purpose: `content` is whatever the front end
+            # sent, and a non-mapping here must come back as an error message
+            # like any other malformed input, not raise out of the handler.
+            kind = (content or {}).get("type")
             if kind == "manifest":
                 self._on_manifest(content)
             elif kind == "chunk":
@@ -443,12 +459,14 @@ class PhotometryDashboard:
                 self._on_cancel()
             # Anything else is ignored: an unknown message must not kill the run.
         except Exception as exc:  # noqa: BLE001 - deliberately broad; see below
-            # The front end's waiters have no timeout: the only thing that ever
-            # rejects one is an error message from here. A handler that raised
-            # instead of replying would leave the upload loop waiting forever
-            # on an ack that is never coming -- and for the whole of phase
-            # "running" the view hides the drop zone, so the user sees a frozen
-            # progress line and nothing else. Report it and let the JS unwind.
+            # An error message from here is what unwinds the front end's
+            # upload loop; its own watchdog timeouts are a last resort many
+            # minutes long. A handler that raised instead of replying would
+            # leave the loop waiting on an ack that is never coming -- and for
+            # the whole of phase "running" the view hides the drop zone, so
+            # the user sees a frozen progress line and nothing else. Report it
+            # and let the JS unwind. (`kind` stays None if parsing itself
+            # blew up; _report_failure then replies on the drop zone.)
             self._report_failure(kind, f"{type(exc).__name__}: {exc}")
 
     # -- handlers ----------------------------------------------------------
@@ -463,7 +481,7 @@ class PhotometryDashboard:
             self._send(self.drop_zone,
                        {"type": "error", "reason": "manifest listed no files"})
             return
-        names = [os.path.basename(str(f.get("name", ""))) for f in files]
+        names = [protocol_name(f.get("name", "")) for f in files]
         seen, dupes = set(), set()
         for n in names:
             (dupes if n in seen else seen).add(n)
@@ -518,9 +536,22 @@ class PhotometryDashboard:
             name = content["name"]
             index = content["index"]
             nchunks = content["nchunks"]
+            base = protocol_name(name)
+            if self.phase != "running":
+                # No accepted manifest is expecting bytes right now: refuse
+                # rather than stage data for a run that does not exist (or
+                # ended while this chunk was queued).
+                raise ProtocolError(f"{base}: no active run to receive chunks")
+            if base not in self.state.name_set:
+                # `finished` is count-based, so an un-announced file would
+                # otherwise stand in for an announced one: the run could
+                # complete with a manifest entry silently missing from the
+                # results. (The assembler's completed set already refuses
+                # re-sends of a name that has been counted.)
+                raise ProtocolError(f"{base}: file was not in the accepted manifest")
             if not buffers:
-                raise ProtocolError(f"{name}: chunk message carried no buffer")
-            path = self.assembler.add(name, index, nchunks, buffers[0])
+                raise ProtocolError(f"{base}: chunk message carried no buffer")
+            path = self.assembler.add(base, index, nchunks, buffers[0])
         except KeyError as exc:
             self._send(self.drop_zone, {"type": "error", "reason": f"malformed chunk message: missing {exc}"})
             return
@@ -528,7 +559,6 @@ class PhotometryDashboard:
             self._send(self.drop_zone, {"type": "error", "reason": str(exc)})
             return
 
-        base = os.path.basename(str(name))
         self._send(self.drop_zone, {"type": "ack", "name": base, "index": index})
         if path is None:
             return
@@ -565,6 +595,13 @@ class PhotometryDashboard:
         self._send(self.zip_widget, {"type": "zip", "filename": self.zip_name}, [data])
 
     def _on_cancel(self):
+        if self.phase != "running":
+            # The JS error path and its watchdog timers send cancels freely,
+            # and the kernel dispatches queued messages in order -- so a
+            # cancel can arrive just after run_done. A finished run must not
+            # be relabeled Stopped (every starlist is already on disk), and
+            # outside a run there is nothing staged worth clearing.
+            return
         # Only observable between frames: the kernel is single-threaded and a
         # frame runs to completion inside its own handler.
         self.assembler.reset()
@@ -605,8 +642,6 @@ class PhotometryDashboard:
 # The real photometry (browser only)
 # --------------------------------------------------------------------------
 
-WEIGHTS_FILE = "ballet_weights.npz"
-
 
 def _configure_environment():
     """The knobs from `watch_photometry.ipynb` cell 2, all load-bearing."""
@@ -640,83 +675,6 @@ def _configure_environment():
     iers.conf.iers_degraded_accuracy = "ignore"
 
 
-def _load_cnn(log=print):
-    """Ballet weights + the sgemm-routed centroider from cell 3."""
-    import numpy as np
-    import requests
-    from scipy.linalg.blas import sgemm
-    from scipy.special import expit
-
-    from bandaid.ballet_numpy import NumpyBallet, _max_pool_2x2_same
-
-    # The repo/file/revision come from bandaid's own pin, so a weights bump
-    # there cannot leave this path fetching old weights; plain requests, so
-    # huggingface_hub is never needed in the browser.
-    from bandaid.ballet import (
-        _BALLET_HF_REPO_ID,
-        _BALLET_WEIGHTS_FILENAME,
-        _BALLET_WEIGHTS_REVISION,
-    )
-
-    weights_url = (
-        f"https://huggingface.co/{_BALLET_HF_REPO_ID}/resolve/"
-        f"{_BALLET_WEIGHTS_REVISION}/{_BALLET_WEIGHTS_FILENAME}"
-    )
-    if os.path.exists(WEIGHTS_FILE):
-        log(f"Using cached CNN weights ({os.path.getsize(WEIGHTS_FILE) / 1e6:.1f} MB).")
-    else:
-        log("Downloading the ~39 MB Ballet CNN weights (once per browser)...")
-        resp = requests.get(weights_url, timeout=300)
-        resp.raise_for_status()
-        # Write-then-rename: a reload during the 39 MB write (or its
-        # IndexedDB sync) must not leave a partial file that the existence
-        # check above would trust forever. pyodide_http buffers the whole
-        # body before the file opens, so the write is the only exposure.
-        tmp_path = WEIGHTS_FILE + ".part"
-        with open(tmp_path, "wb") as fh:
-            fh.write(resp.content)
-        os.replace(tmp_path, WEIGHTS_FILE)
-        log(f"Downloaded {len(resp.content) / 1e6:.1f} MB.")
-
-    def _conv2d_same_sgemm(x, kernel, bias):
-        """3x3 SAME conv as one im2col GEMM (same math as bandaid's einsum)."""
-        n, h, w, c = x.shape
-        o = kernel.shape[-1]
-        xp = np.pad(x, ((0, 0), (1, 1), (1, 1), (0, 0)))
-        win = np.lib.stride_tricks.sliding_window_view(xp, (3, 3), axis=(1, 2))
-        # (n, h, w, c, 3, 3) -> (n*h*w, 3*3*c) with (i, j, c) column order,
-        # matching the HWIO kernel's reshape to (9*c, o)
-        cols = np.ascontiguousarray(win.transpose(0, 1, 2, 4, 5, 3))
-        out = sgemm(1.0, cols.reshape(n * h * w, 9 * c), kernel.reshape(9 * c, o))
-        return out.reshape(n, h, w, o) + bias
-
-    class SgemmBallet(NumpyBallet):
-        """NumpyBallet with every matmul routed through scipy's BLAS.
-
-        This kernel's numpy links no BLAS at all, so `@`/einsum fall back to
-        scalar loops (~0.35 GFLOP/s measured here); scipy links the wasm
-        openblas build (~8.3 GFLOP/s, 24x). Verified output-identical to
-        NumpyBallet within float32 rounding (< 1e-6 px).
-        """
-
-        def _forward(self, x):
-            p = self.params
-            x = x - x.min(axis=(1, 2, 3), keepdims=True)
-            with np.errstate(invalid="ignore"):
-                x = x / x.max(axis=(1, 2, 3), keepdims=True)
-            for name in ("Conv_0", "Conv_1", "Conv_2"):
-                x = _conv2d_same_sgemm(x, p[name]["kernel"], p[name]["bias"])
-                x = np.maximum(x, 0.0)
-                if name != "Conv_2":
-                    x = _max_pool_2x2_same(x)  # 15 -> 8, then 8 -> 4
-            x = x.reshape(len(x), -1)
-            x = expit(sgemm(1.0, x, p["Dense_0"]["kernel"]) + p["Dense_0"]["bias"])
-            x = expit(sgemm(1.0, x, p["Dense_1"]["kernel"]) + p["Dense_1"]["bias"])
-            return sgemm(1.0, x, p["Dense_2"]["kernel"]) + p["Dense_2"]["bias"]
-
-    return SgemmBallet(model_file=WEIGHTS_FILE)
-
-
 def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=True, log=print):
     """Build the real `process_frame(path, name)` used in the browser.
 
@@ -741,7 +699,9 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
     from bandaid.photometry import process_one_image
     from bandaid.scripts import check_frame_consistency
 
-    cnn = _load_cnn(log=log)
+    from ballet_sgemm import load_cnn
+
+    cnn = load_cnn(log=log)
     # Installed unconditionally: the wrapper delegates to the stock
     # implementation whenever the module flag is False, so passing
     # fast_centroid=False restores stock behavior even in a kernel where an

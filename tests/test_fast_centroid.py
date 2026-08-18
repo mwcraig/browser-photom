@@ -419,6 +419,39 @@ def test_partial_fallback_recentroids_only_the_faint_on_frame_rows():
     assert any("CNN fallback" in m for m in messages)
 
 
+def test_all_stars_off_frame_or_in_margin_returns_projected_positions():
+    """A frame where every aligned star is off-frame or inside the margin
+    band (so `_fc_classify`'s small-field branch hands back an empty
+    bright_idx even though `aligned` itself is non-empty) must not reach
+    the stock centroider with a shape-(0, 2) array -- the real
+    bandaid.photometry.centroid_stars crashes on that (empty zip -> 1-D
+    np.array([]) -> np.isnan(...).any(axis=1) raises AxisError). Instead the
+    projected positions come back unchanged, the same treatment off-frame
+    stars already get individually.
+    """
+    aligned = np.array([
+        [3.0, 100.0],    # inside, within the margin -> band
+        [-5.0, 100.0],   # off-frame (negative x)
+        [405.0, 100.0],  # off-frame (beyond width)
+    ])
+    data = np.zeros((FRAME_H, FRAME_W))
+
+    def orig_like_stock(calibrated_data, aligned_coords, cnn):
+        coords = np.asarray(aligned_coords, dtype=float)
+        # Mirrors what the real ballet_centroid does with a shape-(0, 2)
+        # array: an empty zip collapses it to 1-D, and the isnan check that
+        # follows raises. Asserting here (rather than tolerating the empty
+        # call) is what makes this test actually exercise the guard.
+        assert coords.size > 0, "must not be called with an empty bright set"
+        return coords
+
+    fc._ORIG_CENTROID_STARS = orig_like_stock
+
+    centroids = fc._fc_centroid_stars(data, aligned, cnn=None)
+
+    assert np.array_equal(centroids, aligned)
+
+
 def test_fast_centroid_false_delegates_entirely_to_the_original(monkeypatch):
     fc.FAST_CENTROID = False
 

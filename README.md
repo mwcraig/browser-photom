@@ -203,6 +203,9 @@ directly (against fake `bandaid`/`bandaid.photometry` modules for the
   brightest in-frame stars, plane-fit the offset for the rest), imported by both
   `watch_photometry.ipynb` and the dashboard, so there is one implementation instead of
   two copies to keep in sync.
+- `content/ballet_sgemm.py` — the Ballet CNN loader (weights download/cache plus the
+  sgemm-routed `SgemmBallet`), likewise imported by both front ends for the same
+  one-implementation reason.
 - `content/spike_comm.ipynb` — standalone throughput probe: times a binary comm buffer
   round trip in both directions at several sizes, to check whether `CHUNK_BYTES` (in
   `content/photom_dashboard.py`) should move off 1 MiB.

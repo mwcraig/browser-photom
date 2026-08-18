@@ -185,6 +185,14 @@ def _fc_centroid_stars(calibrated_data, aligned_coords, cnn):
     # Off-frame stars keep their projected position -- identical to what the
     # full-CNN path already returns for them, without paying the CNN.
     centroids = aligned.copy()
+    if len(bright_idx) == 0:
+        # Every aligned star is off-frame or inside the margin band (a small,
+        # badly-pointed field can do this even with `aligned` non-empty).
+        # There is nothing to CNN and nothing to fit a plane from, so this
+        # frame gets its projected positions back -- the same treatment
+        # off-frame stars already get individually -- instead of handing
+        # eloy's centroider a shape-(0, 2) array, which it cannot handle.
+        return centroids
     bright = _ORIG_CENTROID_STARS(calibrated_data, aligned[bright_idx], cnn)
     centroids[bright_idx] = bright
     plane_idx = np.concatenate([faint_idx, band_idx])

@@ -459,8 +459,11 @@ overlap.
 Built a Voici dashboard (`content/photometry_dashboard.ipynb`) that a
 non-Jupyter user can drive directly: instructions + metadata form + folder
 drop zone → live progress → a button that downloads a zip of the `.star`
-starlists. `watch_photometry.ipynb` is unchanged and stays as the
-developer/debug path.
+starlists. The dashboard work itself left `watch_photometry.ipynb` alone,
+and it stays as the developer/debug path. (Not untouched on this branch,
+though: the 2026-08-10 fast-centroid work had already added the notebook's
+implementation and validation cells — recorded in the 2026-08-18 second-batch
+entry, since nothing logged that notebook change at the time.)
 
 Instead of the file browser uploading images to the JupyterLite contents
 drive, a custom `anywidget` drop zone (`content/dropzone.py` +
@@ -689,3 +692,57 @@ backstop for any other front end.
 Suite after the batch: 122 pytest + 16 JS tests, all passing natively.
 Still open, unchanged by this batch: the spike throughput rerun (rebuild
 first) and reading a real median s/frame off a browser run.
+# PR #2 review fixes: the second batch (2026-08-18)
+
+The remaining review threads — the second critical review's five inline
+comments and Copilot's second review, including its five suppressed
+low-confidence comments — were answered on GitHub and, on approval, land
+here. First step was merging the diverged remote head `c35caa7`, whose
+upload-loop cancel-on-error, `handle_message` guard, and claim-before-
+enumeration drop-handler fix came in with the merge.
+
+1. **Windowed upload.** The upload loop no longer serializes upload against
+   photometry: the sender runs up to one file ahead of the kernel
+   (`DONE_LOOKAHEAD = 2` outstanding `file_done`s), reading and queueing the
+   next file while the current frame computes; `ack`s are collected
+   asynchronously and serve as wedge detection. (Merely dropping the
+   `file_done` barrier would have gained almost nothing — acks are sent
+   before processing, so only one chunk can queue behind a compute.) Two
+   consequences, documented in docs/dashboard.md §3: a single 10-minute
+   timeout tier for both waits, since an ack now legitimately arrives a
+   whole frame's compute after its chunk; and a kernel comm backlog bounded
+   at about one file's bytes — the price of the overlap.
+2. **Kernel guards.** `_on_cancel` is a no-op unless a run is active, so a
+   queued cancel arriving after `run_done` no longer relabels a finished
+   run Stopped; `handle_message` parses inside its `try`, so a non-mapping
+   message becomes an error reply instead of an `AttributeError` out of the
+   comm handler; chunks are refused when no run is active and when their
+   name is not in the accepted manifest (count-based `finished` could
+   otherwise complete with an announced file silently missing from the
+   zip); and every protocol name flows through one backslash-tolerant
+   `protocol_name`, so manifest, chunks, `RunState`, and assembler agree
+   even on Windows-style relative paths from a foreign front end.
+3. **Skip-line reset.** The view zeroes `_seen_skips` in its new-run hook
+   instead of inferring a reset from a shrinking skip list — the heuristic
+   never fired when a new run's first `_changed` already carried as many
+   skips as the last run ended with, which the manifest's zero-byte-skip
+   path can produce.
+4. **Empty `bright_idx` guard.** A frame whose aligned stars are all
+   off-frame or inside the margin band gets its projected positions back
+   instead of handing the stock centroider a shape-(0, 2) array it crashes
+   on (empty zip → 1-D array → `AxisError`); covered in
+   `tests/test_fast_centroid.py`.
+5. **`ballet_sgemm.py`.** The Ballet CNN loader (weights download/cache
+   plus the sgemm-routed `SgemmBallet`) is extracted out of
+   `photom_dashboard.py` into a module both front ends import; the
+   notebook's weights cell — the older, already-drifted copy (hardcoded
+   URL, non-atomic write) — now imports it too, closing the last inline
+   duplicate.
+
+Also recorded, belatedly: the 2026-08-10 fast-centroid work added the
+implementation and validation cells to `watch_photometry.ipynb`, and no
+entry logged that notebook change at the time — docs/dashboard.md and the
+2026-08-11 entry above both claimed the notebook untouched, and both are
+now corrected.
+
+Suite after the batch: 142 pytest + 16 JS tests, all passing natively.

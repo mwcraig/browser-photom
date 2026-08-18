@@ -11,7 +11,10 @@ problem — mounting a real disk folder instead of uploading).
 `watch_photometry.ipynb` is the existing developer/debug notebook: open it in
 JupyterLab, run every cell in order, drag a folder onto the file browser's
 `incoming/` panel, and a `while True` loop polls for new files once a second. It
-stays as-is — this work does not touch it.
+keeps that developer/watch workflow, but is not untouched by this work: the
+branch added its fast-centroid and validation cells, and its heavy pieces now
+import the same modules the dashboard uses (`fast_centroid.py`,
+`ballet_sgemm.py`) instead of carrying inline copies that could drift.
 
 The dashboard (`content/photometry_dashboard.ipynb`, rendered through Voici) is a
 second, non-Jupyter front end for the same pipeline: instructions, a metadata form,
@@ -118,10 +121,10 @@ everything happens inside `PhotometryDashboard.handle_message`
 |---|---|---|---|---|
 | `manifest` | JS → kernel | `{type, files:[{name,size},...]}` | none | seeds `RunState` with the exact file count/total bytes and flips `phase` to `"running"` — or refuses the manifest outright (empty, duplicate basenames; see below) (`_on_manifest`, `photom_dashboard.py:441-492`) |
 | `chunk` | JS → kernel | `{type, name, index, nchunks}` | 1 (chunk bytes) | appends bytes to `<tmpdir>/<basename(name)>` (`_on_chunk`, `photom_dashboard.py:501-537`) |
-| `ack` | kernel → JS | `{type, name, index}` | none | the back-pressure — see below |
+| `ack` | kernel → JS | `{type, name, index}` | none | wedge detection — pacing is per-file, see below |
 | `file_done` | kernel → JS | `{type, name, ok, reason}` | none | gates the start of the *next file*'s upload |
 | `run_done` | kernel → JS | `{type}` | none | sent once `RunState.finished`; `phase` → `"done"` |
-| `cancel` | JS → kernel | `{type}` | none | front end sends this when its own upload loop unwinds after an `error`, or when an `ack`/`file_done` wait times out (`dropzone.js:265-285`); ends the run cleanly instead of leaving it stuck at `"running"` |
+| `cancel` | JS → kernel | `{type}` | none | front end sends this when its own upload loop unwinds after an `error`, or when an `ack`/`file_done` wait times out (`dropzone.js:270-291`); ends the run cleanly instead of leaving it stuck at `"running"` |
 | `error` | kernel → JS | `{type, reason}` | none | a malformed `chunk` message or a `ProtocolError` from `ChunkAssembler`, reported without raising into the kernel |
 | `zip_request` | JS → kernel | `{type}` | none | the download button asking for a fresh zip of `results/*.star` |
 | `zip` | kernel → JS | `{type, filename}` | 1 (zip bytes) | the built archive, turned into a `Blob` + object-URL download in `renderZip` (`dropzone.js:337-360`) |
@@ -139,33 +142,35 @@ their chunks, `RunState.frame_skipped` counts them, and a `file_done` with
 (`photom_dashboard.py:478-490`) — a backstop for any front end that doesn't
 already filter 0-byte files client-side, the way this one does.
 
-On the JS side, both kernel waits in the upload loop are now bounded
-(`dropzone.js:147-156`, `:265-285`): 60 s for an `ack`, 10 minutes for a
-`file_done`. The bounds differ because what they're waiting on differs in kind —
-an ack needs only the comm round trip plus a dict update, so 60 s is generous
-slack for a throttled tab without masking a genuinely wedged kernel for long; the
-*first* file's `file_done` legitimately takes minutes, since it carries the
-~39 MB weights download, the Gaia cone search, and batch prep before the first
-frame photometers at all, and all of that is slower again on a backgrounded tab.
+On the JS side, every kernel wait in the upload loop is bounded
+(`dropzone.js:147-161`, `:270-291`): 10 minutes, for `ack` and `file_done`
+alike. One tier, not the old fast-ack/slow-file_done pair, because sends are now
+windowed (see back-pressure below): an ack legitimately arrives a whole frame's
+compute after its chunk went out — and behind the *first* frame sit the ~39 MB
+weights download, the Gaia cone search, and batch prep, all slower again on a
+backgrounded tab, so a transport-sized ack bound would cancel healthy runs.
 Either timeout sends `cancel` to the kernel and rejects with a message telling the
 user to reload — there is no retry that un-wedges a dead wasm kernel from the
 front end, so a reload really is the recovery path.
 
-Two back-pressure mechanisms, at two granularities:
+Back-pressure is per *file*, not per chunk: the sender runs up to one file
+ahead of the kernel (`DONE_LOOKAHEAD = 2` outstanding `file_done`s — the frame
+the kernel is computing plus the one file queued behind it, `dropzone.js:312-397`).
+The next file is read and its chunks queued while the current frame
+photometers, so the browser no longer idles for the ~3.4 s of every frame's
+compute, and the kernel's unread-message backlog stays bounded to about one
+file's bytes rather than growing with the folder. `ack`s are collected
+asynchronously — they exist to catch a wedged kernel (each carries the timeout
+above), not to pace individual chunks.
+`test_the_ack_precedes_the_file_done_it_belongs_to`
+(`tests/test_dashboard_flow.py:109-113`) pins the kernel-side ordering.
 
-- **`ack`** stops the browser from reading a 4 MB file into memory faster than a
-  ~3.4 s frame can be photometered. The JS upload loop sends one `chunk` and
-  `await`s the matching `ack` before slicing the next piece of the *same* file
-  (`dropzone.js:329-345`).
-- **`file_done`** is what stops the next *file* from starting — the loop
-  additionally waits for `file_done` after a file's last chunk is acked
-  (`dropzone.js:346-350`) before moving to the next entry in the manifest.
-  `test_the_ack_precedes_the_file_done_it_belongs_to`
-  (`tests/test_dashboard_flow.py:109-113`) pins the ordering.
-
-1 MiB chunking (`CHUNK_BYTES = 1 << 20`, `photom_dashboard.py:48`) means peak
-kernel memory during an upload is one chunk plus whatever `/tmp` already holds for
-that file — not the whole image twice. `DropZone.chunk_bytes` is a synced
+1 MiB chunking (`CHUNK_BYTES = 1 << 20`, `photom_dashboard.py:48`) keeps any
+single append small: each handled chunk costs one chunk of transient memory
+plus whatever `/tmp` already holds for that file — never the whole image twice.
+With the one-file send window the comm queue may additionally hold up to about
+one file's worth of not-yet-handled chunk messages; that bounded backlog is the
+deliberate price of overlapping upload with compute. `DropZone.chunk_bytes` is a synced
 traitlet that `PhotometryDashboard.attach()` overwrites from the Python-side
 constant (`photom_dashboard.py:420-421`, `dropzone.py:37`), so the two sides
 cannot disagree about chunk size.
@@ -189,8 +194,8 @@ the last two into one visual treatment: both are `finished`, both show the done
 panel, and the headline text is "Finished" for `"done"` or "Stopped" for
 `"cancelled"` (`dashboard_view.py:229-268`). `"cancelled"` is reached when the
 front end sends `cancel` after a protocol error unwinds its own upload loop
-(`dropzone.js:288-296`), or after an `ack`/`file_done` wait times out
-(`dropzone.js:265-285`; see §3); without offering the download there too, frames
+(`dropzone.js:293-307`), or after an `ack`/`file_done` wait times out
+(`dropzone.js:270-291`; see §3); without offering the download there too, frames
 that *did* succeed before the error would be stranded.
 
 | phase | setup panel | run panel (progress/log) | drop zone | done panel |

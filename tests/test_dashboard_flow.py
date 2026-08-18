@@ -230,6 +230,25 @@ def test_results_survive_a_cancel(tmp_path):
         assert zf.namelist() == ["a.star"]
 
 
+def test_a_cancel_after_the_run_finished_does_not_relabel_it(tmp_path):
+    # The JS error path and its watchdog timers send cancels freely, and the
+    # kernel dispatches queued messages in order -- so a cancel can trail
+    # run_done. Flipping "done" to "cancelled" would warn about partial
+    # results when every starlist is on disk.
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    send_file(drop, "a.fit", b"aaaa")
+    assert dash.phase == "done"
+    drop.receive({"type": "cancel"})
+    assert dash.phase == "done"
+
+
+def test_a_cancel_with_no_run_is_ignored(tmp_path):
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    drop.receive({"type": "cancel"})
+    assert dash.phase == "setup"
+
+
 def test_an_unknown_message_type_is_ignored(tmp_path):
     dash, drop, _, _ = make_dashboard(tmp_path)
     drop.receive({"type": "wat"})
@@ -450,6 +469,50 @@ def test_a_manifest_entry_with_no_name_is_an_error_not_a_traceback(tmp_path):
     _, drop, _, _ = make_dashboard(tmp_path)
     drop.receive({"type": "manifest", "files": [{"size": 4}]})
     assert drop.of_type("error")
+
+
+def test_a_non_mapping_message_is_an_error_not_a_traceback(tmp_path):
+    # anywidget passes whatever JSON the front end sent; a bare string is
+    # truthy, so `(content or {})` alone would not save .get() from it.
+    _, drop, _, _ = make_dashboard(tmp_path)
+    drop.receive("nonsense")
+    assert drop.of_type("error")
+
+
+def test_a_chunk_for_an_unannounced_file_is_refused(tmp_path):
+    # `finished` is count-based: an un-announced file must not stand in for
+    # an announced one, or the run completes with a manifest entry silently
+    # missing from the results.
+    dash, drop, _, calls = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}, {"name": "b.fit", "size": 4}])
+    send_file(drop, "a.fit", b"aaaa")
+    send_file(drop, "evil.fit", b"eeee")
+
+    assert drop.of_type("error")
+    assert dash.phase == "running"  # b.fit is still owed
+    assert calls == [("a.fit", b"aaaa")]
+
+
+def test_a_chunk_with_no_active_run_is_refused(tmp_path):
+    dash, drop, _, calls = make_dashboard(tmp_path)
+    drop.receive({"type": "chunk", "name": "a.fit", "index": 0, "nchunks": 1}, [b"aaaa"])
+    assert drop.of_type("error")
+    assert dash.phase == "setup"
+    assert calls == []
+
+
+def test_a_backslash_path_is_flattened_like_a_slash_one(tmp_path):
+    # This kernel's os.path is posix, so without normalization a Windows-style
+    # relative path from a foreign front end would never match between its own
+    # manifest, chunks, and results.
+    dash, drop, _, calls = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "night1\\a.fit", "size": 4}])
+    send_file(drop, "night1\\a.fit", b"aaaa")
+
+    assert dash.phase == "done"
+    assert calls == [("a.fit", b"aaaa")]
+    acks = drop.of_type("ack")
+    assert acks and all(c["name"] == "a.fit" for c, _ in acks)
 
 
 def test_a_failing_zip_build_comes_back_on_the_zip_channel(tmp_path):

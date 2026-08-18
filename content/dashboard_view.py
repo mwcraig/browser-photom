@@ -170,6 +170,12 @@ class DashboardView:
         # one-shot check are judgements about one folder's field, and the
         # done panel invites dropping another folder.
         self._setup_error = None
+        # Explicit, not inferred: the old "skip count went down, must be a
+        # new run" heuristic in _on_change never fired when a new run's first
+        # _changed already carried as many skips as the last run ended with
+        # (which the manifest's zero-byte-skip path can produce), silently
+        # swallowing the new run's first skip lines.
+        self._seen_skips = 0
         reset = getattr(self._processor, "reset", None)
         if reset is not None:
             reset()
@@ -219,8 +225,7 @@ class DashboardView:
         state = dashboard.state
         # A skip must never be silent: it is the only sign a frame produced no
         # starlist, and the counts alone do not say which frame or why.
-        if len(state.skips) < self._seen_skips:
-            self._seen_skips = 0  # a new manifest reset the counters
+        # _on_new_run zeroes _seen_skips when a manifest restarts the counters.
         for name, reason in state.skips[self._seen_skips:]:
             self.log(f"[skip] {name}: {reason}")
         self._seen_skips = len(state.skips)

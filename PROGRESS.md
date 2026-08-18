@@ -623,3 +623,69 @@ that matter:
   and the kernel only processes comm messages while idle, so a `cancel`
   message sent mid-frame is not observed until that frame's handler
   returns.
+
+# PR #2 review fixes: the agreed six-item batch (2026-08-18)
+
+The critical-review pass on PR #2 (Copilot's 9 comments + the multi-agent
+review's 13, all replied to on GitHub) converged on a six-item fix batch;
+this lands all of it. One design question was settled along the way: rather
+than *detecting* duplicate basenames across subfolders, the front end now
+refuses anything but a **single flat folder** (one folder per drop, FITS
+files directly inside it), which makes the collision structurally
+impossible; `_on_manifest` refuses duplicate-basename manifests as a
+backstop for any other front end.
+
+1. **Per-drop state reset.** `make_bandaid_processor` returns a
+   `process_frame` with a `reset()` hook (clears the cached batch prep,
+   re-arms `fast_centroid`'s one-shot check); `DashboardView._on_new_run`
+   calls it on every manifest, so a second folder re-preps from its own
+   first frame instead of running against the previous folder's catalog.
+   The same hook clears a new pipeline-setup-failure latch: the first setup
+   exception (weights download, bandaid import) logs loudly and every later
+   frame in that run skips immediately with "pipeline setup failed
+   earlier", so a 350-frame folder drains in seconds instead of retrying a
+   39 MB download per frame. Re-dropping retries setup exactly once.
+2. **Collision-proof uploads.** The flat-folder rule above, plus a
+   `completed` set in `ChunkAssembler`: a chunk stream restarting at index
+   0 for an already-finished name raises `ProtocolError` instead of
+   double-counting (which could flip the run to "done" with a manifest
+   entry still un-uploaded).
+3. **`results/` lifecycle.** Cleared once per kernel session, on the first
+   manifest; drops within a session stay additive, and the done panel now
+   states how many `.star` files the zip will actually contain, so the
+   counters and the zip can no longer silently disagree.
+4. **Drop-zone guards.** Empty drops, loose files (`some(isFile)` — a
+   folder-plus-stray drop is now rejected, not silently partially
+   uploaded), multi-folder drops, and 0-byte files are all handled
+   client-side with specific messages; `_on_manifest` refuses empty
+   manifests (previously wedged the state machine at "running" forever)
+   and immediately skips 0-size entries; both kernel waits have timeouts
+   (ack 60 s, file_done 10 min — the first frame legitimately takes
+   minutes) that cancel the run and say to reload; and a keyboard-
+   accessible "choose a folder" button (`webkitdirectory`) feeds the same
+   upload path.
+5. **`fast_centroid` consolidation.** `watch_photometry.ipynb` now imports
+   `content/fast_centroid.py` (the inline cell-5 copy, already diverged, is
+   gone — README's "one implementation" claim is now true), the
+   `fast_centroid=False` toggle is actually wired (install always, sync the
+   module flag; the wrapper delegates to stock when False), edge-band stars
+   are plane-corrected instead of left at their projected position (the
+   stock path returns garbage in that band — measured, notebook validation
+   cell), the sparse-fit fallback keeps the bright CNN centroids and
+   re-runs the original only on the faint rows, and
+   `tests/test_fast_centroid.py` (22 tests) covers the numerics — numpy is
+   now a host pixi dependency for exactly that file.
+6. **Small stuff.** Chunk payloads are written as memoryviews (no
+   `.tobytes()` copy); the weights download writes to a temp name and
+   `os.replace`s into place, with the URL built from `bandaid.ballet`'s own
+   pinned repo/revision constants; the setup form is shown whenever a run
+   is not active (metadata editable between folders, as designed);
+   `spike_comm.ipynb` now crc32-verifies payloads on both receivers (the
+   2026-08-11 "intact" was length-only; the planned throughput rerun will
+   earn the word); docs de-numbered the test counts and rewrote the §9
+   open-questions list down to what is actually open (comm throughput,
+   end-to-end per-frame time).
+
+Suite after the batch: 122 pytest + 16 JS tests, all passing natively.
+Still open, unchanged by this batch: the spike throughput rerun (rebuild
+first) and reading a real median s/frame off a browser run.

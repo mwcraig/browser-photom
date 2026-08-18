@@ -108,6 +108,15 @@ The form needs an AAVSO **observer code** and the site's **elevation** in
 metres; latitude and longitude come from the frame headers (`SITELAT`/
 `SITELONG`) and only need to be filled in to override what the headers say.
 
+Drop one folder at a time, with its FITS files directly inside it — not
+nested in subfolders — or use the keyboard-accessible "…or choose a folder"
+button next to the drop zone; a nested export has to be dropped one leaf
+folder at a time. `results/` accumulates `.star` files across every folder
+dropped in one browser session, so the download button always bundles
+everything so far, but it's cleared automatically on the very first drop
+after a fresh page load, so a new session never inherits a previous one's
+leftovers.
+
 `watch_photometry.ipynb` remains the developer/debug path — same pipeline,
 run from a notebook one frame at a time, with the file-browser watch loop
 described above (and its two operational rules). The dashboard removes the
@@ -137,16 +146,20 @@ would need a hosted CORS proxy instead.
 ## Tests
 
 ```sh
-pixi run test      # host-side pytest: 80 tests over content/photom_dashboard.py
-pixi run test-js   # Node's built-in test runner: 11 tests over content/dropzone.js
+pixi run test      # host-side pytest over content/photom_dashboard.py and content/fast_centroid.py
+pixi run test-js   # Node's built-in test runner over content/dropzone.js
 ```
 
-`pixi run test` needs neither numpy, astropy nor bandaid — the photometry
-step is injected into `PhotometryDashboard` as a plain `process_frame(path,
-name)` callable, so the tests exercise metadata validation, chunk assembly,
-run-state bookkeeping, zip building, and the full message-handler protocol
-against a fake widget. `pixi run test-js` has no npm dependencies; it runs
-directly against `content/dropzone.js` with `node --test`.
+Most of `pixi run test` needs neither numpy, astropy nor bandaid — the
+photometry step is injected into `PhotometryDashboard` as a plain
+`process_frame(path, name)` callable, so those tests exercise metadata
+validation, chunk assembly, run-state bookkeeping, zip building, and the full
+message-handler protocol against a fake widget. `tests/test_fast_centroid.py`
+is the exception: it exercises `content/fast_centroid.py`'s NumPy numerics
+directly (against fake `bandaid`/`bandaid.photometry` modules for the
+`install()` tests), which is why numpy is now a host pixi dependency.
+`pixi run test-js` has no npm dependencies; it runs directly against
+`content/dropzone.js` with `node --test`.
 
 ## Layout
 
@@ -175,8 +188,9 @@ directly against `content/dropzone.js` with `node --test`.
   (`ChunkAssembler`), per-frame processing (`FrameProcessor`), the `.star` zip builder,
   and the widget message handler (`PhotometryDashboard`); `make_bandaid_processor()`
   lazily builds the real bandaid pipeline. Everything above that function is import-free
-  beyond the standard library, so `pixi run test` needs neither numpy, astropy, nor
-  bandaid.
+  beyond the standard library, so this module's own tests need neither numpy, astropy,
+  nor bandaid — `pixi run test` as a whole now also runs `tests/test_fast_centroid.py`,
+  which does need numpy, for `content/fast_centroid.py`'s numerics.
 - `content/dashboard_view.py` — the ipywidgets shell: one `VBox` with three panels
   (setup form, running progress, done/download) that are shown and hidden rather than
   swapped in and out of `children`, so the drop zone's front end is never torn down
@@ -186,9 +200,9 @@ directly against `content/dropzone.js` with `node --test`.
   and streams each FITS file to the kernel over the widget comm in `CHUNK_BYTES`-sized
   (1 MiB) chunks, so images never touch the contents drive — only the `.star` outputs do.
 - `content/fast_centroid.py` — the `FAST_CENTROID` fast-centroiding code (CNN only the
-  brightest in-frame stars, plane-fit the offset for the rest) lifted out of
-  `watch_photometry.ipynb` cell 5, so the notebook and the dashboard share one
-  implementation.
+  brightest in-frame stars, plane-fit the offset for the rest), imported by both
+  `watch_photometry.ipynb` and the dashboard, so there is one implementation instead of
+  two copies to keep in sync.
 - `content/spike_comm.ipynb` — standalone throughput probe: times a binary comm buffer
   round trip in both directions at several sizes, to check whether `CHUNK_BYTES` (in
   `content/photom_dashboard.py`) should move off 1 MiB.
@@ -211,13 +225,16 @@ directly against `content/dropzone.js` with `node --test`.
 - `pytest.ini` — points `pytest` at `tests/` and puts `content/` on `pythonpath`, since
   the kernel imports these modules by sitting in the same directory rather than as an
   installed package.
-- `tests/` — 80 host-side tests (`pixi run test`) across 5 files, covering
+- `tests/` — host-side tests (`pixi run test`), covering
   `content/photom_dashboard.py`'s metadata validation, chunk assembly, run-state
-  bookkeeping, zip building, and the full message-handler flow, all against a fake
-  widget and an injected `process_frame` callable.
-- `tests/js/dropzone.test.mjs` — 11 tests (`pixi run test-js`, Node's built-in test
+  bookkeeping, zip building, and the full message-handler flow (all against a fake
+  widget and an injected `process_frame` callable), plus `test_fast_centroid.py`'s
+  direct coverage of `content/fast_centroid.py`'s NumPy numerics — the one file in
+  the suite that needs numpy.
+- `tests/js/dropzone.test.mjs` — tests (`pixi run test-js`, Node's built-in test
   runner, no npm dependencies) for `content/dropzone.js`'s FITS-name filtering,
-  folder-entry collection, and chunk slicing.
+  folder-entry collection, chunk slicing, and the drop-validation rules
+  (`validateFound`: flat-folder-only, empty-file filtering).
 - `pixi.toml` — host-side build tooling (jupyterlite-core, jupyterlite-xeus); also the
   `dash` feature environment (`voici`, pinned `anywidget`) used by `pixi run build-dash`.
 - `PLAN.md` — the original three-step plan (trim the WASM env, local file access,

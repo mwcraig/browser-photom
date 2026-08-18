@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isFitsName, collectEntries, sliceChunks } from '../../content/dropzone.js';
+import { isFitsName, collectEntries, sliceChunks, validateFound } from '../../content/dropzone.js';
 
 // ---------------------------------------------------------------------
 // Fake FileSystemEntry helpers.
@@ -192,4 +192,74 @@ test('sliceChunks splits a larger file into contiguous, non-overlapping chunks',
 test('sliceChunks throws RangeError for non-positive chunkBytes', () => {
   assert.throws(() => sliceChunks(100, 0), RangeError);
   assert.throws(() => sliceChunks(100, -1), RangeError);
+});
+
+// ---------------------------------------------------------------------
+// validateFound
+// ---------------------------------------------------------------------
+//
+// Plain { path, file: { size } } objects -- validateFound only ever reads
+// f.path and f.file.size, so no DOM/FileSystemEntry fakes are needed here.
+
+test('validateFound passes a flat folder (path has exactly 2 segments) through unchanged', () => {
+  const found = [
+    { path: 'roll/a.fits', file: { size: 100 } },
+    { path: 'roll/b.fits', file: { size: 200 } },
+  ];
+
+  const result = validateFound(found);
+
+  assert.deepEqual(result, { ok: true, files: found, emptyCount: 0 });
+});
+
+test('validateFound rejects a nested path and names the offending path in the message', () => {
+  const found = [
+    { path: 'roll/a.fits', file: { size: 100 } },
+    { path: 'roll/sub/b.fits', file: { size: 200 } },
+  ];
+
+  const result = validateFound(found);
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /roll\/sub\/b\.fits/);
+});
+
+test('validateFound filters out 0-byte files and reports the correct emptyCount', () => {
+  const found = [
+    { path: 'roll/a.fits', file: { size: 0 } },
+    { path: 'roll/b.fits', file: { size: 100 } },
+    { path: 'roll/c.fits', file: { size: 0 } },
+  ];
+
+  const result = validateFound(found);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(
+    result.files.map((f) => f.path),
+    ['roll/b.fits']
+  );
+  assert.equal(result.emptyCount, 2);
+});
+
+test('validateFound rejects a folder where every FITS file is 0 bytes', () => {
+  const found = [
+    { path: 'roll/a.fits', file: { size: 0 } },
+    { path: 'roll/b.fits', file: { size: 0 } },
+  ];
+
+  const result = validateFound(found);
+
+  assert.deepEqual(result, {
+    ok: false,
+    message: 'All FITS files in that folder are empty (0 bytes).',
+  });
+});
+
+test('validateFound treats an empty input array as trivially valid with nothing to upload', () => {
+  // Callers are responsible for the "no FITS files found" status before
+  // calling validateFound; on its own, an empty array is vacuously a valid
+  // (empty) flat folder with nothing empty to skip.
+  const result = validateFound([]);
+
+  assert.deepEqual(result, { ok: true, files: [], emptyCount: 0 });
 });

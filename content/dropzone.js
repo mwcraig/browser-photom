@@ -102,6 +102,60 @@ export function sliceChunks(size, chunkBytes) {
 }
 
 /**
+ * Validate a sorted array of { path, file } (as produced by collectEntries
+ * or the folder-picker <input>) and filter out 0-byte files before upload.
+ * Pure and DOM-free so node can test it directly without a fake DOM.
+ *
+ * Returns { ok: false, message } to reject the whole drop/pick, or
+ * { ok: true, files, emptyCount } with the (possibly narrowed) file list
+ * to actually upload.
+ */
+export function validateFound(found) {
+  // "Simple folder" rule: every FITS file must sit exactly one level below
+  // the dropped/picked folder root ("FolderName/file.fits"). Files with
+  // matching basenames in two different subfolders would otherwise
+  // silently overwrite each other's .star results downstream, because the
+  // kernel keys everything on the basename alone -- a single flat folder
+  // makes that collision structurally impossible. Subfolders with no FITS
+  // files in them are harmless and never show up here: collectEntries only
+  // collects FITS files, so an all-non-FITS subfolder contributes nothing.
+  for (const { path } of found) {
+    if (path.split('/').length !== 2) {
+      return {
+        ok: false,
+        message:
+          `FITS files inside subfolders are not supported (e.g. ${path}) — ` +
+          'drop a folder whose FITS files sit directly in it.',
+      };
+    }
+  }
+
+  // A 0-byte .fits is never a processable frame. Filter it out client-side
+  // rather than sending it through the manifest/chunk/file_done protocol --
+  // otherwise the (untested) empty-buffer path through the kernel comm only
+  // ever gets exercised by a user's broken file, in production.
+  const files = found.filter((f) => f.file.size > 0);
+  const emptyCount = found.length - files.length;
+
+  if (found.length > 0 && files.length === 0) {
+    return { ok: false, message: 'All FITS files in that folder are empty (0 bytes).' };
+  }
+
+  return { ok: true, files, emptyCount };
+}
+
+// An ack needs only the transport plus a dict update, so 60s is generous
+// slack for a backgrounded/throttled tab without masking a genuinely wedged
+// kernel for very long.
+const ACK_TIMEOUT_MS = 60_000;
+
+// The first frame of a run legitimately takes minutes: a ~39MB weights
+// download, a Gaia cone search, and batch prep all happen before the first
+// file_done, and all of that is slower still on a throttled background tab.
+// A short timeout here would cancel perfectly healthy runs mid-setup.
+const FILE_DONE_TIMEOUT_MS = 600_000;
+
+/**
  * Drop-zone widget: drag a folder of FITS frames in, stream them to the
  * kernel over the comm in chunk_bytes-sized pieces.
  */
@@ -132,10 +186,38 @@ function renderDropZone({ model, el }) {
   container.appendChild(statusEl);
   el.appendChild(container);
 
+  // Keyboard/touch-accessible alternative to the drag-only container above.
+  // This is a SIBLING of the container, not a child of it -- the container's
+  // children are pointer-events:none (see above) to stop dragleave flicker,
+  // and a real button needs to receive click/keyboard events.
+  const pickerRow = document.createElement('div');
+  pickerRow.style.marginTop = '0.75em';
+  pickerRow.style.textAlign = 'center';
+
+  const pickerButton = document.createElement('button');
+  pickerButton.type = 'button';
+  pickerButton.textContent = '…or choose a folder';
+  pickerButton.style.background = 'var(--jp-layout-color1, #fff)';
+  pickerButton.style.color = 'var(--jp-ui-font-color1, #333)';
+  pickerButton.style.border = '1px solid var(--jp-border-color1, #ccc)';
+  pickerButton.style.borderRadius = '4px';
+  pickerButton.style.padding = '0.4em 0.8em';
+  pickerButton.style.transition = 'opacity 0.15s ease';
+
+  const pickerInput = document.createElement('input');
+  pickerInput.type = 'file';
+  pickerInput.webkitdirectory = true;
+  pickerInput.multiple = true;
+  pickerInput.style.display = 'none';
+
+  pickerRow.appendChild(pickerButton);
+  pickerRow.appendChild(pickerInput);
+  el.appendChild(pickerRow);
+
   // Local upload-in-progress flag. This is NOT the `armed` model trait
   // (that one is driven by Python, from form validity upstream) — it's a
-  // purely local guard so a second drop can't interleave with an upload
-  // already streaming to the single-threaded kernel.
+  // purely local guard so a second drop/pick can't interleave with an
+  // upload already streaming to the single-threaded kernel.
   let uploading = false;
 
   function isArmed() {
@@ -144,13 +226,17 @@ function renderDropZone({ model, el }) {
 
   function paint() {
     hintEl.textContent = model.get('hint');
-    if (isArmed()) {
+    const armed = isArmed();
+    if (armed) {
       container.style.opacity = '1';
       container.style.cursor = 'default';
     } else {
       container.style.opacity = '0.5';
       container.style.cursor = 'not-allowed';
     }
+    pickerButton.disabled = !armed;
+    pickerButton.style.opacity = armed ? '1' : '0.5';
+    pickerButton.style.cursor = armed ? 'pointer' : 'not-allowed';
   }
   paint();
 
@@ -171,9 +257,31 @@ function renderDropZone({ model, el }) {
   // and slow the comm dispatch to a crawl over the course of an upload.
   const waiters = [];
 
-  function waitFor(predicate) {
+  // Each waiter times out on its own: a healthy kernel always acks or
+  // finishes, so if it stops responding entirely (a wedged Pyodide worker,
+  // a crashed tab) the upload loop must not hang forever. There is no retry
+  // that un-wedges a dead wasm kernel from here, so a page reload really is
+  // the recovery path -- the rejected error says so.
+  function waitFor(predicate, timeoutMs, label) {
     return new Promise((resolve, reject) => {
-      waiters.push({ predicate, resolve, reject });
+      const waiter = { predicate };
+      waiter.resolve = (msg) => {
+        clearTimeout(waiter.timer);
+        resolve(msg);
+      };
+      waiter.reject = (err) => {
+        clearTimeout(waiter.timer);
+        reject(err);
+      };
+      waiter.timer = setTimeout(() => {
+        const idx = waiters.indexOf(waiter);
+        if (idx !== -1) waiters.splice(idx, 1);
+        // Tell the kernel the run is over, or it sits at "running" forever
+        // waiting for chunks this loop has given up on sending.
+        model.send({ type: 'cancel' });
+        reject(new Error(`${label}: kernel not responding — reload the page to recover`));
+      }, timeoutMs);
+      waiters.push(waiter);
     });
   }
 
@@ -200,6 +308,56 @@ function renderDropZone({ model, el }) {
     }
   }
   model.on('msg:custom', onCustomMessage);
+
+  // Shared by the drag-and-drop path and the folder-picker path: send the
+  // manifest, then stream every file's chunks sequentially, waiting for the
+  // kernel's ack/file_done before sending more (it's single-threaded and
+  // each frame takes ~3.4s to process, so flooding the comm would just
+  // pile up unread messages).
+  async function startUpload(files, emptyCount) {
+    uploading = true;
+    paint();
+    const skippedSuffix = emptyCount > 0 ? ` (skipped ${emptyCount} empty file(s))` : '';
+    setStatus(`Uploading 0 / ${files.length}...${skippedSuffix}`);
+
+    model.send({
+      type: 'manifest',
+      files: files.map((f) => ({ name: basename(f.path), size: f.file.size })),
+    });
+
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const { path, file } = files[i];
+        const name = basename(path);
+        const chunks = sliceChunks(file.size, model.get('chunk_bytes'));
+        for (const c of chunks) {
+          const buf = await file.slice(c.start, c.end).arrayBuffer();
+          model.send(
+            { type: 'chunk', name, index: c.index, nchunks: chunks.length },
+            null,
+            [buf]
+          );
+          await waitFor(
+            (m) => m.type === 'ack' && m.name === name && m.index === c.index,
+            ACK_TIMEOUT_MS,
+            'ack'
+          );
+        }
+        await waitFor(
+          (m) => m.type === 'file_done' && m.name === name,
+          FILE_DONE_TIMEOUT_MS,
+          'file_done'
+        );
+        setStatus(`Uploading ${i + 1} / ${files.length}...`);
+      }
+      setStatus(`Uploaded ${files.length} file${files.length === 1 ? '' : 's'}.${skippedSuffix}`);
+    } catch (err) {
+      setStatus(`Error: ${err && err.message ? err.message : err}`);
+    } finally {
+      uploading = false;
+      paint();
+    }
+  }
 
   container.addEventListener('dragenter', (ev) => {
     ev.preventDefault(); // required, or the browser navigates to the file
@@ -231,11 +389,30 @@ function renderDropZone({ model, el }) {
       .map((item) => item.webkitGetAsEntry())
       .filter(Boolean);
 
+    // Nothing usable was dropped (dragged text/image, or every
+    // webkitGetAsEntry() came back null). Must be checked before the
+    // loose-file check below: [].every(...) is vacuously true, so without
+    // this an empty drop would get the misleading "loose files" message.
+    if (entries.length === 0) {
+      setStatus('Nothing usable was dropped — drag a folder of FITS images.');
+      return;
+    }
+
     // Loose-file drops are rejected on purpose: the workflow is "drop a
-    // folder of frames", and a single stray file is almost always a
-    // mistake worth catching early rather than uploading as a 1-frame run.
-    if (entries.every((entry) => entry.isFile)) {
-      setStatus('Drop a folder of FITS images, not loose files.');
+    // single folder of frames". Using .some() (not .every()) here also
+    // catches a folder dropped together with a stray extra file, which
+    // .every() would let through as a silent partial upload.
+    if (entries.some((entry) => entry.isFile)) {
+      setStatus('Drop a single folder of FITS images, not loose files.');
+      return;
+    }
+
+    // Two or more folders dropped together: a file in one folder could
+    // share a basename with a file in the other, and the kernel flattens
+    // everything to basenames -- so one would silently clobber the other's
+    // results. One folder at a time sidesteps that entirely.
+    if (entries.length > 1) {
+      setStatus('Drop one folder at a time.');
       return;
     }
 
@@ -252,45 +429,43 @@ function renderDropZone({ model, el }) {
       return;
     }
 
-    uploading = true;
-    paint();
-    setStatus(`Uploading 0 / ${found.length}...`);
-
-    model.send({
-      type: 'manifest',
-      files: found.map((f) => ({ name: basename(f.path), size: f.file.size })),
-    });
-
-    try {
-      for (let i = 0; i < found.length; i++) {
-        const { path, file } = found[i];
-        const name = basename(path);
-        const chunks = sliceChunks(file.size, model.get('chunk_bytes'));
-        // Files, and chunks within a file, are sent strictly sequentially:
-        // the kernel is single-threaded and each frame takes ~3.4s to
-        // process, so the JS side must wait for each ack before sending
-        // more bytes rather than flooding the comm.
-        for (const c of chunks) {
-          const buf = await file.slice(c.start, c.end).arrayBuffer();
-          model.send(
-            { type: 'chunk', name, index: c.index, nchunks: chunks.length },
-            null,
-            [buf]
-          );
-          await waitFor(
-            (m) => m.type === 'ack' && m.name === name && m.index === c.index
-          );
-        }
-        await waitFor((m) => m.type === 'file_done' && m.name === name);
-        setStatus(`Uploading ${i + 1} / ${found.length}...`);
-      }
-      setStatus(`Uploaded ${found.length} file${found.length === 1 ? '' : 's'}.`);
-    } catch (err) {
-      setStatus(`Error: ${err && err.message ? err.message : err}`);
-    } finally {
-      uploading = false;
-      paint();
+    const result = validateFound(found);
+    if (!result.ok) {
+      setStatus(result.message);
+      return;
     }
+
+    await startUpload(result.files, result.emptyCount);
+  });
+
+  pickerButton.addEventListener('click', () => {
+    if (!isArmed()) {
+      setStatus('Enter the observer code and site elevation first.');
+      return;
+    }
+    pickerInput.click();
+  });
+
+  pickerInput.addEventListener('change', async () => {
+    const found = [...pickerInput.files]
+      .map((file) => ({ path: file.webkitRelativePath || file.name, file }))
+      .filter((f) => isFitsName(basename(f.path)))
+      .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    // Let the same folder be picked again later (e.g. after fixing it).
+    pickerInput.value = '';
+
+    if (found.length === 0) {
+      setStatus('No FITS files (.fit/.fits/.fts) found in that folder.');
+      return;
+    }
+
+    const result = validateFound(found);
+    if (!result.ok) {
+      setStatus(result.message);
+      return;
+    }
+
+    await startUpload(result.files, result.emptyCount);
   });
 
   model.on('change:armed', paint);

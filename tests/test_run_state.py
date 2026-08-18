@@ -126,3 +126,12 @@ def test_skip_reasons_are_kept_in_order(state):
     state.frame_skipped("a.fit", "first")
     state.frame_skipped("b.fit", "second")
     assert [r for _, r in state.skips] == ["first", "second"]
+
+
+def test_seeding_with_no_files_leaves_the_run_unfinishable():
+    # `finished` requires total > 0, which is why an empty manifest must be
+    # refused upstream rather than seeded: it could never reach "done".
+    s = RunState()
+    s.seed([])
+    assert s.total == 0
+    assert not s.finished

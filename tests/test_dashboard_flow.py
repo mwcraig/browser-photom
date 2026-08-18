@@ -313,3 +313,127 @@ def test_a_chunk_with_no_buffer_is_an_error(tmp_path):
     send_manifest(drop, [{"name": "a.fit", "size": 4}])
     drop.receive({"type": "chunk", "name": "a.fit", "index": 0, "nchunks": 1}, [])
     assert drop.of_type("error")
+
+
+# --- manifest guards ------------------------------------------------------
+
+
+def test_an_empty_manifest_is_refused_instead_of_wedging_the_run(tmp_path):
+    # `finished` requires total > 0, so seeding [] would park the run at
+    # "running" (drop zone hidden) with no way out short of a kernel restart.
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [])
+    assert dash.phase == "setup"
+    assert drop.of_type("error")
+    assert dash.state.total == 0
+
+
+def test_duplicate_basenames_in_a_manifest_are_refused(tmp_path):
+    # /tmp staging and results/<stem>.star are keyed on the basename, so a
+    # manifest whose names collide after flattening would silently overwrite.
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(
+        drop,
+        [{"name": "sub1/a.fit", "size": 4}, {"name": "sub2/a.fit", "size": 4}],
+    )
+    assert dash.phase == "setup"
+    errors = drop.of_type("error")
+    assert len(errors) == 1
+    assert "a.fit" in errors[0][0]["reason"]
+
+
+def test_a_zero_size_manifest_entry_is_skipped_without_an_upload(tmp_path):
+    dash, drop, _, calls = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 0}, {"name": "b.fit", "size": 4}])
+
+    done = drop.of_type("file_done")
+    assert len(done) == 1
+    assert done[0][0]["name"] == "a.fit"
+    assert done[0][0]["ok"] is False
+    assert dash.state.skipped == 1
+
+    # A front end that uploads the empty file anyway is refused, so the
+    # never-browser-verified empty-binary-buffer transport path stays unused.
+    drop.receive({"type": "chunk", "name": "a.fit", "index": 0, "nchunks": 1}, [b""])
+    assert drop.of_type("error")
+
+    send_file(drop, "b.fit", b"bbbb")
+    assert dash.phase == "done"
+    assert calls == [("b.fit", b"bbbb")]
+
+
+def test_an_all_zero_size_manifest_finishes_immediately(tmp_path):
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 0}])
+    assert dash.phase == "done"
+    assert drop.of_type("run_done")
+
+
+def test_a_resent_completed_file_is_refused_not_double_counted(tmp_path):
+    dash, drop, _, calls = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}, {"name": "b.fit", "size": 4}])
+    send_file(drop, "a.fit", b"aaaa")
+    send_file(drop, "a.fit", b"aaaa")  # resent from index 0
+
+    assert drop.of_type("error")
+    assert dash.state.processed == 1
+    assert calls == [("a.fit", b"aaaa")]
+    # The duplicate must not have flipped the run to "done" while b.fit is
+    # still un-uploaded.
+    assert dash.phase == "running"
+
+
+# --- results lifecycle ----------------------------------------------------
+
+
+def test_stale_results_are_cleared_on_the_first_manifest_of_a_session(tmp_path):
+    # results/ lives on the browser-persistent drive and the Voici page has
+    # no file browser to clean it with, so last night's target would ride
+    # along in tonight's zip forever.
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "old.star").write_text("#stale\n")
+    _, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    assert not (results / "old.star").exists()
+
+
+def test_results_accumulate_across_drops_within_a_session(tmp_path):
+    # Only the FIRST manifest clears: the done panel promises "drop another
+    # folder to keep adding".
+    dash, drop, zipw, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    send_file(drop, "a.fit", b"aaaa")
+    send_manifest(drop, [{"name": "b.fit", "size": 4}])
+    send_file(drop, "b.fit", b"bbbb")
+
+    zipw.receive({"type": "zip_request"})
+    (_, buffers) = zipw.of_type("zip")[0]
+    with zipfile.ZipFile(io.BytesIO(buffers[0])) as zf:
+        assert zf.namelist() == ["a.star", "b.star"]
+
+
+def test_a_refused_manifest_does_not_clear_stale_results(tmp_path):
+    # The clearing is tied to a run actually starting.
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "old.star").write_text("#stale\n")
+    _, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [])
+    assert (results / "old.star").exists()
+
+
+# --- the per-drop hook ----------------------------------------------------
+
+
+def test_on_manifest_fires_once_per_accepted_manifest(tmp_path):
+    seen = []
+    _, drop, _, _ = make_dashboard(
+        tmp_path, on_manifest=lambda d: seen.append(d.state.total)
+    )
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    assert seen == [1]
+    send_manifest(drop, [])  # refused -> must not fire
+    assert seen == [1]
+    send_manifest(drop, [{"name": "b.fit", "size": 4}, {"name": "c.fit", "size": 4}])
+    assert seen == [1, 2]

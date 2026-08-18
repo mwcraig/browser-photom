@@ -11,6 +11,7 @@ Nothing here is exercised by `pixi run test`: the tested surface is
 """
 
 from collections import deque
+from pathlib import Path
 
 import ipywidgets as W
 from IPython.display import display
@@ -29,8 +30,10 @@ INSTRUCTIONS = """
   <li>Enter your <b>AAVSO observer code</b> and the <b>elevation</b> of your
       observing site. Latitude and longitude are read from the image headers;
       fill them in only to override what the headers say.</li>
-  <li>Drag the <b>folder</b> of FITS frames onto the drop zone below. Every
-      frame is plate-solved, photometered, and written to a starlist.</li>
+  <li>Drag the <b>folder</b> of FITS frames onto the drop zone below (or use
+      the &ldquo;choose a folder&rdquo; button). Drop one folder at a time, with the
+      FITS files directly inside it &mdash; not in subfolders. Every frame is
+      plate-solved, photometered, and written to a starlist.</li>
   <li>When the run finishes, download the starlists as a single zip.</li>
 </ol>
 <p style="line-height:1.6">
@@ -59,6 +62,11 @@ class DashboardView:
         self._meta = {}
         self._log = deque(maxlen=LOG_LINES)
         self._seen_skips = 0
+        # Latched by the first pipeline-setup failure and cleared on the next
+        # manifest, so a run whose setup died fail-fasts the rest of its
+        # frames instead of re-attempting the 39 MB weights download (with a
+        # 300 s timeout) on every one of them.
+        self._setup_error = None
         # None until the first frame arrives: building it downloads 39 MB of
         # CNN weights, and the form has to be usable before that happens.
         self._processor = process_frame
@@ -74,6 +82,7 @@ class DashboardView:
             tmpdir=tmpdir,
             chunk_bytes=chunk_bytes,
             on_change=self._on_change,
+            on_manifest=self._on_new_run,
         ).attach()
 
         self._build()
@@ -154,17 +163,38 @@ class DashboardView:
 
     # -- photometry --------------------------------------------------------
 
+    def _on_new_run(self, _dashboard):
+        # Every drop is a fresh batch: retry a failed setup exactly once per
+        # drop rather than once per session, and re-prep the pipeline from
+        # the new folder's first frame -- batch prep and the fast-centroid
+        # one-shot check are judgements about one folder's field, and the
+        # done panel invites dropping another folder.
+        self._setup_error = None
+        reset = getattr(self._processor, "reset", None)
+        if reset is not None:
+            reset()
+
     def _process_frame(self, path, name):
+        if self._setup_error is not None:
+            # Returned as a skip reason, so a 350-frame folder drains in
+            # seconds ("pipeline setup failed earlier" per frame) instead of
+            # grinding for hours re-attempting setup on every frame.
+            return f"pipeline setup failed earlier: {self._setup_error}"
         if not self._processor_is_real:
             # Deferred to the first frame: this downloads 39 MB of CNN weights
             # and imports bandaid, and the form has to be usable before that.
             self.log("Setting up the pipeline (first frame only)...")
-            self._processor = make_bandaid_processor(
-                self._meta,
-                self.results_dir,
-                fast_centroid=self.fast_centroid,
-                log=self.log,
-            )
+            try:
+                self._processor = make_bandaid_processor(
+                    self._meta,
+                    self.results_dir,
+                    fast_centroid=self.fast_centroid,
+                    log=self.log,
+                )
+            except Exception as exc:  # noqa: BLE001 - any setup failure latches
+                self._setup_error = f"{type(exc).__name__}: {exc}"
+                self.log(f"Pipeline setup failed: {self._setup_error}")
+                raise
             self._processor_is_real = True
         return self._processor(path, name)
 
@@ -214,14 +244,23 @@ class DashboardView:
         finished = phase in ("done", "cancelled")
         if finished:
             headline = "Finished" if phase == "done" else "Stopped"
+            # The zip bundles everything in results/, which within a session
+            # is cumulative across drops -- so say what the zip will actually
+            # hold, or a second run's counters and the zip contents would
+            # silently disagree.
+            n_star = sum(1 for _ in Path(self.results_dir).rglob("*.star"))
             self.done_summary.value = (
                 f"<h3>{headline}</h3><p>{state.processed} frame(s) photometered, "
-                f"{state.skipped} skipped. Download the starlists below, or "
+                f"{state.skipped} skipped. Download the starlists below "
+                f"({n_star} file{'' if n_star == 1 else 's'} in the zip), or "
                 f"drop another folder to keep adding to them.</p>"
             )
             self.zip_widget.enabled = True
 
-        _show(self.setup_panel, phase == "setup")
+        # Shown whenever a run is not active, not just before the first one:
+        # the meta dict is read live on every frame, so the form must stay
+        # editable between folders -- which is what its docstring promises.
+        _show(self.setup_panel, phase != "running")
         _show(self.run_panel, phase != "setup")
         _show(self.done_panel, finished)
         # The drop zone is only ever hidden, never detached: detaching would

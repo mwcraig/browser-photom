@@ -172,3 +172,29 @@ def test_a_frame_that_deleted_its_own_copy_is_not_an_error(tmp_path):
 
     fp = FrameProcessor(lambda path, name: os.remove(path))
     assert fp.run(_frame(tmp_path), "a.fit") == (True, None)
+
+
+def test_a_completed_file_cannot_be_resent_until_reset(asm):
+    # A chunk stream restarting at index 0 for a finished name would
+    # re-register as brand new and double-count the frame upstream.
+    asm.add("a.fit", 0, 1, b"aaaa")
+    with pytest.raises(ProtocolError):
+        asm.add("a.fit", 0, 1, b"aaaa")
+    asm.reset()
+    path = asm.add("a.fit", 0, 1, b"bbbb")
+    with open(path, "rb") as f:
+        assert f.read() == b"bbbb"
+
+
+def test_mark_completed_refuses_chunks_for_that_name(asm):
+    asm.mark_completed("a.fit")
+    with pytest.raises(ProtocolError):
+        asm.add("a.fit", 0, 1, b"aaaa")
+
+
+def test_a_non_contiguous_memoryview_payload_is_written_correctly(asm):
+    # write() needs a contiguous buffer; the assembler must fall back to a
+    # copy for the (never observed, but legal) non-contiguous case.
+    path = asm.add("a.fit", 0, 1, memoryview(b"abcdef")[::2])
+    with open(path, "rb") as f:
+        assert f.read() == b"ace"

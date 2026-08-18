@@ -212,6 +212,11 @@ class ChunkAssembler:
         self.tmpdir = str(tmpdir)
         os.makedirs(self.tmpdir, exist_ok=True)
         self._open = {}
+        # Files fully assembled since the last reset. A chunk stream that
+        # restarts at index 0 for a name already processed would otherwise
+        # re-register as brand new, double-count in RunState, and could flip
+        # the run to "done" with a real manifest entry still un-uploaded.
+        self._completed = set()
 
     @property
     def pending(self):
@@ -233,6 +238,8 @@ class ChunkAssembler:
     def add(self, name, index, nchunks, data):
         """Append one chunk. Returns the finished path, or None if more remain."""
         key = self._key(name)
+        if key in self._completed:
+            raise ProtocolError(f"{key}: file was already uploaded in this run")
         try:
             index, nchunks = int(index), int(nchunks)
         except (TypeError, ValueError):
@@ -240,9 +247,16 @@ class ChunkAssembler:
         if nchunks < 1 or not 0 <= index < nchunks:
             raise ProtocolError(f"{key}: chunk {index} of {nchunks} is out of range")
         try:
-            payload = memoryview(data).tobytes()
+            # No .tobytes(): file.write takes the memoryview directly, so the
+            # chunk is not copied a second time while the comm buffer is
+            # still alive.
+            payload = memoryview(data)
         except TypeError:
             raise ProtocolError(f"{key}: chunk {index} carried no binary buffer") from None
+        if not payload.contiguous:
+            # Transport buffers are observed contiguous, but that is not
+            # contractual, and write() needs a contiguous view.
+            payload = payload.tobytes()
 
         entry = self._open.get(key)
         if entry is None:
@@ -268,6 +282,7 @@ class ChunkAssembler:
         if entry["next"] < entry["nchunks"]:
             return None
         del self._open[key]
+        self._completed.add(key)
         return entry["path"]
 
     def discard(self, name):
@@ -280,9 +295,14 @@ class ChunkAssembler:
         except OSError:
             pass
 
+    def mark_completed(self, name):
+        """Refuse any future chunks for ``name`` (until the next reset)."""
+        self._completed.add(self._key(name))
+
     def reset(self):
         for key in list(self._open):
             self.discard(key)
+        self._completed.clear()
 
 
 class FrameProcessor:
@@ -374,6 +394,7 @@ class PhotometryDashboard:
         chunk_bytes=CHUNK_BYTES,
         zip_name=ZIP_NAME,
         on_change=None,
+        on_manifest=None,
     ):
         self.drop_zone = drop_zone
         self.zip_widget = drop_zone if zip_widget is None else zip_widget
@@ -381,11 +402,13 @@ class PhotometryDashboard:
         self.chunk_bytes = int(chunk_bytes)
         self.zip_name = zip_name
         self.on_change = on_change
+        self.on_manifest = on_manifest
 
         self.state = RunState()
         self.assembler = ChunkAssembler(tmpdir)
         self.frames = FrameProcessor(process_frame)
         self.phase = "setup"
+        self._results_cleared = False
         os.makedirs(self.results_dir, exist_ok=True)
 
     # -- wiring ------------------------------------------------------------
@@ -416,10 +439,64 @@ class PhotometryDashboard:
     # -- handlers ----------------------------------------------------------
 
     def _on_manifest(self, content):
+        files = content.get("files") or []
+        if not files:
+            # `finished` requires total > 0, so seeding an empty manifest
+            # would park the run at "running" forever, with the drop zone
+            # hidden and no way to retry short of a kernel restart. The
+            # front end rejects 0-file drops; this guards every other one.
+            self._send(self.drop_zone,
+                       {"type": "error", "reason": "manifest listed no files"})
+            return
+        names = [os.path.basename(str(f.get("name", ""))) for f in files]
+        seen, dupes = set(), set()
+        for n in names:
+            (dupes if n in seen else seen).add(n)
+        if dupes:
+            # /tmp staging and results/<stem>.star are both keyed on the
+            # basename, so duplicates would silently overwrite each other.
+            # The front end refuses non-flat folders, which makes collisions
+            # impossible there; this backs it up for any other front end.
+            self._send(self.drop_zone, {
+                "type": "error",
+                "reason": ("duplicate file name(s) in manifest: "
+                           + ", ".join(sorted(dupes))),
+            })
+            return
+        if not self._results_cleared:
+            # Session-scoped results lifecycle: the first drop after a
+            # kernel start clears previous sessions' starlists (the Voici
+            # page has no file browser to do it by hand), while later drops
+            # in the same session keep adding, as the done panel promises.
+            self._clear_results()
+            self._results_cleared = True
         self.assembler.reset()  # a second drop starts clean
-        self.state.seed(content.get("files") or [])
+        self.state.seed(files)
         self.phase = "running"
+        if self.on_manifest is not None:
+            self.on_manifest(self)
+        # A 0-byte .fits is never a processable frame: skip it here rather
+        # than exercise the one transport case (an empty binary buffer) that
+        # has never been verified in a browser. The front end filters these
+        # client-side; this covers any other front end -- including refusing
+        # their chunks, via the completed set.
+        for name, entry in zip(names, files):
+            if int(entry.get("size", 0)) == 0:
+                self.assembler.mark_completed(name)
+                self.state.frame_skipped(name, "empty file (0 bytes)")
+                self._send(self.drop_zone, {
+                    "type": "file_done", "name": name, "ok": False,
+                    "reason": "empty file (0 bytes)",
+                })
+        self._finish_if_done()
         self._changed()
+
+    def _clear_results(self):
+        for path in Path(self.results_dir).rglob("*.star"):
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
     def _on_chunk(self, content, buffers):
         try:
@@ -456,10 +533,13 @@ class PhotometryDashboard:
             self.drop_zone,
             {"type": "file_done", "name": base, "ok": ok, "reason": reason},
         )
-        if self.state.finished:
+        self._finish_if_done()
+        self._changed()
+
+    def _finish_if_done(self):
+        if self.state.finished and self.phase == "running":
             self.phase = "done"
             self._send(self.drop_zone, {"type": "run_done"})
-        self._changed()
 
     def _on_zip_request(self):
         try:
@@ -491,12 +571,6 @@ class PhotometryDashboard:
 # --------------------------------------------------------------------------
 
 WEIGHTS_FILE = "ballet_weights.npz"
-# Same repo/file/revision bandaid's own download_weights() pins, fetched with
-# plain requests so huggingface_hub is never needed in the browser.
-WEIGHTS_URL = (
-    "https://huggingface.co/lgrcia/ballet/resolve/"
-    "cfebd20240ce3fb694f6403a244f37f971e7780b/centroid_15x15.npz"
-)
 
 
 def _configure_environment():
@@ -540,14 +614,33 @@ def _load_cnn(log=print):
 
     from bandaid.ballet_numpy import NumpyBallet, _max_pool_2x2_same
 
+    # The repo/file/revision come from bandaid's own pin, so a weights bump
+    # there cannot leave this path fetching old weights; plain requests, so
+    # huggingface_hub is never needed in the browser.
+    from bandaid.ballet import (
+        _BALLET_HF_REPO_ID,
+        _BALLET_WEIGHTS_FILENAME,
+        _BALLET_WEIGHTS_REVISION,
+    )
+
+    weights_url = (
+        f"https://huggingface.co/{_BALLET_HF_REPO_ID}/resolve/"
+        f"{_BALLET_WEIGHTS_REVISION}/{_BALLET_WEIGHTS_FILENAME}"
+    )
     if os.path.exists(WEIGHTS_FILE):
         log(f"Using cached CNN weights ({os.path.getsize(WEIGHTS_FILE) / 1e6:.1f} MB).")
     else:
         log("Downloading the ~39 MB Ballet CNN weights (once per browser)...")
-        resp = requests.get(WEIGHTS_URL, timeout=300)
+        resp = requests.get(weights_url, timeout=300)
         resp.raise_for_status()
-        with open(WEIGHTS_FILE, "wb") as fh:
+        # Write-then-rename: a reload during the 39 MB write (or its
+        # IndexedDB sync) must not leave a partial file that the existence
+        # check above would trust forever. pyodide_http buffers the whole
+        # body before the file opens, so the write is the only exposure.
+        tmp_path = WEIGHTS_FILE + ".part"
+        with open(tmp_path, "wb") as fh:
             fh.write(resp.content)
+        os.replace(tmp_path, WEIGHTS_FILE)
         log(f"Downloaded {len(resp.content) / 1e6:.1f} MB.")
 
     def _conv2d_same_sgemm(x, kernel, bias):
@@ -614,10 +707,14 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
     from bandaid.scripts import check_frame_consistency
 
     cnn = _load_cnn(log=log)
-    if fast_centroid:
-        import fast_centroid as fc
+    # Installed unconditionally: the wrapper delegates to the stock
+    # implementation whenever the module flag is False, so passing
+    # fast_centroid=False restores stock behavior even in a kernel where an
+    # earlier processor enabled the fast path.
+    import fast_centroid as fc
 
-        fc.install(log=log)
+    fc.FAST_CENTROID = bool(fast_centroid)
+    fc.install(log=log)
 
     config = PhotometryConfig()
     os.makedirs(results_dir, exist_ok=True)
@@ -663,6 +760,18 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
             f"{len(l4)} stars  fwhm={l4.meta['fwhm']:.2f}px")
         return None
 
+    def reset():
+        # Called by the view on every new manifest. Batch prep is a
+        # judgement about one folder's first frame (Gaia catalog, WCS,
+        # photometry coords); running a second folder against it either
+        # skips every frame with a misleading reason or silently
+        # photometers the wrong catalog. The Gaia disk cache keeps re-prep
+        # cheap when the next folder really is the same field.
+        batch["prep"] = None
+        batch["n"] = 0
+        fc.reset()
+
+    process_frame.reset = reset
     return process_frame
 
 

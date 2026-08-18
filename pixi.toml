@@ -35,6 +35,9 @@ jupyterlite-xeus = ">=5"
 # the widget if that build differs from the one the kernel imports.
 anywidget = "==0.11.0"
 pytest = "*"
+# Host-side tests for content/fast_centroid.py exercise its NumPy numerics
+# directly; nothing else in the host test env needs numpy.
+numpy = "*"
 nodejs = "*"
 
 # Voici lives in its own environment on purpose: voici 0.10 -> voici-core pins

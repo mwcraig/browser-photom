@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isFitsName, collectEntries, sliceChunks, validateFound } from '../../content/dropzone.js';
+import { isFitsName, collectEntries, sliceChunks, validateFound, byPath } from '../../content/dropzone.js';
 
 // ---------------------------------------------------------------------
 // Fake FileSystemEntry helpers.
@@ -153,6 +153,21 @@ test('collectEntries rejects when a file entry error callback fires', async () =
   const root = fakeDir('root', '/root', [[bad]]);
 
   await assert.rejects(() => collectEntries([root]), /read failed/);
+});
+
+// ---------------------------------------------------------------------
+// byPath
+// ---------------------------------------------------------------------
+
+test('byPath sorts by path lexicographically, independent of input order', () => {
+  const entries = [{ path: 'roll/z.fits' }, { path: 'roll/a.fits' }, { path: 'roll/m.fits' }];
+
+  entries.sort(byPath);
+
+  assert.deepEqual(
+    entries.map((e) => e.path),
+    ['roll/a.fits', 'roll/m.fits', 'roll/z.fits']
+  );
 });
 
 // ---------------------------------------------------------------------

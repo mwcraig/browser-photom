@@ -19,21 +19,48 @@ def load_cnn(log=print):
     from scipy.linalg.blas import sgemm
     from scipy.special import expit
 
-    from bandaid.ballet_numpy import NumpyBallet, _max_pool_2x2_same
-
-    # The repo/file/revision come from bandaid's own pin, so a weights bump
-    # there cannot leave this path fetching old weights; plain requests, so
+    # bandaid's numpy-ballet branch renamed ballet_numpy -> ballet with no
+    # compat shim, so NumpyBallet/_max_pool_2x2_same move here too. The
+    # repo/file/revision come from bandaid's own pin, so a weights bump there
+    # cannot leave this path fetching old weights; plain requests, so
     # huggingface_hub is never needed in the browser.
     from bandaid.ballet import (
         _BALLET_HF_REPO_ID,
         _BALLET_WEIGHTS_FILENAME,
         _BALLET_WEIGHTS_REVISION,
+        NumpyBallet,
+        _max_pool_2x2_same,
     )
 
     weights_url = (
         f"https://huggingface.co/{_BALLET_HF_REPO_ID}/resolve/"
         f"{_BALLET_WEIGHTS_REVISION}/{_BALLET_WEIGHTS_FILENAME}"
     )
+
+    def _cached_weights_are_valid(path):
+        """True if `path` is a loadable, non-empty .npz.
+
+        NumpyBallet reads the archive by array name, not a fixed key list, so
+        this check does not need to know the CNN's layer names either -- an
+        archive that opens and has at least one array is exactly what a
+        genuine (non-truncated) download produces. Not tied to the revision
+        pin: a stale-but-intact archive is a version-skew problem the caller
+        already handles via `weights_url`, not a corruption problem.
+        """
+        try:
+            with np.load(path) as cached:
+                return len(cached.files) > 0
+        except Exception:
+            return False
+
+    if os.path.exists(WEIGHTS_FILE) and not _cached_weights_are_valid(WEIGHTS_FILE):
+        # An older notebook build wrote this same persistent filename without
+        # the write-then-rename below, so a truncated .npz can already be
+        # sitting in a user's IndexedDB with no file browser to remove it.
+        # Delete and fall through to the download branch so the cache heals
+        # itself at the cost of one re-download, instead of failing forever.
+        os.remove(WEIGHTS_FILE)
+
     if os.path.exists(WEIGHTS_FILE):
         log(f"Using cached CNN weights ({os.path.getsize(WEIGHTS_FILE) / 1e6:.1f} MB).")
     else:
@@ -41,9 +68,9 @@ def load_cnn(log=print):
         resp = requests.get(weights_url, timeout=300)
         resp.raise_for_status()
         # Write-then-rename: a reload during the 39 MB write (or its
-        # IndexedDB sync) must not leave a partial file that the existence
-        # check above would trust forever. pyodide_http buffers the whole
-        # body before the file opens, so the write is the only exposure.
+        # IndexedDB sync) must not leave a partial file that a future run
+        # would trust without the validation above. pyodide_http buffers the
+        # whole body before the file opens, so the write is the only exposure.
         tmp_path = WEIGHTS_FILE + ".part"
         with open(tmp_path, "wb") as fh:
             fh.write(resp.content)

@@ -32,6 +32,7 @@ __all__ = [
     "CHUNK_BYTES",
     "ChunkAssembler",
     "FrameProcessor",
+    "LazyProcessor",
     "PhotometryDashboard",
     "ProtocolError",
     "RunState",
@@ -350,6 +351,49 @@ class FrameProcessor:
         return (False, str(reason)) if reason else (True, None)
 
 
+class LazyProcessor:
+    """A `process_frame(path, name)` callable built from a zero-arg factory
+    the first time it is actually needed, with a latch so a factory that
+    fails is never retried mid-run.
+
+    The view uses this to defer `make_bandaid_processor` (39 MB of CNN
+    weights, a bandaid import) to the first dropped frame -- the form has to
+    be usable before that starts. If the factory raises, the exception
+    propagates unchanged out of that first call (so the frame that triggered
+    it is reported with the real exception), but the failure is latched: every
+    later call returns a skip reason instead of re-invoking the factory, so a
+    350-frame folder drains in seconds rather than re-attempting the same
+    failing setup 350 times.
+    """
+
+    def __init__(self, factory):
+        self.factory = factory
+        self._built = None
+        self._error = None
+
+    def __call__(self, path, name):
+        if self._error is not None:
+            return f"pipeline setup failed earlier: {self._error}"
+        if self._built is None:
+            try:
+                self._built = self.factory()
+            except Exception as exc:  # noqa: BLE001 - any setup failure latches
+                self._error = f"{type(exc).__name__}: {exc}"
+                raise
+        return self._built(path, name)
+
+    def reset(self):
+        """Re-arm for a new run: clear the latch, and if a real processor was
+        already built, propagate to its own `reset` hook too -- batch prep
+        and the fast-centroid one-shot state are judgements about one
+        folder's first frame, and a second dropped folder needs its own.
+        """
+        self._error = None
+        reset = getattr(self._built, "reset", None)
+        if reset is not None:
+            reset()
+
+
 # --------------------------------------------------------------------------
 # Output
 # --------------------------------------------------------------------------
@@ -395,17 +439,20 @@ class PhotometryDashboard:
         kernel -> JS   {type:"zip", filename} + 1 buffer
         kernel -> JS   {type:"error", reason}
 
-    The ack is what stops the browser reading a 4 MB file into memory faster
-    than a ~3.4 s frame can be photometered; `file_done` is what stops it
-    starting the next file. Because a frame runs inside the handler, the
-    kernel is busy for that whole time -- a cancel lands at frame granularity.
+    The ack exists to catch a wedged kernel -- each carries a run-cancelling
+    timeout on the browser side -- not to pace individual chunks; pacing and
+    memory bounding instead come from the browser's `DONE_LOOKAHEAD` file
+    window over per-file `file_done` barriers (`dropzone.js:318-325`).
+    `file_done` is what stops the browser starting the next file. Because a
+    frame runs inside the handler, the kernel is busy for that whole time --
+    a cancel lands at frame granularity.
     """
 
     def __init__(
         self,
         process_frame,
         drop_zone,
-        zip_widget=None,
+        zip_widget,
         *,
         results_dir="results",
         tmpdir="/tmp",
@@ -415,7 +462,7 @@ class PhotometryDashboard:
         on_manifest=None,
     ):
         self.drop_zone = drop_zone
-        self.zip_widget = drop_zone if zip_widget is None else zip_widget
+        self.zip_widget = zip_widget
         self.results_dir = str(results_dir)
         self.chunk_bytes = int(chunk_bytes)
         self.zip_name = zip_name
@@ -433,14 +480,34 @@ class PhotometryDashboard:
 
     def attach(self):
         self.drop_zone.on_msg(self._dispatch)
-        if self.zip_widget is not self.drop_zone:
-            self.zip_widget.on_msg(self._dispatch)
-        if hasattr(self.drop_zone, "chunk_bytes"):
-            self.drop_zone.chunk_bytes = self.chunk_bytes
+        self.zip_widget.on_msg(self._dispatch)
+        self.drop_zone.chunk_bytes = self.chunk_bytes
         return self
 
     def _dispatch(self, _widget, content, buffers):
         self.handle_message(content, buffers)
+
+    # One row per message kind the front end can send: which method handles
+    # it, and -- if that handler (or dispatch itself) raises -- which widget
+    # attribute and message type report the failure. `handle_message` and the
+    # unexpected-exception fallback both consult this table, rather than each
+    # hand-carrying its own copy of the routing, so a new message kind cannot
+    # get the two out of sync (a `zip_request` failure has to come back as
+    # `zip_error` on `zip_widget`: the download button is re-enabled only by
+    # a `zip`/`zip_error` reply, and an `error` on the drop zone would leave
+    # it stuck at "Preparing..."; every other kind's failure belongs on
+    # `drop_zone`, whose upload loop treats `error` as "reject every pending
+    # waiter and cancel the run").
+    _HANDLERS = {
+        "manifest": (lambda self, content, buffers: self._on_manifest(content),
+                     "drop_zone", "error"),
+        "chunk": (lambda self, content, buffers: self._on_chunk(content, buffers),
+                  "drop_zone", "error"),
+        "zip_request": (lambda self, content, buffers: self._on_zip_request(),
+                         "zip_widget", "zip_error"),
+        "cancel": (lambda self, content, buffers: self._on_cancel(),
+                   "drop_zone", "error"),
+    }
 
     def handle_message(self, content, buffers=()):
         kind = None
@@ -449,14 +516,10 @@ class PhotometryDashboard:
             # sent, and a non-mapping here must come back as an error message
             # like any other malformed input, not raise out of the handler.
             kind = (content or {}).get("type")
-            if kind == "manifest":
-                self._on_manifest(content)
-            elif kind == "chunk":
-                self._on_chunk(content, buffers or [])
-            elif kind == "zip_request":
-                self._on_zip_request()
-            elif kind == "cancel":
-                self._on_cancel()
+            entry = self._HANDLERS.get(kind)
+            if entry is not None:
+                handler, _target_attr, _error_type = entry
+                handler(self, content, buffers or [])
             # Anything else is ignored: an unknown message must not kill the run.
         except Exception as exc:  # noqa: BLE001 - deliberately broad; see below
             # An error message from here is what unwinds the front end's
@@ -466,7 +529,8 @@ class PhotometryDashboard:
             # the whole of phase "running" the view hides the drop zone, so
             # the user sees a frozen progress line and nothing else. Report it
             # and let the JS unwind. (`kind` stays None if parsing itself
-            # blew up; _report_failure then replies on the drop zone.)
+            # blew up; _report_failure then replies on the drop zone, its
+            # fallback for a kind not in `_HANDLERS`.)
             self._report_failure(kind, f"{type(exc).__name__}: {exc}")
 
     # -- handlers ----------------------------------------------------------
@@ -613,16 +677,15 @@ class PhotometryDashboard:
     def _report_failure(self, kind, reason):
         """Tell the browser a handler died, on the channel it is listening to.
 
-        A `zip_request` failure has to come back as `zip_error`: the download
-        button is re-enabled only by a `zip`/`zip_error` reply, and an `error`
-        on the drop zone would leave it stuck at "Preparing...". Everything
-        else goes to the drop zone, whose upload loop treats `error` as
-        "reject every pending waiter and cancel the run".
+        Routed through `_HANDLERS`, the same table `handle_message` dispatches
+        on, so a kind's error target can never drift out of sync with its
+        handler. A `kind` not in the table (parsing `content` itself failed,
+        so `kind` is still `None`) falls back to the drop zone.
         """
-        if kind == "zip_request":
-            target, message = self.zip_widget, {"type": "zip_error", "reason": reason}
-        else:
-            target, message = self.drop_zone, {"type": "error", "reason": reason}
+        _handler, target_attr, error_type = self._HANDLERS.get(
+            kind, (None, "drop_zone", "error")
+        )
+        target, message = getattr(self, target_attr), {"type": error_type, "reason": reason}
         try:
             self._send(target, message)
         except Exception:  # noqa: BLE001 - the comm itself is gone
@@ -643,49 +706,21 @@ class PhotometryDashboard:
 # --------------------------------------------------------------------------
 
 
-def _configure_environment():
-    """The knobs from `watch_photometry.ipynb` cell 2, all load-bearing."""
-    import sys
-    import warnings
-
-    # eloy's detection step trips a skimage deprecation on every frame.
-    warnings.filterwarnings("ignore", category=FutureWarning, module="eloy")
-    # astroquery imports keyring; there is no usable backend in wasm.
-    os.environ.setdefault("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
-
-    # Python never caches a *failed* import, so astropy/photutils probe for
-    # these absent optional deps at call time and re-scan every sys.path
-    # directory on every frame -- dozens of ~10 ms IndexedDB stats, 0.7 s per
-    # frame measured. A None entry makes the probe raise instantly instead.
-    for name in ("gwcs", "bottleneck", "regions"):
-        try:
-            __import__(name)
-        except ImportError:
-            sys.modules[name] = None
-
-    import pyodide_http
-
-    pyodide_http.patch_all()  # requests -> browser fetch (VizieR + HuggingFace)
-
-    # The airmass AltAz transform would otherwise fetch IERS-A on first use;
-    # sub-arcsecond pointing accuracy is irrelevant at airmass precision.
-    from astropy.utils import iers
-
-    iers.conf.auto_download = False
-    iers.conf.iers_degraded_accuracy = "ignore"
-
-
 def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=True, log=print):
     """Build the real `process_frame(path, name)` used in the browser.
 
     `user_meta` is read on every frame, so the view can keep it live while the
     form is still editable. bandaid, astropy, numpy and scipy are imported
     here rather than at module scope, so the host test environment never needs
-    them.
+    them. The environment knobs themselves (warnings filter, keyring backend,
+    negative-import cache, pyodide_http, IERS settings) live in `env_setup.py`
+    -- the one home shared with `watch_photometry.ipynb`'s cell 2.
     """
     from pathlib import Path as _Path
 
-    _configure_environment()
+    import env_setup
+
+    env_setup.configure()
 
     from astropy.io import fits
 

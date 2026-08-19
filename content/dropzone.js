@@ -29,6 +29,16 @@ function basename(path) {
 }
 
 /**
+ * Sort comparator for { path, ... } entries, by path. Used to give both
+ * upload sources (drag-and-drop's collectEntries and the folder-picker
+ * <input>) the same deterministic order regardless of the (unspecified)
+ * order the browser hands entries back in.
+ */
+export function byPath(a, b) {
+  return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+}
+
+/**
  * Recursively walk an array of FileSystemEntry objects (as produced by
  * DataTransferItem.webkitGetAsEntry()) and resolve to a sorted array of
  * { path, file } for every FITS file found.
@@ -70,9 +80,7 @@ export async function collectEntries(entries) {
     await walk(entry);
   }
 
-  // Deterministic order regardless of the (unspecified) order the browser's
-  // directory reader hands entries back in.
-  found.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  found.sort(byPath);
   return found;
 }
 
@@ -348,18 +356,37 @@ function renderDropZone({ model, el }) {
       if (failure) throw failure;
     };
 
-    const pendingAcks = [];
+    // Acks are batched per file, not flattened across the whole run: a
+    // file's acks all precede its file_done on the wire (kernel-side
+    // ordering pinned by test_the_ack_precedes_the_file_done_it_belongs_to),
+    // so the moment a pendingDone entry resolves, that file's whole ack
+    // batch is already settled -- draining it here is free, not a new await
+    // point that would re-serialize the upload. pendingAckBatches stays
+    // parallel to pendingDone (one batch per outstanding file) and so shares
+    // its DONE_LOOKAHEAD bound, instead of growing by one entry per chunk
+    // for the entire run.
+    const pendingAckBatches = [];
     const pendingDone = [];
+
+    // The guards never reject, so this always completes; rethrow() after it
+    // reports a real failure (including a timed-out ack) as soon as its
+    // file's batch comes up for draining.
+    async function drainAckBatch(batch) {
+      while (batch.length > 0) await batch.shift();
+    }
 
     try {
       for (let i = 0; i < files.length; i++) {
         while (pendingDone.length >= DONE_LOOKAHEAD) {
           await pendingDone.shift();
           rethrow();
+          await drainAckBatch(pendingAckBatches.shift());
+          rethrow();
         }
         const { path, file } = files[i];
         const name = basename(path);
         const chunks = sliceChunks(file.size, model.get('chunk_bytes'));
+        const fileAcks = [];
         for (const c of chunks) {
           const buf = await file.slice(c.start, c.end).arrayBuffer();
           rethrow(); // a kernel error may have landed during the read
@@ -368,7 +395,7 @@ function renderDropZone({ model, el }) {
             null,
             [buf]
           );
-          pendingAcks.push(
+          fileAcks.push(
             guard(
               waitFor(
                 (m) => m.type === 'ack' && m.name === name && m.index === c.index,
@@ -378,6 +405,7 @@ function renderDropZone({ model, el }) {
             )
           );
         }
+        pendingAckBatches.push(fileAcks);
         pendingDone.push(
           guard(
             waitFor(
@@ -389,12 +417,14 @@ function renderDropZone({ model, el }) {
         );
         setStatus(`Uploading ${i + 1} / ${files.length}...${skippedSuffix}`);
       }
-      // Everything is sent; now drain. The guards never reject, so these
-      // awaits always complete and rethrow() reports the first real error.
-      while (pendingAcks.length > 0) await pendingAcks.shift();
-      rethrow(); // a wedged kernel fails here, not after the done drain below
-      while (pendingDone.length > 0) await pendingDone.shift();
-      rethrow();
+      // Tail: files still in the window when the loop ends never got their
+      // batch drained above, so drain what's left the same way.
+      while (pendingDone.length > 0) {
+        await pendingDone.shift();
+        rethrow();
+        await drainAckBatch(pendingAckBatches.shift());
+        rethrow();
+      }
       setStatus(`Uploaded ${files.length} file${files.length === 1 ? '' : 's'}.${skippedSuffix}`);
     } catch (err) {
       setStatus(`Error: ${err && err.message ? err.message : err}`);
@@ -413,6 +443,24 @@ function renderDropZone({ model, el }) {
       uploading = false;
       paint();
     }
+  }
+
+  // Shared tail of the drop and folder-picker paths, once each has its own
+  // sorted { path, file } list in hand: reject an empty or invalid find,
+  // otherwise hand the narrowed file list to startUpload.
+  async function validateAndUpload(found) {
+    if (found.length === 0) {
+      setStatus('No FITS files (.fit/.fits/.fts) found in that folder.');
+      return;
+    }
+
+    const result = validateFound(found);
+    if (!result.ok) {
+      setStatus(result.message);
+      return;
+    }
+
+    await startUpload(result.files, result.emptyCount);
   }
 
   container.addEventListener('dragenter', (ev) => {
@@ -488,18 +536,7 @@ function renderDropZone({ model, el }) {
         return;
       }
 
-      if (found.length === 0) {
-        setStatus('No FITS files (.fit/.fits/.fts) found in that folder.');
-        return;
-      }
-
-      const result = validateFound(found);
-      if (!result.ok) {
-        setStatus(result.message);
-        return;
-      }
-
-      await startUpload(result.files, result.emptyCount);
+      await validateAndUpload(found);
     } finally {
       // startUpload clears this too, but the guards above return before it
       // ever runs -- without this a rejected drop would leave the zone
@@ -521,22 +558,11 @@ function renderDropZone({ model, el }) {
     const found = [...pickerInput.files]
       .map((file) => ({ path: file.webkitRelativePath || file.name, file }))
       .filter((f) => isFitsName(basename(f.path)))
-      .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      .sort(byPath);
     // Let the same folder be picked again later (e.g. after fixing it).
     pickerInput.value = '';
 
-    if (found.length === 0) {
-      setStatus('No FITS files (.fit/.fits/.fts) found in that folder.');
-      return;
-    }
-
-    const result = validateFound(found);
-    if (!result.ok) {
-      setStatus(result.message);
-      return;
-    }
-
-    await startUpload(result.files, result.emptyCount);
+    await validateAndUpload(found);
   });
 
   model.on('change:armed', paint);

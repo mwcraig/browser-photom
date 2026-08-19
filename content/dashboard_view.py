@@ -19,6 +19,7 @@ from IPython.display import display
 from dropzone import DropZone, ZipDownload
 from photom_dashboard import (
     CHUNK_BYTES,
+    LazyProcessor,
     PhotometryDashboard,
     make_bandaid_processor,
     validate_metadata,
@@ -62,15 +63,15 @@ class DashboardView:
         self._meta = {}
         self._log = deque(maxlen=LOG_LINES)
         self._seen_skips = 0
-        # Latched by the first pipeline-setup failure and cleared on the next
-        # manifest, so a run whose setup died fail-fasts the rest of its
-        # frames instead of re-attempting the 39 MB weights download (with a
-        # 300 s timeout) on every one of them.
-        self._setup_error = None
-        # None until the first frame arrives: building it downloads 39 MB of
-        # CNN weights, and the form has to be usable before that happens.
-        self._processor = process_frame
-        self._processor_is_real = process_frame is not None
+        # LazyProcessor defers `make_bandaid_processor` to the first dropped
+        # frame -- it downloads 39 MB of CNN weights, and the form has to be
+        # usable before that happens -- and latches a setup failure so a run
+        # whose setup died fail-fasts the rest of its frames instead of
+        # re-attempting the download (with a 300 s timeout) on every one.
+        self._processor = LazyProcessor(
+            (lambda: process_frame) if process_frame is not None
+            else self._build_processor
+        )
 
         self.drop_zone = DropZone()
         self.zip_widget = ZipDownload(enabled=False)
@@ -168,40 +169,38 @@ class DashboardView:
         # drop rather than once per session, and re-prep the pipeline from
         # the new folder's first frame -- batch prep and the fast-centroid
         # one-shot check are judgements about one folder's field, and the
-        # done panel invites dropping another folder.
-        self._setup_error = None
+        # done panel invites dropping another folder. LazyProcessor.reset()
+        # clears the setup-failure latch and, if a real processor was already
+        # built, propagates to its own reset hook too.
+        #
         # Explicit, not inferred: the old "skip count went down, must be a
         # new run" heuristic in _on_change never fired when a new run's first
         # _changed already carried as many skips as the last run ended with
         # (which the manifest's zero-byte-skip path can produce), silently
         # swallowing the new run's first skip lines.
         self._seen_skips = 0
-        reset = getattr(self._processor, "reset", None)
-        if reset is not None:
-            reset()
+        self._processor.reset()
+
+    def _build_processor(self):
+        # LazyProcessor's factory: called at most once, on the first dropped
+        # frame -- this downloads 39 MB of CNN weights and imports bandaid,
+        # and the form has to be usable before that.
+        self.log("Setting up the pipeline (first frame only)...")
+        try:
+            return make_bandaid_processor(
+                self._meta,
+                self.results_dir,
+                fast_centroid=self.fast_centroid,
+                log=self.log,
+            )
+        except Exception as exc:  # noqa: BLE001 - any setup failure latches
+            self.log(f"Pipeline setup failed: {type(exc).__name__}: {exc}")
+            raise
 
     def _process_frame(self, path, name):
-        if self._setup_error is not None:
-            # Returned as a skip reason, so a 350-frame folder drains in
-            # seconds ("pipeline setup failed earlier" per frame) instead of
-            # grinding for hours re-attempting setup on every frame.
-            return f"pipeline setup failed earlier: {self._setup_error}"
-        if not self._processor_is_real:
-            # Deferred to the first frame: this downloads 39 MB of CNN weights
-            # and imports bandaid, and the form has to be usable before that.
-            self.log("Setting up the pipeline (first frame only)...")
-            try:
-                self._processor = make_bandaid_processor(
-                    self._meta,
-                    self.results_dir,
-                    fast_centroid=self.fast_centroid,
-                    log=self.log,
-                )
-            except Exception as exc:  # noqa: BLE001 - any setup failure latches
-                self._setup_error = f"{type(exc).__name__}: {exc}"
-                self.log(f"Pipeline setup failed: {self._setup_error}")
-                raise
-            self._processor_is_real = True
+        # LazyProcessor holds the latch and the built-processor cache; this
+        # just wires the view's live widgets/metadata (self._meta, self.log)
+        # into the factory it was constructed with.
         return self._processor(path, name)
 
     def log(self, message):

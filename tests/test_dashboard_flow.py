@@ -10,7 +10,7 @@ import zipfile
 
 import pytest
 
-from photom_dashboard import PhotometryDashboard, RunState
+from photom_dashboard import LazyProcessor, PhotometryDashboard, RunState
 
 CHUNK = 4
 
@@ -536,3 +536,101 @@ def test_a_frame_that_raises_is_a_skip_and_the_run_still_finishes(tmp_path):
     assert dash.phase == "done"
     assert dash.state.skipped == 1
     assert "run_done" in drop.types()
+
+
+# --- LazyProcessor ----------------------------------------------------------
+#
+# Extracted from dashboard_view.py's pipeline-setup-failure latch: setup
+# (make_bandaid_processor there) is deferred to the first frame that actually
+# needs it, and a setup failure must not be retried on every later frame.
+
+
+def test_a_lazy_processor_calls_its_factory_only_once():
+    calls = []
+
+    def factory():
+        calls.append(1)
+        return lambda path, name: None
+
+    proc = LazyProcessor(factory)
+    proc("a", "a.fit")
+    proc("b", "b.fit")
+
+    assert len(calls) == 1
+
+
+def test_a_lazy_processor_setup_failure_latches_and_reports_the_real_exception_on_the_triggering_frame():
+    def factory():
+        raise RuntimeError("weights download failed")
+
+    proc = LazyProcessor(factory)
+    with pytest.raises(RuntimeError, match="weights download failed"):
+        proc("a", "a.fit")
+
+
+def test_a_lazy_processor_skips_every_later_frame_with_the_latched_reason_without_retrying_the_factory():
+    calls = []
+
+    def factory():
+        calls.append(1)
+        raise RuntimeError("weights download failed")
+
+    proc = LazyProcessor(factory)
+    with pytest.raises(RuntimeError):
+        proc("a", "a.fit")
+
+    # A folder full of frames must drain in seconds, not re-attempt the same
+    # failing download once per frame.
+    reason = "pipeline setup failed earlier: RuntimeError: weights download failed"
+    assert proc("b", "b.fit") == reason
+    assert proc("c", "c.fit") == reason
+    assert len(calls) == 1
+
+
+def test_lazy_processor_reset_rearms_the_latch_and_a_fresh_attempt_happens():
+    calls = []
+
+    def factory():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("first attempt fails")
+        return lambda path, name: None
+
+    proc = LazyProcessor(factory)
+    with pytest.raises(RuntimeError):
+        proc("a", "a.fit")
+    assert proc("b", "b.fit").startswith("pipeline setup failed earlier")
+
+    proc.reset()
+    assert proc("c", "c.fit") is None  # the second attempt succeeds
+    assert len(calls) == 2
+
+
+def test_lazy_processor_reset_propagates_to_the_built_processors_reset_hook():
+    resets = []
+
+    class Built:
+        def __call__(self, path, name):
+            return None
+
+        def reset(self):
+            resets.append(1)
+
+    proc = LazyProcessor(Built)
+    proc("a", "a.fit")  # builds it
+    proc.reset()
+
+    assert resets == [1]
+
+
+def test_lazy_processor_reset_before_any_frame_ran_does_not_touch_the_factory():
+    calls = []
+
+    def factory():
+        calls.append(1)
+        return lambda path, name: None
+
+    proc = LazyProcessor(factory)
+    proc.reset()  # nothing built yet -- must not build just to reset it
+
+    assert calls == []

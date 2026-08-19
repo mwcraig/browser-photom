@@ -14,7 +14,8 @@ JupyterLab, run every cell in order, drag a folder onto the file browser's
 keeps that developer/watch workflow, but is not untouched by this work: the
 branch added its fast-centroid and validation cells, and its heavy pieces now
 import the same modules the dashboard uses (`fast_centroid.py`,
-`ballet_sgemm.py`) instead of carrying inline copies that could drift.
+`ballet_sgemm.py`, and `env_setup.py` for the environment knobs) instead of
+carrying inline copies that could drift.
 
 The dashboard (`content/photometry_dashboard.ipynb`, rendered through Voici) is a
 second, non-Jupyter front end for the same pipeline: instructions, a metadata form,
@@ -35,7 +36,7 @@ dropped folder *closed* in the file browser (an open listing re-polls the drive:
 The dashboard's drop zone enumerates the dropped folder itself, in the browser, and
 streams each file's bytes over the widget comm straight into the kernel's own MEMFS
 at `/tmp` (`content/photom_dashboard.py:1-11`, `ChunkAssembler` at
-`photom_dashboard.py:180-263`). An image never touches the contents drive. That
+`photom_dashboard.py:225-324`). An image never touches the contents drive. That
 means **the closed-file-browser rule stops applying entirely** — there is no
 uploaded image folder to leave open, and a Voici page has no file browser at all;
 in the JupyterLab dev site the one listing still worth keeping closed is `results/`,
@@ -45,17 +46,17 @@ IndexedDB-write-then-read-back the notebook path pays for every frame). The
 visible-tab rule is unaffected and still applies: it is about main-thread
 throttling in general, not about the contents drive specifically. Only the `.star`
 outputs still go through the drive, in `results/` (`build_results_zip`,
-`photom_dashboard.py:297-315`).
+`photom_dashboard.py:402-420`).
 
 ## 2. Architecture
 
 ```
 photometry_dashboard.ipynb          two code lines (see below)
-  -> photom_dashboard.run_dashboard()            photom_dashboard.py:638-660
+  -> photom_dashboard.run_dashboard()            photom_dashboard.py:813-835
     -> dashboard_view.DashboardView              dashboard_view.py — ipywidgets shell
          .drop_zone   = dropzone.DropZone()      dropzone.py:27-38  (anywidget)
          .zip_widget  = dropzone.ZipDownload()   dropzone.py:41-48  (anywidget)
-         .dashboard   = PhotometryDashboard(...) photom_dashboard.py:323-459
+         .dashboard   = PhotometryDashboard(...) photom_dashboard.py:428-477
               process_frame = self._process_frame   (injected; see below)
     -> DropZone/ZipDownload._esm = dropzone.js       shared front end, one ESM
 ```
@@ -65,9 +66,9 @@ photom_dashboard` and `dashboard = photom_dashboard.run_dashboard()`. Everything
 else lives in the modules above.
 
 `process_frame(path, name)` is the seam between transport and photometry
-(`FrameProcessor` at `photom_dashboard.py:308-332`). `DashboardView` builds it
+(`FrameProcessor` at `photom_dashboard.py:327-351`). `DashboardView` builds it
 lazily on the first dropped frame via `make_bandaid_processor`
-(`photom_dashboard.py:685-775`), so the page renders and the form is usable before
+(`photom_dashboard.py:709-805`), so the page renders and the form is usable before
 the ~39 MB Ballet CNN weights download starts. `make_bandaid_processor` builds the
 real bandaid pipeline (`prepare_batch`, `process_one_image`,
 `write_starlist_set`) and, when `fast_centroid=True` (the default), installs
@@ -85,24 +86,32 @@ covers `fast_centroid.py`'s numerics separately — see §10).
 Two further fixes from the PR-review batch live in this same seam.
 `make_bandaid_processor` always installs `fast_centroid` and syncs
 `fast_centroid.FAST_CENTROID` from its own `fast_centroid=` parameter
-(`photom_dashboard.py:710-717`), so passing `fast_centroid=False` reliably
+(`photom_dashboard.py:740-747`), so passing `fast_centroid=False` reliably
 restores stock centroiding even in a kernel where an earlier run enabled the fast
 path; it returns a `process_frame` with a `reset()` hook
-(`photom_dashboard.py:763-774`) that clears the cached batch prep and re-arms
+(`photom_dashboard.py:793-804`) that clears the cached batch prep and re-arms
 `fast_centroid.reset()`'s one-shot state (`content/fast_centroid.py:73-83`).
-`DashboardView` calls that hook, and clears its own pipeline-setup-failure latch,
-from `_on_new_run` (`dashboard_view.py:166-175`), which `PhotometryDashboard` calls
-on every manifest (`on_manifest=self._on_new_run`, `dashboard_view.py:85`) — so a
-second dropped folder gets one fresh setup attempt and re-preps from its own first
-frame instead of running against the previous folder's catalog. The latch itself
-lives in `_process_frame` (`dashboard_view.py:177-199`): the first pipeline-setup
-exception (weights download, bandaid import) is logged once, and every later frame
-in the run returns `"pipeline setup failed earlier: ..."` as a skip reason instead
-of re-attempting the 39 MB weights download per frame.
+The pipeline-setup-failure latch does not live in `DashboardView` at all: it is
+a separate, tested `LazyProcessor` class (`photom_dashboard.py:354-394`) that
+wraps a zero-arg factory and defers calling it until the first dropped frame,
+latching any setup exception so it is never retried mid-run. `DashboardView`
+wires a `LazyProcessor` around either the injected `process_frame` or
+`self._build_processor` (`dashboard_view.py:71-74`, `:184-198`), and
+`_process_frame` (`dashboard_view.py:200-204`) just forwards each frame into
+it. `LazyProcessor.reset()` clears the latch and, if a real processor was
+already built, propagates to its own `reset()` hook too; `_on_new_run`
+(`dashboard_view.py:167-182`) calls it, which `PhotometryDashboard` calls on
+every manifest (`on_manifest=self._on_new_run`, `dashboard_view.py:86`) — so a
+second dropped folder gets one fresh setup attempt and re-preps from its own
+first frame instead of running against the previous folder's catalog. The
+first pipeline-setup exception (weights download, bandaid import) propagates
+out of that first call and is logged once; every later frame in the run
+returns `"pipeline setup failed earlier: ..."` as a skip reason instead of
+re-attempting the 39 MB weights download per frame.
 
 `dropzone.py` and `dropzone.js` are the transport. Both `DropZone` and
 `ZipDownload` are anywidget classes that share one ESM module, dispatched on a
-`_role` trait (`dropzone.js:386-390`) — one JS file that both anywidget in the
+`_role` trait (`dropzone.js:666-670`) — one JS file that both anywidget in the
 browser and `node --test` can load. `_esm` is the file's *text*, not a `Path`:
 anywidget treats a `Path` as a dev-mode hot-reload source needing `watchfiles`,
 absent in the wasm kernel (`dropzone.py:7-8`).
@@ -115,35 +124,35 @@ time.sleep()` cannot survive in this design (`photom_dashboard.py:13-14`; the sa
 constraint is spelled out again, independently, in `content/spike_comm.ipynb`
 cell-2's comment). The setup cell displays widgets and returns immediately;
 everything happens inside `PhotometryDashboard.handle_message`
-(`photom_dashboard.py:427-437`).
+(`photom_dashboard.py:512-534`).
 
 | message | direction | payload | buffers | purpose |
 |---|---|---|---|---|
-| `manifest` | JS → kernel | `{type, files:[{name,size},...]}` | none | seeds `RunState` with the exact file count/total bytes and flips `phase` to `"running"` — or refuses the manifest outright (empty, duplicate basenames; see below) (`_on_manifest`, `photom_dashboard.py:441-492`) |
-| `chunk` | JS → kernel | `{type, name, index, nchunks}` | 1 (chunk bytes) | appends bytes to `<tmpdir>/<basename(name)>` (`_on_chunk`, `photom_dashboard.py:501-537`) |
+| `manifest` | JS → kernel | `{type, files:[{name,size},...]}` | none | seeds `RunState` with the exact file count/total bytes and flips `phase` to `"running"` — or refuses the manifest outright (empty, duplicate basenames; see below) (`_on_manifest`, `photom_dashboard.py:538-589`) |
+| `chunk` | JS → kernel | `{type, name, index, nchunks}` | 1 (chunk bytes) | appends bytes to `<tmpdir>/<basename(name)>` (`_on_chunk`, `photom_dashboard.py:598-646`) |
 | `ack` | kernel → JS | `{type, name, index}` | none | wedge detection — pacing is per-file, see below |
 | `file_done` | kernel → JS | `{type, name, ok, reason}` | none | gates the start of the *next file*'s upload |
 | `run_done` | kernel → JS | `{type}` | none | sent once `RunState.finished`; `phase` → `"done"` |
-| `cancel` | JS → kernel | `{type}` | none | front end sends this when its own upload loop unwinds after an `error`, or when an `ack`/`file_done` wait times out (`dropzone.js:270-291`); ends the run cleanly instead of leaving it stuck at `"running"` |
+| `cancel` | JS → kernel | `{type}` | none | front end sends this when its own upload loop unwinds after an `error`, or when an `ack`/`file_done` wait times out (`dropzone.js:278-299`); ends the run cleanly instead of leaving it stuck at `"running"` |
 | `error` | kernel → JS | `{type, reason}` | none | a malformed `chunk` message or a `ProtocolError` from `ChunkAssembler`, reported without raising into the kernel |
 | `zip_request` | JS → kernel | `{type}` | none | the download button asking for a fresh zip of `results/*.star` |
-| `zip` | kernel → JS | `{type, filename}` | 1 (zip bytes) | the built archive, turned into a `Blob` + object-URL download in `renderZip` (`dropzone.js:337-360`) |
+| `zip` | kernel → JS | `{type, filename}` | 1 (zip bytes) | the built archive, turned into a `Blob` + object-URL download in `renderZip` (`dropzone.js:609-632`) |
 | `zip_error` | kernel → JS | `{type, reason}` | none | `results/` is missing or has no `.star` files yet |
 
 Two validation layers run before any of that starts. `_on_manifest` refuses a
 manifest with no files — an `error` reply, with `phase` left as it was, rather
 than flipping to `"running"` and wedging there forever with no way to retry short
-of a kernel restart (`photom_dashboard.py:441-450`) — and refuses one with
-duplicate basenames (`photom_dashboard.py:451-465`), a backstop behind the front
+of a kernel restart (`photom_dashboard.py:538-547`) — and refuses one with
+duplicate basenames (`photom_dashboard.py:548-562`), a backstop behind the front
 end's own flat-folder rule (§9). Entries with `size == 0` are skipped immediately
 at manifest time rather than waited on: `ChunkAssembler.mark_completed` refuses
 their chunks, `RunState.frame_skipped` counts them, and a `file_done` with
 `ok=False` goes out for each one before the manifest handler returns
-(`photom_dashboard.py:478-490`) — a backstop for any front end that doesn't
+(`photom_dashboard.py:575-587`) — a backstop for any front end that doesn't
 already filter 0-byte files client-side, the way this one does.
 
 On the JS side, every kernel wait in the upload loop is bounded
-(`dropzone.js:147-161`, `:270-291`): 10 minutes, for `ack` and `file_done`
+(`dropzone.js:155-169`, `:278-299`): 10 minutes, for `ack` and `file_done`
 alike. One tier, not the old fast-ack/slow-file_done pair, because sends are now
 windowed (see back-pressure below): an ack legitimately arrives a whole frame's
 compute after its chunk went out — and behind the *first* frame sit the ~39 MB
@@ -155,24 +164,29 @@ front end, so a reload really is the recovery path.
 
 Back-pressure is per *file*, not per chunk: the sender runs up to one file
 ahead of the kernel (`DONE_LOOKAHEAD = 2` outstanding `file_done`s — the frame
-the kernel is computing plus the one file queued behind it, `dropzone.js:312-397`).
+the kernel is computing plus the one file queued behind it, `dropzone.js:164-169`).
 The next file is read and its chunks queued while the current frame
 photometers, so the browser no longer idles for the ~3.4 s of every frame's
 compute, and the kernel's unread-message backlog stays bounded to about one
 file's bytes rather than growing with the folder. `ack`s are collected
 asynchronously — they exist to catch a wedged kernel (each carries the timeout
-above), not to pace individual chunks.
+above), not to pace individual chunks; the bookkeeping for that is batched per
+file rather than flat across the run — each file's ack waiters collect into
+their own array alongside its `file_done` waiter, and the whole batch drains
+in one shot as soon as that `file_done` comes up for draining in the
+`DONE_LOOKAHEAD` window (`dropzone.js:359-376`), so the ack backlog stays
+bounded by the window instead of growing by one entry per chunk over the run.
 `test_the_ack_precedes_the_file_done_it_belongs_to`
 (`tests/test_dashboard_flow.py:109-113`) pins the kernel-side ordering.
 
-1 MiB chunking (`CHUNK_BYTES = 1 << 20`, `photom_dashboard.py:48`) keeps any
+1 MiB chunking (`CHUNK_BYTES = 1 << 20`, `photom_dashboard.py:49`) keeps any
 single append small: each handled chunk costs one chunk of transient memory
 plus whatever `/tmp` already holds for that file — never the whole image twice.
 With the one-file send window the comm queue may additionally hold up to about
 one file's worth of not-yet-handled chunk messages; that bounded backlog is the
 deliberate price of overlapping upload with compute. `DropZone.chunk_bytes` is a synced
 traitlet that `PhotometryDashboard.attach()` overwrites from the Python-side
-constant (`photom_dashboard.py:420-421`, `dropzone.py:37`), so the two sides
+constant (`photom_dashboard.py:484`, `dropzone.py:37`), so the two sides
 cannot disagree about chunk size.
 
 Because a frame is photometered synchronously inside `_on_chunk` — the handler
@@ -180,22 +194,22 @@ that receives the file's *last* chunk calls `FrameProcessor.run`, which blocks f
 the whole ~3.4 s of one frame — the kernel is busy the entire time a frame runs.
 **A `cancel` therefore lands at frame granularity, not instantly**: it is only
 observed once the current frame's handler returns and the next message is
-dispatched (`PhotometryDashboard` docstring, `photom_dashboard.py:380-384`;
-`_on_cancel`, `photom_dashboard.py:552-556`).
+dispatched (`PhotometryDashboard` docstring, `photom_dashboard.py:442-448`;
+`_on_cancel`, `photom_dashboard.py:661-673`).
 
 ## 4. UI states
 
 The brief-level description is three states — setup, running, done — and that is
 how `INSTRUCTIONS` describes the workflow to the user
-(`dashboard_view.py:27-45`). The code underneath is slightly richer:
+(`dashboard_view.py:28-46`). The code underneath is slightly richer:
 `PhotometryDashboard.phase` actually takes **four** values — `"setup"`,
 `"running"`, `"done"`, and `"cancelled"` — and `DashboardView._refresh` collapses
 the last two into one visual treatment: both are `finished`, both show the done
 panel, and the headline text is "Finished" for `"done"` or "Stopped" for
-`"cancelled"` (`dashboard_view.py:229-268`). `"cancelled"` is reached when the
+`"cancelled"` (`dashboard_view.py:233-272`). `"cancelled"` is reached when the
 front end sends `cancel` after a protocol error unwinds its own upload loop
-(`dropzone.js:293-307`), or after an `ack`/`file_done` wait times out
-(`dropzone.js:270-291`; see §3); without offering the download there too, frames
+(`dropzone.js:429-441`), or after an `ack`/`file_done` wait times out
+(`dropzone.js:278-299`; see §3); without offering the download there too, frames
 that *did* succeed before the error would be stranded.
 
 | phase | setup panel | run panel (progress/log) | drop zone | done panel |
@@ -208,26 +222,26 @@ that *did* succeed before the error would be stranded.
 The setup panel is shown whenever a run is not active — `phase != "running"` —
 not just before the first drop: `_meta` is read fresh on every frame (§5), so the
 form has to stay editable between folders, and the done panel explicitly invites
-dropping another one (`dashboard_view.py:260-263`).
+dropping another one (`dashboard_view.py:257-260`).
 
 The implementation detail that matters: panels are shown and hidden by setting
-`widget.layout.display` (`_show`, `dashboard_view.py:271-272`), never by adding or
+`widget.layout.display` (`_show`, `dashboard_view.py:275-276`), never by adding or
 removing them from `VBox.children`. Detaching a widget from `children` destroys its
 front-end view — for the drop zone specifically, that runs anywidget's cleanup
 function, which unregisters the `msg:custom` listener the upload loop's `waitFor`
-promises are pending on (`dropzone.js:474-478`). Swapping panels in and out of
+promises are pending on (`dropzone.js:571-575`). Swapping panels in and out of
 `children` mid-upload would wedge the run: the kernel would keep sending `ack`s and
 `file_done`s that nothing in the browser is listening for anymore. The module
 docstring says this in as many words (`dashboard_view.py:3-7`).
 
 The drop zone itself now offers two ways in: drag-and-drop, and a
 keyboard/touch-accessible "…or choose a folder" button backed by a hidden
-`<input type=file webkitdirectory>` (`dropzone.js:193-215`, `:441-469`) — both
-paths feed the same `startUpload` (`dropzone.js:317-360`) and the same
+`<input type=file webkitdirectory>` (`dropzone.js:202-228`, `:549-566`) — both
+paths feed the same `startUpload` (`dropzone.js:334-446`) and the same
 `validateFound` checks (§9). The done panel's summary states how many `.star`
 files the zip will actually contain, not just how many frames this run
 processed, since `results/` accumulates across every folder dropped in one
-session (`dashboard_view.py:244-258`).
+session (`dashboard_view.py:248-262`).
 
 ## 5. Metadata
 
@@ -248,13 +262,13 @@ through as `user_meta`) is applied *last*, overriding whatever the header suppli
 (`bandaid-src/src/bandaid/photometry.py:1772`). Real Seestar frames carry
 `SITELAT`/`SITELONG` in the header but **no** `SITEELEV` card and no `obscode`
 card — those two fields have nothing to fall back to, so `validate_metadata`
-requires them (`photom_dashboard.py:75-118`, `:90-102`). Latitude and longitude,
+requires them (`photom_dashboard.py:84-127`, `:99-111`). Latitude and longitude,
 by contrast, do have a header fallback: `validate_metadata` omits `site_lat`/
 `site_lon` from the returned dict when the field is left blank, rather than
 defaulting it to anything, specifically so the header value wins
-(`photom_dashboard.py:104-116`; `test_blank_lat_lon_are_omitted_so_the_header_supplies_them`,
+(`photom_dashboard.py:113-125`; `test_blank_lat_lon_are_omitted_so_the_header_supplies_them`,
 `tests/test_metadata.py:54-61`). `_meta` is read fresh on every frame
-(`dashboard_view.py:157-169`, `:135-138`), so editing the form between dropped
+(`dashboard_view.py:138-163`, `:145-148`), so editing the form between dropped
 folders takes effect on the next run without restarting anything.
 
 ## 6. Why not an existing widget
@@ -403,12 +417,12 @@ chunking protocol itself. The 2026-08-11 run rules this out.
 - **Only a flat, single folder is accepted per drop.** The front end enforces this
   before any bytes upload: a loose file dropped alongside a folder, more than one
   folder in a single drop, or a FITS file sitting in a subfolder are all rejected
-  with a specific message (`validateFound`, `content/dropzone.js:113-145`; the
-  loose-file/folder-count checks in the `drop` handler, `:401-417`), and
+  with a specific message (`validateFound`, `content/dropzone.js:121-153`; the
+  loose-file/folder-count checks in the `drop` handler, `:503-528`), and
   `_on_manifest` refuses a manifest with duplicate basenames as a backstop behind
-  that rule (`photom_dashboard.py:451-465`; see §3). The rule exists because both
+  that rule (`photom_dashboard.py:548-562`; see §3). The rule exists because both
   `/tmp` staging and `results/<stem>.star` key on `os.path.basename` alone
-  (`ChunkAssembler._key`, `photom_dashboard.py:228-236`; `RunState.seed`, `:140`),
+  (`ChunkAssembler._key`, `photom_dashboard.py:250-255`; `RunState.seed`, `:146`),
   so two same-named files in different subfolders would otherwise silently
   overwrite each other. The tradeoff: a nested export (one subfolder per filter or
   per night, say) has to be dropped one leaf folder at a time rather than as a
@@ -430,7 +444,7 @@ chunking protocol itself. The 2026-08-11 run rules this out.
     2026-08-11 run couldn't answer this either: at the time, the dashboard only
     logged skips, so successful frames left no trace but an advancing counter.
     Per-frame timing and a running median were added afterward
-    (`RunState.median_seconds`, `photom_dashboard.py:163-173`), but no run has
+    (`RunState.median_seconds`, `photom_dashboard.py:171-181`), but no run has
     been made against that instrumentation yet — the median line has never
     actually been read off a browser screen.
 
@@ -442,7 +456,7 @@ and the JS tests (`pixi run test-js`) all run natively — no browser, no astrop
 no bandaid needed anywhere, and no numpy needed for `content/photom_dashboard.py`'s
 own tests, because photometry is injected as a `process_frame(path, name)`
 callable rather than imported at module scope (`photom_dashboard.py:16-18`,
-`:320-332`). `tests/test_fast_centroid.py` is the exception: it exercises
+`:339-351`). `tests/test_fast_centroid.py` is the exception: it exercises
 `content/fast_centroid.py`'s NumPy numerics directly, which is why numpy is now a
 host pixi dependency even though nothing else in the suite touches it.
 
@@ -460,12 +474,12 @@ The JS tests exist specifically to pin down two front-end rules that would
 otherwise only be discoverable by testing in a real Chromium tab: Chromium's
 `readEntries()` returns at most 100 entries per call and must be looped on the
 *same* reader until it returns empty, or a folder with more than 100 files in one
-directory silently truncates (`dropzone.js:51-66`,
+directory silently truncates (`dropzone.js:61-76`,
 `'collectEntries handles Chromium-style readEntries() batching (100 at a time)'`);
 and `sliceChunks` must emit exactly one empty chunk for a 0-byte file so the
 manifest/chunk/file_done sequence is uniform regardless of file size — the kernel
 side never has to special-case "this file had zero chunks"
-(`dropzone.js:79-84`, `'sliceChunks returns a single empty chunk for a 0-byte
+(`dropzone.js:87-92`, `'sliceChunks returns a single empty chunk for a 0-byte
 file'`).
 
 What none of this covers: the `ipywidgets` view itself (`dashboard_view.py`'s

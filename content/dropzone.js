@@ -180,6 +180,27 @@ const KERNEL_TIMEOUT_MS = 600_000;
 // timeout above spans at most a frame or two rather than a whole run.
 const DONE_LOOKAHEAD = 2;
 
+// A refused manifest still has chunks racing behind it on the wire (the
+// windowed sender does not wait for a manifest ack), and each of those
+// bounces back as its own kernel `error` ("no active run to receive
+// chunks"). Only the first error of a run carries the reason it actually
+// died; the echoes behind it would overwrite the status line. The latch
+// keeps the first and swallows the rest; startUpload re-arms it when the
+// next run's manifest goes out.
+export function makeErrorLatch() {
+  let tripped = false;
+  return {
+    arm() {
+      tripped = false;
+    },
+    trip() {
+      if (tripped) return false;
+      tripped = true;
+      return true;
+    },
+  };
+}
+
 /**
  * Drop-zone widget: drag a folder of FITS frames in, stream them to the
  * kernel over the comm in chunk_bytes-sized pieces.
@@ -244,6 +265,8 @@ function renderDropZone({ model, el }) {
   // purely local guard so a second drop/pick can't interleave with an
   // upload already streaming to the single-threaded kernel.
   let uploading = false;
+
+  const errorLatch = makeErrorLatch();
 
   function isArmed() {
     return model.get('armed') && !uploading;
@@ -313,6 +336,9 @@ function renderDropZone({ model, el }) {
   function onCustomMessage(msg) {
     if (!msg) return;
     if (msg.type === 'error') {
+      // First error wins: anything after it this run is an echo of the
+      // same death (see makeErrorLatch) and must not overwrite the reason.
+      if (!errorLatch.trip()) return;
       // No way to know which in-flight step a kernel-side error belongs
       // to, so fail every pending waiter and let the upload loop unwind.
       const err = new Error(msg.reason || 'Kernel error');
@@ -349,6 +375,9 @@ function renderDropZone({ model, el }) {
     const skippedSuffix = emptyCount > 0 ? ` (skipped ${emptyCount} empty file(s))` : '';
     setStatus(`Uploading 0 / ${files.length}...${skippedSuffix}`);
 
+    // A fresh run gets a fresh first-error slot; errors that raced in
+    // after the previous run already failed stay swallowed.
+    errorLatch.arm();
     model.send({
       type: 'manifest',
       // validateFound has already enforced a single shared top-level folder,

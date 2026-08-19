@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isFitsName, collectEntries, sliceChunks, validateFound, byPath, pickRun } from '../../content/dropzone.js';
+import { isFitsName, collectEntries, sliceChunks, validateFound, byPath, pickRun, makeErrorLatch } from '../../content/dropzone.js';
 
 // ---------------------------------------------------------------------
 // Fake FileSystemEntry helpers.
@@ -327,4 +327,32 @@ test('pickRun falls back to the newest run when a user pick is no longer listed'
 
 test('pickRun returns the empty string for an empty runs list', () => {
   assert.equal(pickRun([], '', false), '');
+});
+
+test('makeErrorLatch lets only the first error through', () => {
+  // The regression from the second browser check: a refused manifest was
+  // followed by "no active run to receive chunks" echoes from the chunks
+  // already on the wire, and the last echo overwrote the real refusal in
+  // the status line.
+  const latch = makeErrorLatch();
+
+  assert.equal(latch.trip(), true);
+  assert.equal(latch.trip(), false);
+  assert.equal(latch.trip(), false);
+});
+
+test('makeErrorLatch re-arms for the next run', () => {
+  const latch = makeErrorLatch();
+  latch.trip();
+
+  latch.arm();
+
+  assert.equal(latch.trip(), true);
+  assert.equal(latch.trip(), false);
+});
+
+test('makeErrorLatch starts armed', () => {
+  // An error arriving before any upload (nothing has armed the latch yet)
+  // must still be shown.
+  assert.equal(makeErrorLatch().trip(), true);
 });

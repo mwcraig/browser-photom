@@ -832,3 +832,49 @@ Two fixes out of the first end-to-end browser check of the per-run batch:
    main's ballet.py (it had nothing to check before the clone existed).
 
 Suite after the batch: 163 pytest + 23 JS tests, all passing natively.
+# Browser verification complete + the leftover agreed batch (2026-08-19)
+
+The second browser round finished every remaining check on the per-run
+batch: a differently-named third folder (chooser lists runs by name,
+defaults to newest, night count increments), a two-folder Finder drag
+refused with "Drop one folder at a time.", the duplicate-stem folder
+refused with the collision message, flat per-run zips, and the first real
+per-frame numbers off the dashboard: ~1.7 s/frame (small FWHM) to
+~2.0 s/frame (larger FWHM) on Qatar-8.
+
+That round also caught one new bug, fixed as its own commit: the kernel's
+manifest refusal was being overwritten in the status line by the "no
+active run to receive chunks" echoes from chunks the windowed sender had
+already fired behind the refused manifest. First error now wins per
+upload (exported `makeErrorLatch`, re-armed per manifest, 3 JS tests).
+
+The rest of this batch clears every agreed-but-unscheduled item from the
+PR #2 review summary:
+
+1. **Dropzone watchdog hardening.** The upload loop's catch path now
+   drains all abandoned waiters (settling clears their 10-minute
+   watchdog timers), a per-upload `runCounter` keeps any stale watchdog
+   that fires anyway from cancelling a healthy later run, and the
+   watchdog's own `cancel` send is wrapped in try/catch so a dead comm
+   can't leave the awaited promise pending forever.
+2. **`_escape` is `html.escape`.** `dashboard_view._escape` was exactly
+   `html.escape(quote=False)`'s three replacements; it now calls it.
+3. **`_fc_peak3x3` reuse.** On the frame that runs the one-shot
+   catalog-order check, the rank-by-image fallback reuses the peaks the
+   check just computed instead of recomputing them over the same rows.
+4. **spike_comm CRC out of the timed window.** The down direction now
+   sends a pre-CRC `down_arrived` (stops the Python round-trip clock)
+   followed by the post-CRC `down_done` verdict; previously the O(size)
+   JS crc32 sat inside the measured window, asymmetrically between the
+   1 MiB and 4 MiB cases the notebook exists to compare. The results
+   cell treats a timed-but-unverdicted row as not yet arrived. The
+   throughput rerun itself is still pending (rebuild `dist/` first).
+5. **Doc anchors.** `docs/dashboard.md`'s exact line-range citations are
+   replaced with function/class-name anchors (`PhotometryDashboard._on_manifest`
+   style) so the map can't rot the way three review rounds caught it
+   rotting; same for the stale `dropzone.js` range in
+   `PhotometryDashboard`'s docstring and the `eloy/centroid.py:80` ref in
+   `fast_centroid.py`. The measured s/frame numbers and the
+   now-seven-strong JS pure-function list landed in the doc too.
+
+Suite after the batch: 163 pytest + 26 JS tests, all passing natively.

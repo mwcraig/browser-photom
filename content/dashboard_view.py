@@ -10,6 +10,7 @@ Nothing here is exercised by `pixi run test`: the tested surface is
 `photom_dashboard`, and this module is the browser-only shell around it.
 """
 
+import html
 from collections import deque
 from pathlib import Path
 
@@ -282,9 +283,6 @@ def _show(widget, visible):
 
 
 def _escape(text):
-    return (
-        str(text)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+    # quote=False matches the old hand-rolled version: these strings land in
+    # element text, never attribute values, so quotes can stay literal.
+    return html.escape(str(text), quote=False)

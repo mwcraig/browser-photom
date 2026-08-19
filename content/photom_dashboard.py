@@ -476,7 +476,7 @@ class PhotometryDashboard:
     The ack exists to catch a wedged kernel -- each carries a run-cancelling
     timeout on the browser side -- not to pace individual chunks; pacing and
     memory bounding instead come from the browser's `DONE_LOOKAHEAD` file
-    window over per-file `file_done` barriers (`dropzone.js:318-325`).
+    window over per-file `file_done` barriers (`startUpload` in `dropzone.js`).
     `file_done` is what stops the browser starting the next file. Because a
     frame runs inside the handler, the kernel is busy for that whole time --
     a cancel lands at frame granularity.

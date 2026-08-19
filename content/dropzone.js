@@ -305,6 +305,12 @@ function renderDropZone({ model, el }) {
   // and slow the comm dispatch to a crawl over the course of an upload.
   const waiters = [];
 
+  // Bumped at the start of every upload. A watchdog timer created during
+  // run N must not cancel run N+1: the catch path below drains abandoned
+  // waiters (settling clears their timers), and this counter is the
+  // belt-and-braces for any timer that fires anyway.
+  let runCounter = 0;
+
   // Each waiter times out on its own: a healthy kernel always acks or
   // finishes, so if it stops responding entirely (a wedged Pyodide worker,
   // a crashed tab) the upload loop must not hang forever. There is no retry
@@ -312,7 +318,7 @@ function renderDropZone({ model, el }) {
   // the recovery path -- the rejected error says so.
   function waitFor(predicate, timeoutMs, label) {
     return new Promise((resolve, reject) => {
-      const waiter = { predicate };
+      const waiter = { predicate, runId: runCounter };
       waiter.resolve = (msg) => {
         clearTimeout(waiter.timer);
         resolve(msg);
@@ -325,8 +331,17 @@ function renderDropZone({ model, el }) {
         const idx = waiters.indexOf(waiter);
         if (idx !== -1) waiters.splice(idx, 1);
         // Tell the kernel the run is over, or it sits at "running" forever
-        // waiting for chunks this loop has given up on sending.
-        model.send({ type: 'cancel' });
+        // waiting for chunks this loop has given up on sending -- but only
+        // if this watchdog still belongs to the current run; a stale one
+        // firing here must not cancel a healthy later upload.
+        if (waiter.runId === runCounter) {
+          try {
+            model.send({ type: 'cancel' });
+          } catch (sendErr) {
+            // Comm is gone; the reject below still unwinds the loop, and
+            // the status line it produces says reload is the recovery.
+          }
+        }
         reject(new Error(`${label}: kernel not responding — reload the page to recover`));
       }, timeoutMs);
       waiters.push(waiter);
@@ -376,7 +391,10 @@ function renderDropZone({ model, el }) {
     setStatus(`Uploading 0 / ${files.length}...${skippedSuffix}`);
 
     // A fresh run gets a fresh first-error slot; errors that raced in
-    // after the previous run already failed stay swallowed.
+    // after the previous run already failed stay swallowed. Bumping the
+    // run counter first orphans any watchdog left over from the previous
+    // run (see waitFor).
+    runCounter += 1;
     errorLatch.arm();
     model.send({
       type: 'manifest',
@@ -472,6 +490,13 @@ function renderDropZone({ model, el }) {
       setStatus(`Uploaded ${files.length} file${files.length === 1 ? '' : 's'}.${skippedSuffix}`);
     } catch (err) {
       setStatus(`Error: ${err && err.message ? err.message : err}`);
+      // Settle every waiter this loop abandoned (a kernel error already
+      // drained them; a local failure -- a read error, one timed-out ack --
+      // did not). Settling clears their 10-minute watchdog timers, so a
+      // stale watchdog can't fire mid-next-run; every stored waiter is
+      // guard()ed, so these rejections are observed, not unhandled.
+      const abandoned = waiters.splice(0, waiters.length);
+      for (const w of abandoned) w.reject(err);
       // Read errors (the file moved, permission lapsed), a dead comm, anything
       // -- the kernel has no other way to learn this loop died, and would sit
       // at "running" forever with the drop zone hidden and no download button.

@@ -50,9 +50,9 @@ import numpy as np
 
 FAST_CENTROID = True         # A/B toggle; False = stock full-CNN path
 FAST_CENTROID_K = 100        # stars actually CNN-centroided per frame
-FAST_CENTROID_MARGIN = 8     # px from an edge; ballet_centroid asks for 15x15
-                             # cutouts (eloy/centroid.py:80), so anything
-                             # closer than ~8 px is fill-padded
+FAST_CENTROID_MARGIN = 8     # px from an edge; eloy's ballet_centroid asks
+                             # for 15x15 cutouts, so anything closer than
+                             # ~8 px is fill-padded
 FAST_CENTROID_MIN_FIT = 10   # fewer clean bright stars than this -> full CNN
 
 # checked/rank_by_image: one-shot catalog-ordering assertion and its fallback.
@@ -123,6 +123,7 @@ def _fc_classify(calibrated_data, aligned):
         # is left over to plane-fit. The off-frame skip alone is still a win.
         return on_idx, on_idx, np.empty(0, dtype=int), band_idx
 
+    peaks = None
     if not _FC_STATE["checked"]:
         _FC_STATE["checked"] = True
         peaks = _fc_peak3x3(calibrated_data, aligned[on_idx])
@@ -140,7 +141,10 @@ def _fc_classify(calibrated_data, aligned):
                 f"{tail:.0f}); ranking by image peak instead.")
 
     if _FC_STATE["rank_by_image"]:
-        peaks = _fc_peak3x3(calibrated_data, aligned[on_idx])
+        # On the frame that ran the order check above, the peaks are already
+        # in hand for exactly these rows -- don't recompute them.
+        if peaks is None:
+            peaks = _fc_peak3x3(calibrated_data, aligned[on_idx])
         bright_idx = on_idx[np.argsort(peaks)[::-1][:FAST_CENTROID_K]]
     else:
         bright_idx = on_idx[:FAST_CENTROID_K]

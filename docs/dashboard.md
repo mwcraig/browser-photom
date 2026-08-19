@@ -45,8 +45,8 @@ yet been measured (no contents-drive I/O at all during upload, versus the
 IndexedDB-write-then-read-back the notebook path pays for every frame). The
 visible-tab rule is unaffected and still applies: it is about main-thread
 throttling in general, not about the contents drive specifically. Only the `.star`
-outputs still go through the drive, in `results/` (`build_results_zip`,
-`photom_dashboard.py:402-420`).
+outputs still go through the drive, in `results/`, one subfolder per run named
+after the dropped folder (`build_results_zip`, `photom_dashboard.py:402-420`).
 
 ## 2. Architecture
 
@@ -128,24 +128,25 @@ everything happens inside `PhotometryDashboard.handle_message`
 
 | message | direction | payload | buffers | purpose |
 |---|---|---|---|---|
-| `manifest` | JS → kernel | `{type, files:[{name,size},...]}` | none | seeds `RunState` with the exact file count/total bytes and flips `phase` to `"running"` — or refuses the manifest outright (empty, duplicate basenames; see below) (`_on_manifest`, `photom_dashboard.py:538-589`) |
+| `manifest` | JS → kernel | `{type, files:[{name,size},...], folder}` | none | seeds `RunState` with the exact file count/total bytes, opens that run's subfolder under `results/` (named after `folder`, sanitized and disambiguated; `run` when `folder` is omitted), and flips `phase` to `"running"` — or refuses the manifest outright (empty, output-name collisions; see below) (`_on_manifest`, `photom_dashboard.py:538-589`) |
 | `chunk` | JS → kernel | `{type, name, index, nchunks}` | 1 (chunk bytes) | appends bytes to `<tmpdir>/<basename(name)>` (`_on_chunk`, `photom_dashboard.py:598-646`) |
 | `ack` | kernel → JS | `{type, name, index}` | none | wedge detection — pacing is per-file, see below |
 | `file_done` | kernel → JS | `{type, name, ok, reason}` | none | gates the start of the *next file*'s upload |
 | `run_done` | kernel → JS | `{type}` | none | sent once `RunState.finished`; `phase` → `"done"` |
 | `cancel` | JS → kernel | `{type}` | none | front end sends this when its own upload loop unwinds after an `error`, or when an `ack`/`file_done` wait times out (`dropzone.js:278-299`); ends the run cleanly instead of leaving it stuck at `"running"` |
 | `error` | kernel → JS | `{type, reason}` | none | a malformed `chunk` message or a `ProtocolError` from `ChunkAssembler`, reported without raising into the kernel |
-| `zip_request` | JS → kernel | `{type}` | none | the download button asking for a fresh zip of `results/*.star` |
-| `zip` | kernel → JS | `{type, filename}` | 1 (zip bytes) | the built archive, turned into a `Blob` + object-URL download in `renderZip` (`dropzone.js:609-632`) |
-| `zip_error` | kernel → JS | `{type, reason}` | none | `results/` is missing or has no `.star` files yet |
+| `zip_request` | JS → kernel | `{type, run?}` | none | the download button asking for a fresh zip of one run's `.star` files; omitting `run` means the most recent run |
+| `zip` | kernel → JS | `{type, filename}` | 1 (zip bytes) | the built archive, named `<run>-starlists.zip`, turned into a `Blob` + object-URL download in `renderZip` (`dropzone.js:609-632`) |
+| `zip_error` | kernel → JS | `{type, reason}` | none | `results/` is missing or has no `.star` files yet, or `run` names an unknown run |
 
 Two validation layers run before any of that starts. `_on_manifest` refuses a
 manifest with no files — an `error` reply, with `phase` left as it was, rather
 than flipping to `"running"` and wedging there forever with no way to retry short
 of a kernel restart (`photom_dashboard.py:538-547`) — and refuses one with
-duplicate basenames (`photom_dashboard.py:548-562`), a backstop behind the front
-end's own flat-folder rule (§9). Entries with `size == 0` are skipped immediately
-at manifest time rather than waited on: `ChunkAssembler.mark_completed` refuses
+colliding output names, keyed on the `.star` stem rather than the raw basename, so
+`a.fit` and `a.fits` collide too (`photom_dashboard.py:548-562`), a backstop
+behind the front end's own flat-folder rule (§9). Entries with `size == 0` are
+skipped immediately at manifest time rather than waited on: `ChunkAssembler.mark_completed` refuses
 their chunks, `RunState.frame_skipped` counts them, and a `file_done` with
 `ok=False` goes out for each one before the manifest handler returns
 (`photom_dashboard.py:575-587`) — a backstop for any front end that doesn't
@@ -239,9 +240,12 @@ keyboard/touch-accessible "…or choose a folder" button backed by a hidden
 `<input type=file webkitdirectory>` (`dropzone.js:202-228`, `:549-566`) — both
 paths feed the same `startUpload` (`dropzone.js:334-446`) and the same
 `validateFound` checks (§9). The done panel's summary states how many `.star`
-files the zip will actually contain, not just how many frames this run
-processed, since `results/` accumulates across every folder dropped in one
-session (`dashboard_view.py:248-262`).
+files the current run's zip will actually contain, not just how many frames this
+run processed, plus how many nights/runs exist so far this session, since
+`results/` now holds one subfolder per dropped folder rather than one flat pile
+(`dashboard_view.py:248-262`). The download button's chooser `<select>` lets the
+user pick which run to zip — defaulting to the most recent — and stays hidden
+when the session has fewer than two runs.
 
 ## 5. Metadata
 
@@ -419,14 +423,16 @@ chunking protocol itself. The 2026-08-11 run rules this out.
   folder in a single drop, or a FITS file sitting in a subfolder are all rejected
   with a specific message (`validateFound`, `content/dropzone.js:121-153`; the
   loose-file/folder-count checks in the `drop` handler, `:503-528`), and
-  `_on_manifest` refuses a manifest with duplicate basenames as a backstop behind
-  that rule (`photom_dashboard.py:548-562`; see §3). The rule exists because both
-  `/tmp` staging and `results/<stem>.star` key on `os.path.basename` alone
-  (`ChunkAssembler._key`, `photom_dashboard.py:250-255`; `RunState.seed`, `:146`),
-  so two same-named files in different subfolders would otherwise silently
-  overwrite each other. The tradeoff: a nested export (one subfolder per filter or
-  per night, say) has to be dropped one leaf folder at a time rather than as a
-  single tree.
+  `_on_manifest` refuses a manifest with colliding output names as a backstop
+  behind that rule — the check is keyed on the output stem (`Path(name).stem +
+  ".star"`), not the raw basename, so `a.fit` and `a.fits` collide and are
+  refused too (`photom_dashboard.py:548-562`; see §3). The rule exists because
+  both `/tmp` staging and the per-run `results/<run>/<stem>.star` output key on
+  `os.path.basename` alone (`ChunkAssembler._key`, `photom_dashboard.py:250-255`;
+  `RunState.seed`, `:146`), so two same-named files in different subfolders would
+  otherwise silently overwrite each other. The tradeoff: a nested export (one
+  subfolder per filter or per night, say) has to be dropped one leaf folder at a
+  time rather than as a single tree.
 - **Still unmeasured/unverified.** A browser run on 2026-08-11 (`PROGRESS.md`)
   settled the largest structural unknown: anywidget's custom comm messages behave
   the same way under Voici as under plain JupyterLab — the page rendered, the drop

@@ -270,6 +270,30 @@ test('validateFound rejects a folder where every FITS file is 0 bytes', () => {
   });
 });
 
+test('validateFound passes a single folder with multiple files through unchanged', () => {
+  const found = [
+    { path: 'roll/a.fits', file: { size: 100 } },
+    { path: 'roll/b.fits', file: { size: 200 } },
+    { path: 'roll/c.fits', file: { size: 300 } },
+  ];
+
+  const result = validateFound(found);
+
+  assert.deepEqual(result, { ok: true, files: found, emptyCount: 0 });
+});
+
+test('validateFound rejects files from two different top-level folders', () => {
+  const found = [
+    { path: 'a/x.fits', file: { size: 100 } },
+    { path: 'b/y.fits', file: { size: 200 } },
+  ];
+
+  const result = validateFound(found);
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /one folder at a time/);
+});
+
 test('validateFound treats an empty input array as trivially valid with nothing to upload', () => {
   // Callers are responsible for the "no FITS files found" status before
   // calling validateFound; on its own, an empty array is vacuously a valid

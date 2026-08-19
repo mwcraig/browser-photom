@@ -7,10 +7,16 @@ photometry itself is injected, so this test needs neither numpy nor bandaid.
 
 import io
 import zipfile
+from pathlib import Path
 
 import pytest
 
-from photom_dashboard import LazyProcessor, PhotometryDashboard, RunState
+from photom_dashboard import (
+    LazyProcessor,
+    PhotometryDashboard,
+    RunState,
+    _run_dir_name,
+)
 
 CHUNK = 4
 
@@ -43,11 +49,14 @@ class FakeWidget:
 def make_dashboard(tmp_path, process_frame=None, **kw):
     drop, zipw = FakeWidget(), FakeWidget()
     calls = []
+    holder = {}  # late-binding: default_process needs the dashboard it feeds
 
     def default_process(path, name):
         with open(path, "rb") as f:
             calls.append((name, f.read()))
-        (tmp_path / "results" / (name.rsplit(".", 1)[0] + ".star")).write_text(
+        # Into the current run's directory, exactly like the real processor
+        # (make_bandaid_processor re-reads its results_dir callable per frame).
+        (Path(holder["dash"].current_run_dir) / (name.rsplit(".", 1)[0] + ".star")).write_text(
             f"#AAVSO\n{name}\n"
         )
 
@@ -60,12 +69,16 @@ def make_dashboard(tmp_path, process_frame=None, **kw):
         chunk_bytes=CHUNK,
         **kw,
     )
+    holder["dash"] = dash
     dash.attach()
     return dash, drop, zipw, calls
 
 
-def send_manifest(drop, files):
-    drop.receive({"type": "manifest", "files": files})
+def send_manifest(drop, files, folder=None):
+    msg = {"type": "manifest", "files": files}
+    if folder is not None:
+        msg["folder"] = folder
+    drop.receive(msg)
 
 
 def send_file(drop, name, data, chunk=CHUNK):
@@ -417,19 +430,30 @@ def test_stale_results_are_cleared_on_the_first_manifest_of_a_session(tmp_path):
     assert not (results / "old.star").exists()
 
 
-def test_results_accumulate_across_drops_within_a_session(tmp_path):
+def test_each_drop_gets_its_own_run_dir_and_its_own_zip(tmp_path):
     # Only the FIRST manifest clears: the done panel promises "drop another
-    # folder to keep adding".
+    # folder to add a new night" -- and each night keeps its own directory,
+    # so a second drop can never overwrite or shadow the first's starlists.
     dash, drop, zipw, _ = make_dashboard(tmp_path)
-    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    send_manifest(drop, [{"name": "a.fit", "size": 4}], folder="night1")
     send_file(drop, "a.fit", b"aaaa")
-    send_manifest(drop, [{"name": "b.fit", "size": 4}])
+    send_manifest(drop, [{"name": "b.fit", "size": 4}], folder="night2")
     send_file(drop, "b.fit", b"bbbb")
 
-    zipw.receive({"type": "zip_request"})
-    (_, buffers) = zipw.of_type("zip")[0]
+    assert (tmp_path / "results" / "night1" / "a.star").exists()
+    assert (tmp_path / "results" / "night2" / "b.star").exists()
+
+    zipw.receive({"type": "zip_request"})  # no run named -> the most recent
+    (content, buffers) = zipw.of_type("zip")[0]
+    assert content["filename"] == "night2-starlists.zip"
     with zipfile.ZipFile(io.BytesIO(buffers[0])) as zf:
-        assert zf.namelist() == ["a.star", "b.star"]
+        assert zf.namelist() == ["b.star"]
+
+    zipw.receive({"type": "zip_request", "run": "night1"})
+    (content, buffers) = zipw.of_type("zip")[1]
+    assert content["filename"] == "night1-starlists.zip"
+    with zipfile.ZipFile(io.BytesIO(buffers[0])) as zf:
+        assert zf.namelist() == ["a.star"]
 
 
 def test_a_refused_manifest_does_not_clear_stale_results(tmp_path):
@@ -440,6 +464,129 @@ def test_a_refused_manifest_does_not_clear_stale_results(tmp_path):
     _, drop, _, _ = make_dashboard(tmp_path)
     send_manifest(drop, [])
     assert (results / "old.star").exists()
+
+
+# --- per-run isolation ----------------------------------------------------
+
+
+def test_the_run_dir_is_named_after_the_dropped_folder(tmp_path):
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}], folder="Night1")
+    assert dash.current_run_name == "Night1"
+    assert (tmp_path / "results" / "Night1").is_dir()
+
+
+@pytest.mark.parametrize("folder, expected", [
+    (None, "run"),  # foreign front ends that send no folder at all
+    ("", "run"),
+    ("..", "run"),
+    ("../evil", "evil"),
+    ("a\\b", "b"),
+])
+def test_the_folder_field_is_sanitized_as_untrusted_input(tmp_path, folder, expected):
+    # The folder name comes from the browser and becomes a directory under
+    # results/: it must be flattened like every other browser-supplied name.
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}], folder=folder)
+    assert dash.current_run_name == expected
+    assert (tmp_path / "results" / expected).is_dir()
+
+
+def test_same_named_drops_get_disambiguated_run_dirs(tmp_path):
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}], folder="foo")
+    send_file(drop, "a.fit", b"aaaa")
+    send_manifest(drop, [{"name": "b.fit", "size": 4}], folder="foo")
+    send_file(drop, "b.fit", b"bbbb")
+
+    assert dash.current_run_name == "foo (1)"
+    assert (tmp_path / "results" / "foo" / "a.star").exists()
+    assert (tmp_path / "results" / "foo (1)" / "b.star").exists()
+
+
+def test_run_dir_name_disambiguates_against_taken_names():
+    assert _run_dir_name("foo", []) == "foo"
+    assert _run_dir_name("foo", ["foo"]) == "foo (1)"
+    assert _run_dir_name("foo", ["foo", "foo (1)"]) == "foo (2)"
+    assert _run_dir_name("run", ["run"]) == "run (1)"
+
+
+def test_an_unknown_run_in_a_zip_request_is_a_zip_error(tmp_path):
+    # Membership in the session's run list is the traversal guard: a name
+    # the kernel did not itself create never reaches the filesystem.
+    _, drop, zipw, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}], folder="night1")
+    send_file(drop, "a.fit", b"aaaa")
+    zipw.receive({"type": "zip_request", "run": "../../etc"})
+    assert zipw.types() == ["zip_error"]
+    assert "../../etc" in zipw.of_type("zip_error")[0][0]["reason"]
+
+
+def test_the_runs_list_reaches_the_zip_widget_when_a_run_ends(tmp_path):
+    dash, drop, zipw, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}], folder="night1")
+    send_file(drop, "a.fit", b"aaaa")
+    assert zipw.runs == ["night1"]  # pushed at done
+
+    send_manifest(drop, [{"name": "b.fit", "size": 8}], folder="night2")
+    drop.receive({"type": "chunk", "name": "b.fit", "index": 0, "nchunks": 2}, [b"bbbb"])
+    drop.receive({"type": "cancel"})
+    # Pushed at cancel too -- but night2 produced no starlist, so offering
+    # it in the chooser would only ever yield a zip_error.
+    assert dash.phase == "cancelled"
+    assert zipw.runs == ["night1"]
+
+
+def test_a_cancelled_run_with_results_is_still_offered(tmp_path):
+    dash, drop, zipw, _ = make_dashboard(tmp_path)
+    send_manifest(
+        drop,
+        [{"name": "a.fit", "size": 4}, {"name": "b.fit", "size": 4}],
+        folder="night1",
+    )
+    send_file(drop, "a.fit", b"aaaa")
+    drop.receive({"type": "cancel"})
+    assert zipw.runs == ["night1"]
+
+
+def test_same_stem_different_extensions_are_refused(tmp_path):
+    # Output is keyed on the stem, so a.fit and a.fits would both write
+    # a.star -- the same silent overwrite as an exact duplicate name.
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}, {"name": "a.fits", "size": 4}])
+    assert dash.phase == "setup"
+    errors = drop.of_type("error")
+    assert len(errors) == 1
+    reason = errors[0][0]["reason"]
+    assert "a.fit" in reason and "a.fits" in reason and "a.star" in reason
+
+
+def test_a_malformed_size_is_an_error_and_destroys_nothing(tmp_path):
+    # The manifest must be validated whole before results are cleared or
+    # state seeded: a bad entry halfway through must not leave a half-run.
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "old.star").write_text("#stale\n")
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}, {"name": "b.fit", "size": "big"}])
+
+    assert drop.of_type("error")
+    assert dash.phase == "setup"
+    assert (results / "old.star").exists()  # results were NOT cleared
+    assert dash.state.total == 0  # state was NOT half-seeded
+    assert not any(p.is_dir() for p in results.iterdir())  # no run dir made
+
+
+def test_last_sessions_empty_run_dirs_are_pruned_with_the_stale_results(tmp_path):
+    # Clearing unlinks the .star files; leaving the emptied directories
+    # behind would push this session's "foo" to "foo (1)".
+    results = tmp_path / "results"
+    (results / "foo").mkdir(parents=True)
+    (results / "foo" / "old.star").write_text("#stale\n")
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}], folder="foo")
+    assert dash.current_run_name == "foo"
+    assert not (results / "foo" / "old.star").exists()
 
 
 # --- the per-drop hook ----------------------------------------------------
@@ -519,11 +666,13 @@ def test_a_failing_zip_build_comes_back_on_the_zip_channel(tmp_path):
     # `rglob("*.star")` matches by name, directories included, so this makes
     # build_results_zip raise IsADirectoryError -- not the ValueError the
     # empty-results case raises.
-    _, drop, zipw, _ = make_dashboard(tmp_path)
-    (tmp_path / "results" / "a.star").mkdir(parents=True)
+    dash, drop, zipw, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 0}])  # finishes instantly
+    (Path(dash.current_run_dir) / "a.star").mkdir()
     zipw.receive({"type": "zip_request"})
     assert zipw.types() == ["zip_error"]
-    assert drop.sent == []  # must not go to the drop zone: the button waits here
+    # Must not go to the drop zone: the download button waits on zip_error.
+    assert not drop.of_type("error")
 
 
 def test_a_frame_that_raises_is_a_skip_and_the_run_still_finishes(tmp_path):

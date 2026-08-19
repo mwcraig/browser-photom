@@ -45,3 +45,6 @@ class ZipDownload(anywidget.AnyWidget):
     _role = traitlets.Unicode("zip").tag(sync=True)
     label = traitlets.Unicode("Download starlists (.zip)").tag(sync=True)
     enabled = traitlets.Bool(True).tag(sync=True)
+    # Completed run names, for the run-chooser -- most recent LAST, since the
+    # front end defaults the selection to the last entry.
+    runs = traitlets.List(traitlets.Unicode()).tag(sync=True)

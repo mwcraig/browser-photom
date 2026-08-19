@@ -9,17 +9,16 @@ import pytest
 
 from photom_dashboard import RunState
 
-MANIFEST = [
-    {"name": "a.fit", "size": 4_150_000},
-    {"name": "b.fit", "size": 4_150_000},
-    {"name": "c.fit", "size": 4_150_000},
-]
+# seed() takes pre-parsed name and size lists: _on_manifest validates the raw
+# manifest entries itself, before any state is touched.
+NAMES = ["a.fit", "b.fit", "c.fit"]
+SIZES = [4_150_000, 4_150_000, 4_150_000]
 
 
 @pytest.fixture
 def state():
     s = RunState()
-    s.seed(MANIFEST)
+    s.seed(NAMES, SIZES)
     return s
 
 
@@ -72,7 +71,7 @@ def test_remaining_never_goes_negative(state):
 def test_seed_resets_a_previous_run(state):
     state.frame_ok("a.fit")
     state.frame_skipped("b.fit", "bad")
-    state.seed([{"name": "z.fit", "size": 1}])
+    state.seed(["z.fit"], [1])
     assert (state.total, state.processed, state.skipped, state.uploaded) == (1, 0, 0, 0)
     assert state.skips == []
 
@@ -117,7 +116,7 @@ def test_summary_reports_the_median_once_frames_have_landed(state):
 
 def test_seed_clears_frame_times(state):
     state.frame_ok("a.fit", 3.4)
-    state.seed(MANIFEST)
+    state.seed(NAMES, SIZES)
     assert state.frame_times == []
     assert state.median_seconds is None
 
@@ -132,6 +131,6 @@ def test_seeding_with_no_files_leaves_the_run_unfinishable():
     # `finished` requires total > 0, which is why an empty manifest must be
     # refused upstream rather than seeded: it could never reach "done".
     s = RunState()
-    s.seed([])
+    s.seed([], [])
     assert s.total == 0
     assert not s.finished

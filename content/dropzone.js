@@ -138,6 +138,18 @@ export function validateFound(found) {
     }
   }
 
+  // All files must share one top-level folder. The drag-drop handler
+  // already blocks dropping two folders at once (see entries.length > 1
+  // upstream), but the folder-picker <input> has no equivalent chokepoint
+  // -- the OS picker hands back whatever the user selected, from wherever,
+  // with no single "drop event" for this module to intercept first.
+  if (found.length > 0) {
+    const folder = found[0].path.split('/')[0];
+    if (found.some(({ path }) => path.split('/')[0] !== folder)) {
+      return { ok: false, message: 'Drop one folder at a time.' };
+    }
+  }
+
   // A 0-byte .fits is never a processable frame. Filter it out client-side
   // rather than sending it through the manifest/chunk/file_done protocol --
   // otherwise the (untested) empty-buffer path through the kernel comm only
@@ -339,6 +351,9 @@ function renderDropZone({ model, el }) {
 
     model.send({
       type: 'manifest',
+      // validateFound has already enforced a single shared top-level folder,
+      // so any file's first path segment names it.
+      folder: files[0].path.split('/')[0],
       files: files.map((f) => ({ name: basename(f.path), size: f.file.size })),
     });
 
@@ -582,6 +597,18 @@ function renderDropZone({ model, el }) {
 function renderZip({ model, el }) {
   el.innerHTML = '';
 
+  // Which run's results to zip, when there's more than one to choose from.
+  // Options come from the `runs` trait (most-recent-last -- see dropzone.py),
+  // rebuilt on every change:runs so a run finishing mid-session shows up
+  // without a reload.
+  const runSelect = document.createElement('select');
+  runSelect.style.background = 'var(--jp-layout-color1, #fff)';
+  runSelect.style.color = 'var(--jp-ui-font-color1, #333)';
+  runSelect.style.border = '1px solid var(--jp-border-color1, #ccc)';
+  runSelect.style.borderRadius = '4px';
+  runSelect.style.padding = '0.4em 0.6em';
+  runSelect.style.marginRight = '0.5em';
+
   const button = document.createElement('button');
   button.style.background = 'var(--jp-brand-color1, #1976d2)';
   button.style.color = '#fff';
@@ -594,6 +621,7 @@ function renderZip({ model, el }) {
   statusEl.style.marginTop = '0.5em';
   statusEl.style.fontSize = '0.9em';
 
+  el.appendChild(runSelect);
   el.appendChild(button);
   el.appendChild(statusEl);
 
@@ -605,6 +633,25 @@ function renderZip({ model, el }) {
     button.style.cursor = enabled ? 'pointer' : 'not-allowed';
   }
   paint();
+
+  // Hidden outright below two runs: a single run needs no chooser, and
+  // Python defaults `runs` to [] before any run has ever finished. Keeps the
+  // user's current pick if it's still in the new list; otherwise falls back
+  // to the last entry, per the trait's most-recent-last ordering contract.
+  function paintRuns() {
+    const runs = model.get('runs') || [];
+    const previous = runSelect.value;
+    runSelect.innerHTML = '';
+    for (const run of runs) {
+      const opt = document.createElement('option');
+      opt.value = run;
+      opt.textContent = run;
+      runSelect.appendChild(opt);
+    }
+    runSelect.value = runs.includes(previous) ? previous : runs[runs.length - 1] || '';
+    runSelect.style.display = runs.length < 2 ? 'none' : '';
+  }
+  paintRuns();
 
   function onCustomMessage(msg, buffers) {
     if (!msg) return;
@@ -643,7 +690,10 @@ function renderZip({ model, el }) {
     button.disabled = true;
     button.textContent = 'Preparing…';
     try {
-      model.send({ type: 'zip_request' });
+      const runs = model.get('runs') || [];
+      model.send(
+        runs.length > 0 ? { type: 'zip_request', run: runSelect.value } : { type: 'zip_request' }
+      );
     } catch (err) {
       // Only a `zip`/`zip_error` reply re-enables the button, and a send that
       // threw will never get one -- so undo the disable here rather than
@@ -655,11 +705,13 @@ function renderZip({ model, el }) {
 
   model.on('change:label', paint);
   model.on('change:enabled', paint);
+  model.on('change:runs', paintRuns);
 
   return () => {
     model.off('msg:custom', onCustomMessage);
     model.off('change:label', paint);
     model.off('change:enabled', paint);
+    model.off('change:runs', paintRuns);
   };
 }
 

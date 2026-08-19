@@ -746,3 +746,69 @@ entry logged that notebook change at the time — docs/dashboard.md and the
 now corrected.
 
 Suite after the batch: 142 pytest + 16 JS tests, all passing natively.
+# PR #2 review fixes: the third batch (2026-08-19)
+
+Backfilled: this round landed as `3e19b64` without an entry. The ten
+thumbs-up'd fixes from the third critical review, in brief:
+
+1. **`ballet_sgemm` vs the pinned bandaid branch.** NumpyBallet and the
+   pooling helper are imported from `bandaid.ballet` (the branch renamed
+   `ballet_numpy` with no shim), the notebook's cell-2 import gets the same
+   fix, and the cached weights `.npz` is validated before it is trusted —
+   corrupt caches are deleted and re-downloaded. A new AST-based
+   `tests/test_bandaid_api.py` pins the imported names to bandaid's source.
+2. **Ack batching.** `dropzone.js` drains acks per file as the
+   `DONE_LOOKAHEAD` window advances, bounding the kernel comm backlog to the
+   window; validate-then-upload deduplicated into `validateAndUpload`;
+   `byPath` hoisted, exported, and tested.
+3. **`env_setup.py`.** The five environment knobs extracted into one home
+   shared by the dashboard and the notebook's cell 2.
+4. **`LazyProcessor`.** The pipeline-setup-failure latch moved out of the
+   untested view into `photom_dashboard.py`, with six new tests.
+5. **Dispatch table.** One `_HANDLERS` table consulted by both
+   `handle_message` and `_report_failure`, so a message kind's error channel
+   cannot drift from its handler; `zip_widget` is required and the dead
+   defensive branches are gone.
+
+Suite after the batch: 149 pytest + 17 JS tests, all passing natively.
+# Per-run results isolation (2026-08-19)
+
+The three remaining review threads on PR #2 were one design decision —
+`results/` accumulated across drops, so a second dropped folder could
+silently overwrite or shadow the first's starlists — settled with Matt on
+the `:485` thread: each accepted manifest now writes into its own
+subdirectory of `results/`, named after the dropped folder, and each run
+downloads as its own zip.
+
+1. **Per-run directories.** The manifest gains a `folder` field
+   (`dropzone.js` sends the dropped folder's name; `validateFound` now also
+   refuses a picker selection spanning two top-level folders, closing the
+   one path the drop handler's one-folder rule did not cover). The kernel
+   sanitizes `folder` through `protocol_name` as untrusted input (fallback
+   `run`) and disambiguates `foo`, `foo (1)`, `foo (2)` via `_run_dir_name`;
+   `make_bandaid_processor` accepts a callable `results_dir` so the
+   once-per-session processor writes each frame into the current run's
+   directory. Session-start clearing now prunes the previous session's
+   emptied run dirs too, so a fresh `foo` is not pushed to `foo (1)` by a
+   husk.
+2. **Validate-first manifest handling.** `_on_manifest` parses names,
+   sizes, and `folder` into locals before touching disk or state, so a
+   malformed size is an `error` reply with the previous results intact —
+   previously it could clear `results/` and half-seed `RunState` on the
+   way to raising. `RunState.seed(names, sizes)` takes the pre-parsed
+   lists and no longer parses anything itself.
+3. **Stem-keyed collision check.** The duplicate check is keyed on the
+   output stem rather than the raw basename, so `a.fit` + `a.fits` — which
+   would both write `a.star` — are refused with a message naming every
+   colliding group. Within-run stem uniqueness is what makes
+   `build_results_zip`'s flatten-to-basenames behavior (unchanged) correct
+   per run.
+4. **Per-run downloads.** `zip_request` gains an optional `run`
+   (membership in the session's own run list is the traversal guard;
+   omitted means most recent), the zip is named `<run>-starlists.zip`, and
+   `ZipDownload` gains a synced `runs` trait (most-recent-last) feeding a
+   chooser `<select>` that stays hidden below two runs. Runs with no
+   `.star` files are not offered. The done panel reports the current run's
+   zip count plus the session's night count.
+
+Suite after the batch: 163 pytest + 19 JS tests, all passing natively.

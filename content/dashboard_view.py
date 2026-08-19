@@ -187,9 +187,12 @@ class DashboardView:
         # and the form has to be usable before that.
         self.log("Setting up the pipeline (first frame only)...")
         try:
+            # A callable, not a path: the processor is built once per
+            # session but every drop gets its own run directory, so each
+            # frame has to ask the dashboard where the current run lives.
             return make_bandaid_processor(
                 self._meta,
-                self.results_dir,
+                lambda: self.dashboard.current_run_dir,
                 fast_centroid=self.fast_centroid,
                 log=self.log,
             )
@@ -248,16 +251,18 @@ class DashboardView:
         finished = phase in ("done", "cancelled")
         if finished:
             headline = "Finished" if phase == "done" else "Stopped"
-            # The zip bundles everything in results/, which within a session
-            # is cumulative across drops -- so say what the zip will actually
-            # hold, or a second run's counters and the zip contents would
-            # silently disagree.
-            n_star = sum(1 for _ in Path(self.results_dir).rglob("*.star"))
+            # Each drop has its own run directory and its own zip, so say
+            # what *this* run's zip will hold -- and how many nights the
+            # session has piled up, since the chooser offers all of them.
+            n_star = sum(1 for _ in Path(self.dashboard.current_run_dir).glob("*.star"))
+            n_runs = len(self.dashboard._runs)
+            run_name = _escape(self.dashboard.current_run_name or "run")
             self.done_summary.value = (
                 f"<h3>{headline}</h3><p>{state.processed} frame(s) photometered, "
                 f"{state.skipped} skipped. Download the starlists below "
-                f"({n_star} file{'' if n_star == 1 else 's'} in the zip), or "
-                f"drop another folder to keep adding to them.</p>"
+                f"({n_star} file{'' if n_star == 1 else 's'} in &ldquo;{run_name}&rdquo;&rsquo;s zip; "
+                f"{n_runs} night{'' if n_runs == 1 else 's'} this session), or "
+                f"drop another folder to add a new night.</p>"
             )
             self.zip_widget.enabled = True
 

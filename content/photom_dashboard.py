@@ -141,13 +141,17 @@ class RunState:
     """
 
     def __init__(self):
-        self.seed([])
+        self.seed([], [])
 
-    def seed(self, manifest_files):
-        self.names = [protocol_name(f["name"]) for f in manifest_files]
+    def seed(self, names, sizes):
+        # Pre-parsed lists, not raw manifest entries: parsing browser input
+        # can raise, and a seed that raised halfway would leave these
+        # counters describing neither the old run nor the new one. The
+        # caller (`_on_manifest`) validates everything first.
+        self.names = list(names)
         self.name_set = set(self.names)
         self.total = len(self.names)
-        self.total_bytes = sum(int(f.get("size", 0)) for f in manifest_files)
+        self.total_bytes = sum(sizes)
         self.uploaded = 0
         self.processed = 0
         self.skipped = 0
@@ -220,6 +224,30 @@ def protocol_name(name):
     if not key or key in (".", ".."):
         raise ProtocolError(f"unusable file name {name!r}")
     return key
+
+
+def _run_dir_name(folder, existing):
+    """Pick the directory name for a new run under ``results/``.
+
+    ``folder`` is the dropped folder's name as the browser reported it --
+    untrusted input, so it goes through `protocol_name` like every other
+    browser-supplied name; a front end that sent nothing usable falls back
+    to ``run``. Names already in ``existing`` are disambiguated the way
+    file managers do: ``foo``, ``foo (1)``, ``foo (2)``, ...
+    """
+    if not folder:
+        base = "run"
+    else:
+        try:
+            base = protocol_name(folder)
+        except ProtocolError:
+            base = "run"
+    taken = set(existing)
+    name, n = base, 0
+    while name in taken:
+        n += 1
+        name = f"{base} ({n})"
+    return name
 
 
 class ChunkAssembler:
@@ -430,14 +458,20 @@ class PhotometryDashboard:
 
     Wire protocol (`docs/dashboard.md` has the prose version)::
 
-        JS  -> kernel  {type:"manifest", files:[{name,size},...]}
+        JS  -> kernel  {type:"manifest", files:[{name,size},...], folder}
         JS  -> kernel  {type:"chunk", name, index, nchunks} + 1 buffer
         kernel -> JS   {type:"ack", name, index}          <- the back-pressure
         kernel -> JS   {type:"file_done", name, ok, reason}
         kernel -> JS   {type:"run_done"}
-        JS  -> kernel  {type:"zip_request"}
-        kernel -> JS   {type:"zip", filename} + 1 buffer
+        JS  -> kernel  {type:"zip_request", run?}   <- omitted run = most recent
+        kernel -> JS   {type:"zip", filename} + 1 buffer  <- <run>-starlists.zip
         kernel -> JS   {type:"error", reason}
+
+    Each accepted manifest gets its own subdirectory of ``results/``, named
+    after ``folder`` (sanitized; disambiguated ``foo``, ``foo (1)``, ...;
+    ``run`` when the front end sends no folder), and `zip_request` downloads
+    one run's directory -- so a second drop can never silently overwrite or
+    shadow an earlier drop's starlists.
 
     The ack exists to catch a wedged kernel -- each carries a run-cancelling
     timeout on the browser side -- not to pace individual chunks; pacing and
@@ -474,6 +508,13 @@ class PhotometryDashboard:
         self.frames = FrameProcessor(process_frame)
         self.phase = "setup"
         self._results_cleared = False
+        # Run-dir names in manifest order, most recent last. current_run_dir
+        # defaults to results/ itself only as a safe placeholder: no frame
+        # can run before a manifest, and every manifest points it at its own
+        # freshly made run directory first.
+        self._runs = []
+        self.current_run_name = None
+        self.current_run_dir = self.results_dir
         os.makedirs(self.results_dir, exist_ok=True)
 
     # -- wiring ------------------------------------------------------------
@@ -503,7 +544,7 @@ class PhotometryDashboard:
                      "drop_zone", "error"),
         "chunk": (lambda self, content, buffers: self._on_chunk(content, buffers),
                   "drop_zone", "error"),
-        "zip_request": (lambda self, content, buffers: self._on_zip_request(),
+        "zip_request": (lambda self, content, buffers: self._on_zip_request(content),
                          "zip_widget", "zip_error"),
         "cancel": (lambda self, content, buffers: self._on_cancel(),
                    "drop_zone", "error"),
@@ -545,19 +586,32 @@ class PhotometryDashboard:
             self._send(self.drop_zone,
                        {"type": "error", "reason": "manifest listed no files"})
             return
+        # Parse the whole manifest into locals before touching disk or
+        # state: a malformed entry raises here, comes back as an `error`
+        # via handle_message's catch-all, and leaves the previous run's
+        # results and counters exactly as they were.
         names = [protocol_name(f.get("name", "")) for f in files]
-        seen, dupes = set(), set()
+        sizes = [int(f.get("size", 0)) for f in files]
+        folder = content.get("folder")
+        # Output files are keyed on the stem (<run>/<stem>.star), so names
+        # that differ only in extension -- a.fit and a.fits -- would
+        # silently overwrite each other's starlist just like exact
+        # duplicates. Refuse rather than guess which one the user meant.
+        # The front end refuses non-flat folders, which makes collisions
+        # impossible there; this backs it up for any other front end.
+        by_stem = {}
         for n in names:
-            (dupes if n in seen else seen).add(n)
-        if dupes:
-            # /tmp staging and results/<stem>.star are both keyed on the
-            # basename, so duplicates would silently overwrite each other.
-            # The front end refuses non-flat folders, which makes collisions
-            # impossible there; this backs it up for any other front end.
+            by_stem.setdefault(Path(n).stem, []).append(n)
+        collisions = [
+            f'{" and ".join(group)} would all produce "{stem}.star"'
+            for stem, group in sorted(by_stem.items())
+            if len(group) > 1
+        ]
+        if collisions:
             self._send(self.drop_zone, {
                 "type": "error",
-                "reason": ("duplicate file name(s) in manifest: "
-                           + ", ".join(sorted(dupes))),
+                "reason": "output name collision(s) in manifest: "
+                          + "; ".join(collisions),
             })
             return
         if not self._results_cleared:
@@ -567,8 +621,18 @@ class PhotometryDashboard:
             # in the same session keep adding, as the done panel promises.
             self._clear_results()
             self._results_cleared = True
+        run_name = _run_dir_name(
+            folder,
+            set(self._runs)
+            | {p.name for p in Path(self.results_dir).iterdir() if p.is_dir()},
+        )
+        run_dir = Path(self.results_dir) / run_name
+        os.makedirs(run_dir)
+        self._runs.append(run_name)
+        self.current_run_name = run_name
+        self.current_run_dir = str(run_dir)
         self.assembler.reset()  # a second drop starts clean
-        self.state.seed(files)
+        self.state.seed(names, sizes)
         self.phase = "running"
         if self.on_manifest is not None:
             self.on_manifest(self)
@@ -577,8 +641,8 @@ class PhotometryDashboard:
         # has never been verified in a browser. The front end filters these
         # client-side; this covers any other front end -- including refusing
         # their chunks, via the completed set.
-        for name, entry in zip(names, files):
-            if int(entry.get("size", 0)) == 0:
+        for name, size in zip(names, sizes):
+            if size == 0:
                 self.assembler.mark_completed(name)
                 self.state.frame_skipped(name, "empty file (0 bytes)")
                 self._send(self.drop_zone, {
@@ -589,9 +653,19 @@ class PhotometryDashboard:
         self._changed()
 
     def _clear_results(self):
-        for path in Path(self.results_dir).rglob("*.star"):
+        root = Path(self.results_dir)
+        for path in root.rglob("*.star"):
             try:
                 path.unlink()
+            except OSError:
+                pass
+        # Prune the previous session's now-empty run directories too, or a
+        # fresh session's "foo" would start life as "foo (1)" because of a
+        # husk. rmdir refuses a non-empty directory, so anything still
+        # holding foreign files survives.
+        for path in sorted((p for p in root.rglob("*") if p.is_dir()), reverse=True):
+            try:
+                path.rmdir()
             except OSError:
                 pass
 
@@ -648,15 +722,44 @@ class PhotometryDashboard:
     def _finish_if_done(self):
         if self.state.finished and self.phase == "running":
             self.phase = "done"
+            self._push_runs()
             self._send(self.drop_zone, {"type": "run_done"})
 
-    def _on_zip_request(self):
+    def _push_runs(self):
+        # Only runs that actually produced a starlist: an all-skip run has
+        # nothing to download, and offering it in the chooser would just
+        # yield a zip_error.
+        self.zip_widget.runs = [
+            r for r in self._runs
+            if any((Path(self.results_dir) / r).glob("*.star"))
+        ]
+
+    def _on_zip_request(self, content):
+        run = (content or {}).get("run")
+        if run is None:
+            if not self._runs:
+                self._send(self.zip_widget, {
+                    "type": "zip_error",
+                    "reason": "No results yet - photometer some frames first.",
+                })
+                return
+            run = self._runs[-1]
+        elif run not in self._runs:
+            # Membership in the session's own run list is the traversal
+            # guard: a name never reaches the filesystem unless this kernel
+            # created a directory called exactly that.
+            self._send(self.zip_widget, {
+                "type": "zip_error",
+                "reason": f"No run named {run!r} in this session.",
+            })
+            return
         try:
-            data = build_results_zip(self.results_dir)
+            data = build_results_zip(Path(self.results_dir) / run)
         except ValueError as exc:
             self._send(self.zip_widget, {"type": "zip_error", "reason": str(exc)})
             return
-        self._send(self.zip_widget, {"type": "zip", "filename": self.zip_name}, [data])
+        self._send(self.zip_widget,
+                   {"type": "zip", "filename": f"{run}-{self.zip_name}"}, [data])
 
     def _on_cancel(self):
         if self.phase != "running":
@@ -670,6 +773,7 @@ class PhotometryDashboard:
         # frame runs to completion inside its own handler.
         self.assembler.reset()
         self.phase = "cancelled"
+        self._push_runs()
         self._changed()
 
     # -- helpers -----------------------------------------------------------
@@ -710,9 +814,13 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
     """Build the real `process_frame(path, name)` used in the browser.
 
     `user_meta` is read on every frame, so the view can keep it live while the
-    form is still editable. bandaid, astropy, numpy and scipy are imported
-    here rather than at module scope, so the host test environment never needs
-    them. The environment knobs themselves (warnings filter, keyring backend,
+    form is still editable. `results_dir` may be a zero-arg callable returning
+    the directory to write into, re-read on every frame -- that is how the
+    dashboard points frames at the current run's directory (which the kernel
+    creates per manifest) through a processor that is only built once per
+    session. bandaid, astropy, numpy and scipy are imported here rather than
+    at module scope, so the host test environment never needs them. The
+    environment knobs themselves (warnings filter, keyring backend,
     negative-import cache, pyodide_http, IERS settings) live in `env_setup.py`
     -- the one home shared with `watch_photometry.ipynb`'s cell 2.
     """
@@ -747,7 +855,8 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
     fc.install(log=log)
 
     config = PhotometryConfig()
-    os.makedirs(results_dir, exist_ok=True)
+    if not callable(results_dir):
+        os.makedirs(results_dir, exist_ok=True)
     # Batch prep is built from the first frame, exactly as the bandaid CLI
     # does with the first file of a batch.
     batch = {"prep": None, "n": 0}
@@ -778,7 +887,8 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
                 config=prep.config,
                 input_photometry_coords=prep.photometry_coords,
             )
-            write_starlist_set(by_filter, _Path(results_dir) / (_Path(name).stem + ".star"))
+            dest = _Path(results_dir() if callable(results_dir) else results_dir)
+            write_starlist_set(by_filter, dest / (_Path(name).stem + ".star"))
         except FrameError as exc:
             return str(exc)
         # One line per frame, the same shape the watch notebook printed. The

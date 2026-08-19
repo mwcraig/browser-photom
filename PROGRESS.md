@@ -812,3 +812,23 @@ downloads as its own zip.
    zip count plus the session's night count.
 
 Suite after the batch: 163 pytest + 19 JS tests, all passing natively.
+# Browser-verification fixes: chooser default + bandaid fetch (2026-08-19)
+
+Two fixes out of the first end-to-end browser check of the per-run batch:
+
+1. **Chooser pinned to night 1.** The run chooser kept "the current
+   selection if still present" -- but the hidden single-run select already
+   carried a default-assigned value, so after a second run the chooser (and
+   the download) stayed on the first run forever. Selection policy is now
+   the exported, tested `pickRun(runs, previous, userPicked)`: a run the
+   *user* picked sticks; anything else follows the newest run. Verified in
+   the browser: default download is the newest run's zip, manually choosing
+   the first run downloads that one.
+2. **`fetch-bandaid` chased a deleted branch.** bandaid PR #94 merged
+   `numpy-ballet` into main and the branch is gone, so the clone fallback
+   died. The task now tracks `main`; d1de73f (the reviewed pin) is an
+   ancestor, ballet.py is untouched since, the eloy pin is unchanged, and
+   the AST guard in tests/test_bandaid_api.py now runs for real against
+   main's ballet.py (it had nothing to check before the clone existed).
+
+Suite after the batch: 163 pytest + 23 JS tests, all passing natively.

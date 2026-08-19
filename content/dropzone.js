@@ -591,6 +591,20 @@ function renderDropZone({ model, el }) {
 }
 
 /**
+ * Which run the chooser should show after the runs list changes.
+ *
+ * `previous` survives only when the *user* picked it (and it is still in the
+ * list); otherwise the newest run wins. The select always carries a value --
+ * the default assigned while it sat hidden behind a single run -- so "keep
+ * whatever it was" would pin the chooser to the first run forever and the
+ * download button would quietly keep serving night 1.
+ */
+export function pickRun(runs, previous, userPicked) {
+  if (userPicked && runs.includes(previous)) return previous;
+  return runs[runs.length - 1] || '';
+}
+
+/**
  * Zip-download widget: a single button that asks the kernel to bundle up
  * results and streams the zip bytes back as a comm buffer.
  */
@@ -635,9 +649,13 @@ function renderZip({ model, el }) {
   paint();
 
   // Hidden outright below two runs: a single run needs no chooser, and
-  // Python defaults `runs` to [] before any run has ever finished. Keeps the
-  // user's current pick if it's still in the new list; otherwise falls back
-  // to the last entry, per the trait's most-recent-last ordering contract.
+  // Python defaults `runs` to [] before any run has ever finished. Selection
+  // policy lives in pickRun: a run the user picked sticks, anything else
+  // follows the newest run (the trait is most-recent-last).
+  let userPicked = false;
+  runSelect.addEventListener('change', () => {
+    userPicked = true;
+  });
   function paintRuns() {
     const runs = model.get('runs') || [];
     const previous = runSelect.value;
@@ -648,7 +666,7 @@ function renderZip({ model, el }) {
       opt.textContent = run;
       runSelect.appendChild(opt);
     }
-    runSelect.value = runs.includes(previous) ? previous : runs[runs.length - 1] || '';
+    runSelect.value = pickRun(runs, previous, userPicked);
     runSelect.style.display = runs.length < 2 ? 'none' : '';
   }
   paintRuns();

@@ -7,8 +7,9 @@ version = "0.1.0"
 
 [tasks]
 fetch-astrowidgets = "git -C astrowidgets-src pull --ff-only 2>/dev/null || git clone https://github.com/astropy/astrowidgets astrowidgets-src"
-# Full clone (not shallow) so hatch-vcs sees tags; branch numpy-ballet = tip of PR #94
-fetch-bandaid = "(git -C bandaid-src fetch && git -C bandaid-src checkout numpy-ballet && git -C bandaid-src pull --ff-only) 2>/dev/null || git clone --branch numpy-ballet https://github.com/mwcraig/bandaid bandaid-src"
+# Full clone (not shallow) so hatch-vcs sees tags; main, since bandaid PR #94
+# (numpy-ballet) merged and the branch was deleted
+fetch-bandaid = "(git -C bandaid-src fetch && git -C bandaid-src checkout main && git -C bandaid-src pull --ff-only) 2>/dev/null || git clone --branch main https://github.com/mwcraig/bandaid bandaid-src"
 # Pinned to the commit bandaid's pyproject pins (detached HEAD)
 fetch-eloy = "(git -C eloy-src fetch && git -C eloy-src checkout a056c91a945772e0520a89695f8fcd16fda36870) 2>/dev/null || (git clone https://github.com/mwcraig/eloy eloy-src && git -C eloy-src checkout a056c91a945772e0520a89695f8fcd16fda36870)"
 fetch-starlist-schema = "git -C aavso-starlist-schema-src pull --ff-only 2>/dev/null || git clone https://github.com/mwcraig/aavso-starlist-schema aavso-starlist-schema-src"

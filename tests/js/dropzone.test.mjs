@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isFitsName, collectEntries, sliceChunks, validateFound, byPath } from '../../content/dropzone.js';
+import { isFitsName, collectEntries, sliceChunks, validateFound, byPath, pickRun } from '../../content/dropzone.js';
 
 // ---------------------------------------------------------------------
 // Fake FileSystemEntry helpers.
@@ -301,4 +301,30 @@ test('validateFound treats an empty input array as trivially valid with nothing 
   const result = validateFound([]);
 
   assert.deepEqual(result, { ok: true, files: [], emptyCount: 0 });
+});
+
+test('pickRun follows the newest run when the previous value was only a default', () => {
+  // The regression from the first browser check: after run 1 the hidden
+  // select already carried "qatar8" (assigned, never chosen), so a
+  // keep-if-still-present rule pinned the chooser to night 1 forever and the
+  // download button kept serving the first run's zip.
+  const picked = pickRun(['qatar8', 'qatar8 (1)'], 'qatar8', false);
+
+  assert.equal(picked, 'qatar8 (1)');
+});
+
+test('pickRun keeps a run the user actually picked', () => {
+  const picked = pickRun(['a', 'b', 'c'], 'a', true);
+
+  assert.equal(picked, 'a');
+});
+
+test('pickRun falls back to the newest run when a user pick is no longer listed', () => {
+  const picked = pickRun(['b', 'c'], 'a', true);
+
+  assert.equal(picked, 'c');
+});
+
+test('pickRun returns the empty string for an empty runs list', () => {
+  assert.equal(pickRun([], '', false), '');
 });

@@ -9,7 +9,7 @@ loading ballet.py alone via importlib would fail; the names are recovered by
 parsing both files' ASTs instead, which needs neither package importable.
 
 Skipped entirely unless the bandaid-src checkout (fetched by the
-`fetch-bandaid` pixi task, branch numpy-ballet) is present on disk -- CI/dev
+`fetch-bandaid` pixi task, branch main) is present on disk -- CI/dev
 machines that haven't run that task get no signal either way, rather than a
 false failure.
 """

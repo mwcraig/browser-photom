@@ -336,6 +336,19 @@ Voici's generated index page also lists the other notebooks under `content/`
 (`watch_photometry.ipynb`, `demo.ipynb`, `spike_comm.ipynb`, etc.), rendered the
 same way, since `build-dash` points at the whole `content/` directory.
 
+**GitHub Pages.** `.github/workflows/pages.yml` runs `pixi run -e dash
+build-dash` on `ubuntu-latest` (`pixi.toml` lists `linux-64` alongside
+`osx-arm64` for this reason; the `dash` env resolves the same versions on both),
+copies `pages/index.html` over `dist-dash/index.html` so the site root redirects
+to the dashboard, adds `.nojekyll`, and deploys `dist-dash/` (~260 MB) with
+`actions/deploy-pages` on every push to `main` (or by hand via
+`workflow_dispatch` from any branch). Public URL:
+`https://mwcraig.github.io/browser-photom/`. All of Voici's emitted URLs are
+relative, so the `/browser-photom/` subpath needs no configuration. One caveat:
+the wasm kernel environment (`environment.yml`) is re-solved by jupyterlite-xeus
+on every build and is not covered by `pixi.lock`, so two deploys of the same
+commit can differ if emscripten-forge moves.
+
 Tests: `pixi run test` (pytest) and `pixi run test-js` (`node --test
 'tests/js/**/*.test.mjs'`). The glob is quoted in `pixi.toml`'s `test-js` task because Node ≥ 22
 treats a bare directory positional as a glob pattern matching the directory

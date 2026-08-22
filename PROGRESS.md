@@ -434,18 +434,447 @@ per-stage profile (2026-08-04), the offset-coherence experiment, and the
 plan for the next optimization. The items below are superseded where they
 overlap.
 
-**Still open / next steps (as of 2026-07-30):**
+**Still open / next steps (as of 2026-07-30, item 1 resolved 2026-08-10):**
 
-1. Explain the remaining 6.5 vs 3.4 s/frame gap between the full-folder
-   and 9-frame runs. Prime suspect: frontend output-rendering churn from
-   the per-frame warning (hundreds of accumulated outputs + the
-   path-resolution stacks above). Discriminating test: add
-   `warnings.filterwarnings("ignore", message=".*binary_opening.*",
-   category=FutureWarning)` to the setup cell and re-run the full folder
-   with the tab visible. If still ~6.5 s, next suspect is DevTools
-   itself being open — close it for a run (the watcher keeps running;
-   its output is buffered).
+1. ~~Explain the remaining 6.5 vs 3.4 s/frame gap between the full-folder
+   and 9-frame runs.~~ **Resolved 2026-08-10: it is the file browser.**
+   6.5 s/frame is with the dropped FITS folder *open* in the sidebar;
+   3.4 s/frame is with it closed. An open directory listing makes
+   JupyterLab re-poll the contents drive, and every one of those polls is
+   an IndexedDB round trip brokered on the main thread — the same
+   mechanism as the hidden-tab throttling, and the reason upload
+   contention and directory size both came back refuted: the variable was
+   never the files, it was whether anything was watching them. The
+   output-rendering-churn theory (per-frame `FutureWarning`) was in the
+   right family but was not the cause; the filter added in `fc87557` is
+   still worth keeping for log readability.
 2. Optional upstream: report/fix the `binary_opening` deprecation in
    eloy (detection.py:70) before skimage 0.28 removes it.
-3. Operational rule (confirmed): run the tab in its own *visible*
-   window; sustained backgrounding is ~7× slower.
+3. Operational rules (both confirmed): run the tab in its own *visible*
+   window, and keep the watched folder *closed* in the file browser.
+   Sustained backgrounding is ~7× slower; an open listing is ~1.9×.
+
+# Voici dashboard for non-Jupyter users (2026-08-11)
+
+Built a Voici dashboard (`content/photometry_dashboard.ipynb`) that a
+non-Jupyter user can drive directly: instructions + metadata form + folder
+drop zone → live progress → a button that downloads a zip of the `.star`
+starlists. The dashboard work itself left `watch_photometry.ipynb` alone,
+and it stays as the developer/debug path. (Not untouched on this branch,
+though: the 2026-08-10 fast-centroid work had already added the notebook's
+implementation and validation cells — recorded in the 2026-08-18 second-batch
+entry, since nothing logged that notebook change at the time.)
+
+Instead of the file browser uploading images to the JupyterLite contents
+drive, a custom `anywidget` drop zone (`content/dropzone.py` +
+`content/dropzone.js`) enumerates the dropped folder in JS and streams each
+image over the widget comm in 1 MiB chunks straight into the kernel's own
+MEMFS at `/tmp`. Images therefore never touch the contents drive; only the
+`.star` outputs still go there, in `results/`. This removes the "keep the
+dropped folder closed in the file browser" rule from the section above —
+there is no contents-drive listing to re-poll — but the visible-tab rule
+(sustained backgrounding ~7× slower) still applies, since the browser main
+thread still brokers whatever IndexedDB reads/writes JupyterLite itself
+does.
+
+New files: `content/photom_dashboard.py` (kernel logic — metadata
+validation, run state, chunk assembly into MEMFS, per-frame processing, zip
+building, the message handler, and `make_bandaid_processor()` which lazily
+builds the real bandaid pipeline so the page renders before the 39 MB CNN
+weights download starts), `content/dashboard_view.py` (the ipywidgets shell:
+three panels — setup/running/done — in one `VBox`, shown and hidden rather
+than swapped so the drop zone's front end is never torn down mid-upload),
+`content/dropzone.py` + `content/dropzone.js` (the two anywidgets and their
+shared ESM front end), `content/fast_centroid.py` (the `FAST_CENTROID` code
+from `docs/speedup-plan-2026-08.md` §5, lifted verbatim out of
+`watch_photometry.ipynb` cell 5 so both paths share it),
+`content/spike_comm.ipynb` (times binary comm buffers in both directions so
+`CHUNK_BYTES` can be set from data), `docs/dashboard.md` (architecture +
+protocol + known limits), `pytest.ini`, `tests/` (80 Python tests in 5
+files) and `tests/js/dropzone.test.mjs` (11 tests, `node --test`, no npm
+deps).
+
+Config: `pixi.toml` gained `anywidget==0.11.0`, `pytest` and `nodejs` in
+`[dependencies]`, `test`/`test-js` tasks, and a separate `dash` feature
+environment carrying `voici` — `voici 0.10.0` pins `jupyterlite-core
+>=0.7,<0.8` while the default env resolves `0.8.1`, so putting voici in the
+default environment would silently downgrade the JupyterLab dev site.
+`environment.yml` gained `anywidget==0.11.0` in the conda `dependencies:`
+block (noarch, as are its three deps) pinned to match — a version mismatch
+between the two fails silently, because `jupyter lite build` copies the
+prebuilt front end out of the host env while the kernel imports the other
+one. `.gitignore` gained `dist-dash/`.
+
+**What the tests cover, and what they deliberately don't.** The 80 Python
+tests (`tests/test_chunk_assembly.py`, `test_dashboard_flow.py`,
+`test_metadata.py`, `test_run_state.py`, `test_zip.py`) exercise
+`content/photom_dashboard.py` end to end against a `FakeWidget` standing in
+for anywidget's comm and an injected `process_frame` callable standing in
+for bandaid — metadata validation, out-of-order/duplicate/malformed chunk
+handling, the manifest→chunk→ack→file_done→run_done message sequence,
+cancel, and zip building. They deliberately do **not** touch
+`content/dashboard_view.py` (the ipywidgets shell — untestable without a
+running front end and explicitly out of scope per its own module
+docstring), the real bandaid pipeline (`make_bandaid_processor`, which
+imports numpy/astropy/bandaid and is only reachable in the browser), or
+anything that needs an actual browser (anywidget's JS side, MEMFS, comm
+buffers). The 11 JS tests (`tests/js/dropzone.test.mjs`, Node's built-in
+`node --test`) cover `content/dropzone.js`'s pure functions —
+`isFitsName`, `collectEntries` (including Chromium's 100-entries-per-call
+`readEntries()` batching), `sliceChunks` — against faked
+`FileSystemEntry`/`DataTransferItem` objects, not a real drag-and-drop or a
+real anywidget model.
+
+**Verified on this machine**: `pixi run test` → 80 passed; `pixi run
+test-js` → 11 passed. The two pixi environments resolve as designed:
+default resolves `jupyterlite-core 0.8.1` + `anywidget 0.11.0`; the `dash`
+environment resolves `jupyterlite-core 0.7.6` + `voici 0.10.0` +
+`voici_core 0.10.0` + `anywidget 0.11.0`. **The build gate passed**:
+`dist-dash/` exists (`pixi run build-dash` has been run), including
+`dist-dash/voici/render/photometry_dashboard.html` and
+`dist-dash/files/photometry_dashboard.ipynb` — this proves `anywidget`
+resolves in both the host build env (`dash`) and the emscripten kernel env
+(`environment.yml`) at the same pinned version, the exact failure mode the
+version-pin comments above are guarding against.
+
+**Browser status** — (b) was settled in the browser on 2026-08-11 and (a)
+was half settled the same day; (c) and (d) are still open. Nothing in the
+host verification above touches a real browser, so these are the items
+that matter:
+
+(a) That a 4 MB binary comm buffer round-trips on xeus-wasm under Voici at
+    all, and at what throughput. **The "at all" half is resolved
+    2026-08-11, in the browser: it does.** `content/spike_comm.ipynb` was
+    run at all five sizes (64 KiB, 256 KiB, 1 MiB, 4 MiB, 4,150,000 B — a
+    real Seestar frame) in both directions and every one reported
+    `ok=True`, i.e. received length matched requested length, including a
+    single 4 MiB buffer. Binary comm does not truncate or wedge here, so
+    the documented base64-over-JSON fallback (~33% overhead) is not
+    needed.
+
+    **The throughput half is still open, because a stale `dist/` was
+    served, and the notebook's own printed verdict on it is wrong.** It
+    concluded "4 MiB is meaningfully cheaper per byte — raising
+    `CHUNK_BYTES` would pay off"; that does not follow from the run. The
+    driver cell in `content/` keeps one transfer in flight at a time
+    (`_pump`/`_QUEUE`) specifically so each row is an independent round
+    trip — its comment spells out that firing all ten at once makes every
+    trip after the first include the cost of draining the earlier
+    payloads. That pacing was added to `content/spike_comm.ipynb` at
+    10:22:19; the `dist/` that `pixi run serve` was serving had been built
+    at 10:19:31, so the browser got a pre-pacing copy that fires all ten
+    requests in one burst (the executed notebook's code cells are
+    byte-identical to `dist/files/spike_comm.ipynb`; `dist-dash/` was
+    current and would have been fine). The output shows the consequence:
+    all ten round trips took 0.038–0.053 s, a 1.4× spread across a 64×
+    range of sizes, i.e. ten timestamps from one queue draining in a
+    single ~50 ms window rather than ten measurements. The `MB/s` column
+    is just `nbytes / 0.045 s`, and the "3.98× cheaper per byte at 4 MiB"
+    figure is that fixed divisor restated.
+
+    So MB/s in each direction is still unmeasured and still needs to be
+    recorded here. `CHUNK_BYTES` stays at `1 << 20` — not shown optimal,
+    just unchallenged. To settle it: **`pixi run build` first**, then
+    `pixi run serve` → `localhost:8000` → run the cells in order. The
+    per-size `seconds` column is the output that matters, not `MB/s`, and
+    it should climb with transfer size; flat ~45 ms across all five sizes
+    means the served build is stale again.
+(b) ~~That anywidget custom comm messages behave identically under Voici as
+    under plain JupyterLab.~~ **Resolved 2026-08-11, in the browser.** The
+    dashboard rendered at `/voici/render/photometry_dashboard.html`, the
+    metadata form armed the drop zone, a dropped folder uploaded over the
+    comm, and the pipeline ran: weights downloaded (39.2 MB), fast
+    centroiding installed, batch prep produced 388 photometry stars, and
+    the one-shot ordering check reported `194/388 stars on-frame, CNN on
+    100`. That on-frame count matches the native measurement in
+    `docs/speedup-plan-2026-08.md` §3 exactly, so the WCS projection and
+    the 8 px margin behave the same in the browser as natively. This was
+    the largest single unknown in the design — anywidget under JupyterLite
+    is documented to work only when installed in the distribution, and
+    Voici adds Voilà's rendering layer on top of that; both hold.
+(c) The acceptance criterion for correctness: unzip the downloaded
+    starlists and `diff -r` against `results/*.star` from a
+    `watch_photometry.ipynb` run on the same Qatar-8 folder with the same
+    metadata, expecting byte-identical output. Not yet run.
+(d) The per-frame time, which is the whole performance premise for this
+    dashboard: it should beat 3.4 s/frame (the notebook path's
+    filesystem-sink-fixed steady state, PROGRESS.md 2026-07-29) if taking
+    images off the contents drive entirely is the free speedup it looks
+    like on paper. Not yet measured; the number belongs here once it is.
+    **The first browser run could not answer this**: the dashboard logged
+    only skips, so successful frames left no trace but an advancing
+    counter. Fixed in `9132dc6` — `PhotometryDashboard` now times each
+    frame around `FrameProcessor.run`, `RunState` keeps the times and
+    exposes a median (median, not mean: browser stalls throw multi-second
+    outliers, one 9.1 s frame in the 67-frame profile), the progress line
+    shows `median N.N s/frame`, and `make_bandaid_processor` logs the
+    per-frame detail line the watch notebook printed (index, seconds,
+    name, star count, FWHM). `dist-dash/` was rebuilt against this, so the
+    next run reports its own timing. Note frame 1 carries batch prep and
+    the Gaia cone search and will be far slower than the steady state.
+
+**Known accepted regressions** relative to the watch-loop notebooks:
+
+- **No resume across a page reload.** `watch_uploads.ipynb`/
+  `watch_photometry.ipynb` process files already sitting in the contents
+  drive's `incoming/`, backed by IndexedDB, so a reload just restarts
+  polling against whatever's still there. The dashboard's drop is a
+  one-shot JS enumeration streamed straight into MEMFS; a reload loses the
+  in-flight run with no way to pick back up mid-folder.
+- **Cancel lands at frame granularity (~3.4 s).** A frame runs synchronously
+  inside a single comm message handler (`PhotometryDashboard._on_chunk`),
+  and the kernel only processes comm messages while idle, so a `cancel`
+  message sent mid-frame is not observed until that frame's handler
+  returns.
+
+# PR #2 review fixes: the agreed six-item batch (2026-08-18)
+
+The critical-review pass on PR #2 (Copilot's 9 comments + the multi-agent
+review's 13, all replied to on GitHub) converged on a six-item fix batch;
+this lands all of it. One design question was settled along the way: rather
+than *detecting* duplicate basenames across subfolders, the front end now
+refuses anything but a **single flat folder** (one folder per drop, FITS
+files directly inside it), which makes the collision structurally
+impossible; `_on_manifest` refuses duplicate-basename manifests as a
+backstop for any other front end.
+
+1. **Per-drop state reset.** `make_bandaid_processor` returns a
+   `process_frame` with a `reset()` hook (clears the cached batch prep,
+   re-arms `fast_centroid`'s one-shot check); `DashboardView._on_new_run`
+   calls it on every manifest, so a second folder re-preps from its own
+   first frame instead of running against the previous folder's catalog.
+   The same hook clears a new pipeline-setup-failure latch: the first setup
+   exception (weights download, bandaid import) logs loudly and every later
+   frame in that run skips immediately with "pipeline setup failed
+   earlier", so a 350-frame folder drains in seconds instead of retrying a
+   39 MB download per frame. Re-dropping retries setup exactly once.
+2. **Collision-proof uploads.** The flat-folder rule above, plus a
+   `completed` set in `ChunkAssembler`: a chunk stream restarting at index
+   0 for an already-finished name raises `ProtocolError` instead of
+   double-counting (which could flip the run to "done" with a manifest
+   entry still un-uploaded).
+3. **`results/` lifecycle.** Cleared once per kernel session, on the first
+   manifest; drops within a session stay additive, and the done panel now
+   states how many `.star` files the zip will actually contain, so the
+   counters and the zip can no longer silently disagree.
+4. **Drop-zone guards.** Empty drops, loose files (`some(isFile)` — a
+   folder-plus-stray drop is now rejected, not silently partially
+   uploaded), multi-folder drops, and 0-byte files are all handled
+   client-side with specific messages; `_on_manifest` refuses empty
+   manifests (previously wedged the state machine at "running" forever)
+   and immediately skips 0-size entries; both kernel waits have timeouts
+   (ack 60 s, file_done 10 min — the first frame legitimately takes
+   minutes) that cancel the run and say to reload; and a keyboard-
+   accessible "choose a folder" button (`webkitdirectory`) feeds the same
+   upload path.
+5. **`fast_centroid` consolidation.** `watch_photometry.ipynb` now imports
+   `content/fast_centroid.py` (the inline cell-5 copy, already diverged, is
+   gone — README's "one implementation" claim is now true), the
+   `fast_centroid=False` toggle is actually wired (install always, sync the
+   module flag; the wrapper delegates to stock when False), edge-band stars
+   are plane-corrected instead of left at their projected position (the
+   stock path returns garbage in that band — measured, notebook validation
+   cell), the sparse-fit fallback keeps the bright CNN centroids and
+   re-runs the original only on the faint rows, and
+   `tests/test_fast_centroid.py` (22 tests) covers the numerics — numpy is
+   now a host pixi dependency for exactly that file.
+6. **Small stuff.** Chunk payloads are written as memoryviews (no
+   `.tobytes()` copy); the weights download writes to a temp name and
+   `os.replace`s into place, with the URL built from `bandaid.ballet`'s own
+   pinned repo/revision constants; the setup form is shown whenever a run
+   is not active (metadata editable between folders, as designed);
+   `spike_comm.ipynb` now crc32-verifies payloads on both receivers (the
+   2026-08-11 "intact" was length-only; the planned throughput rerun will
+   earn the word); docs de-numbered the test counts and rewrote the §9
+   open-questions list down to what is actually open (comm throughput,
+   end-to-end per-frame time).
+
+Suite after the batch: 122 pytest + 16 JS tests, all passing natively.
+Still open, unchanged by this batch: the spike throughput rerun (rebuild
+first) and reading a real median s/frame off a browser run.
+# PR #2 review fixes: the second batch (2026-08-18)
+
+The remaining review threads — the second critical review's five inline
+comments and Copilot's second review, including its five suppressed
+low-confidence comments — were answered on GitHub and, on approval, land
+here. First step was merging the diverged remote head `c35caa7`, whose
+upload-loop cancel-on-error, `handle_message` guard, and claim-before-
+enumeration drop-handler fix came in with the merge.
+
+1. **Windowed upload.** The upload loop no longer serializes upload against
+   photometry: the sender runs up to one file ahead of the kernel
+   (`DONE_LOOKAHEAD = 2` outstanding `file_done`s), reading and queueing the
+   next file while the current frame computes; `ack`s are collected
+   asynchronously and serve as wedge detection. (Merely dropping the
+   `file_done` barrier would have gained almost nothing — acks are sent
+   before processing, so only one chunk can queue behind a compute.) Two
+   consequences, documented in docs/dashboard.md §3: a single 10-minute
+   timeout tier for both waits, since an ack now legitimately arrives a
+   whole frame's compute after its chunk; and a kernel comm backlog bounded
+   at about one file's bytes — the price of the overlap.
+2. **Kernel guards.** `_on_cancel` is a no-op unless a run is active, so a
+   queued cancel arriving after `run_done` no longer relabels a finished
+   run Stopped; `handle_message` parses inside its `try`, so a non-mapping
+   message becomes an error reply instead of an `AttributeError` out of the
+   comm handler; chunks are refused when no run is active and when their
+   name is not in the accepted manifest (count-based `finished` could
+   otherwise complete with an announced file silently missing from the
+   zip); and every protocol name flows through one backslash-tolerant
+   `protocol_name`, so manifest, chunks, `RunState`, and assembler agree
+   even on Windows-style relative paths from a foreign front end.
+3. **Skip-line reset.** The view zeroes `_seen_skips` in its new-run hook
+   instead of inferring a reset from a shrinking skip list — the heuristic
+   never fired when a new run's first `_changed` already carried as many
+   skips as the last run ended with, which the manifest's zero-byte-skip
+   path can produce.
+4. **Empty `bright_idx` guard.** A frame whose aligned stars are all
+   off-frame or inside the margin band gets its projected positions back
+   instead of handing the stock centroider a shape-(0, 2) array it crashes
+   on (empty zip → 1-D array → `AxisError`); covered in
+   `tests/test_fast_centroid.py`.
+5. **`ballet_sgemm.py`.** The Ballet CNN loader (weights download/cache
+   plus the sgemm-routed `SgemmBallet`) is extracted out of
+   `photom_dashboard.py` into a module both front ends import; the
+   notebook's weights cell — the older, already-drifted copy (hardcoded
+   URL, non-atomic write) — now imports it too, closing the last inline
+   duplicate.
+
+Also recorded, belatedly: the 2026-08-10 fast-centroid work added the
+implementation and validation cells to `watch_photometry.ipynb`, and no
+entry logged that notebook change at the time — docs/dashboard.md and the
+2026-08-11 entry above both claimed the notebook untouched, and both are
+now corrected.
+
+Suite after the batch: 142 pytest + 16 JS tests, all passing natively.
+# PR #2 review fixes: the third batch (2026-08-19)
+
+Backfilled: this round landed as `3e19b64` without an entry. The ten
+thumbs-up'd fixes from the third critical review, in brief:
+
+1. **`ballet_sgemm` vs the pinned bandaid branch.** NumpyBallet and the
+   pooling helper are imported from `bandaid.ballet` (the branch renamed
+   `ballet_numpy` with no shim), the notebook's cell-2 import gets the same
+   fix, and the cached weights `.npz` is validated before it is trusted —
+   corrupt caches are deleted and re-downloaded. A new AST-based
+   `tests/test_bandaid_api.py` pins the imported names to bandaid's source.
+2. **Ack batching.** `dropzone.js` drains acks per file as the
+   `DONE_LOOKAHEAD` window advances, bounding the kernel comm backlog to the
+   window; validate-then-upload deduplicated into `validateAndUpload`;
+   `byPath` hoisted, exported, and tested.
+3. **`env_setup.py`.** The five environment knobs extracted into one home
+   shared by the dashboard and the notebook's cell 2.
+4. **`LazyProcessor`.** The pipeline-setup-failure latch moved out of the
+   untested view into `photom_dashboard.py`, with six new tests.
+5. **Dispatch table.** One `_HANDLERS` table consulted by both
+   `handle_message` and `_report_failure`, so a message kind's error channel
+   cannot drift from its handler; `zip_widget` is required and the dead
+   defensive branches are gone.
+
+Suite after the batch: 149 pytest + 17 JS tests, all passing natively.
+# Per-run results isolation (2026-08-19)
+
+The three remaining review threads on PR #2 were one design decision —
+`results/` accumulated across drops, so a second dropped folder could
+silently overwrite or shadow the first's starlists — settled with Matt on
+the `:485` thread: each accepted manifest now writes into its own
+subdirectory of `results/`, named after the dropped folder, and each run
+downloads as its own zip.
+
+1. **Per-run directories.** The manifest gains a `folder` field
+   (`dropzone.js` sends the dropped folder's name; `validateFound` now also
+   refuses a picker selection spanning two top-level folders, closing the
+   one path the drop handler's one-folder rule did not cover). The kernel
+   sanitizes `folder` through `protocol_name` as untrusted input (fallback
+   `run`) and disambiguates `foo`, `foo (1)`, `foo (2)` via `_run_dir_name`;
+   `make_bandaid_processor` accepts a callable `results_dir` so the
+   once-per-session processor writes each frame into the current run's
+   directory. Session-start clearing now prunes the previous session's
+   emptied run dirs too, so a fresh `foo` is not pushed to `foo (1)` by a
+   husk.
+2. **Validate-first manifest handling.** `_on_manifest` parses names,
+   sizes, and `folder` into locals before touching disk or state, so a
+   malformed size is an `error` reply with the previous results intact —
+   previously it could clear `results/` and half-seed `RunState` on the
+   way to raising. `RunState.seed(names, sizes)` takes the pre-parsed
+   lists and no longer parses anything itself.
+3. **Stem-keyed collision check.** The duplicate check is keyed on the
+   output stem rather than the raw basename, so `a.fit` + `a.fits` — which
+   would both write `a.star` — are refused with a message naming every
+   colliding group. Within-run stem uniqueness is what makes
+   `build_results_zip`'s flatten-to-basenames behavior (unchanged) correct
+   per run.
+4. **Per-run downloads.** `zip_request` gains an optional `run`
+   (membership in the session's own run list is the traversal guard;
+   omitted means most recent), the zip is named `<run>-starlists.zip`, and
+   `ZipDownload` gains a synced `runs` trait (most-recent-last) feeding a
+   chooser `<select>` that stays hidden below two runs. Runs with no
+   `.star` files are not offered. The done panel reports the current run's
+   zip count plus the session's night count.
+
+Suite after the batch: 163 pytest + 19 JS tests, all passing natively.
+# Browser-verification fixes: chooser default + bandaid fetch (2026-08-19)
+
+Two fixes out of the first end-to-end browser check of the per-run batch:
+
+1. **Chooser pinned to night 1.** The run chooser kept "the current
+   selection if still present" -- but the hidden single-run select already
+   carried a default-assigned value, so after a second run the chooser (and
+   the download) stayed on the first run forever. Selection policy is now
+   the exported, tested `pickRun(runs, previous, userPicked)`: a run the
+   *user* picked sticks; anything else follows the newest run. Verified in
+   the browser: default download is the newest run's zip, manually choosing
+   the first run downloads that one.
+2. **`fetch-bandaid` chased a deleted branch.** bandaid PR #94 merged
+   `numpy-ballet` into main and the branch is gone, so the clone fallback
+   died. The task now tracks `main`; d1de73f (the reviewed pin) is an
+   ancestor, ballet.py is untouched since, the eloy pin is unchanged, and
+   the AST guard in tests/test_bandaid_api.py now runs for real against
+   main's ballet.py (it had nothing to check before the clone existed).
+
+Suite after the batch: 163 pytest + 23 JS tests, all passing natively.
+# Browser verification complete + the leftover agreed batch (2026-08-19)
+
+The second browser round finished every remaining check on the per-run
+batch: a differently-named third folder (chooser lists runs by name,
+defaults to newest, night count increments), a two-folder Finder drag
+refused with "Drop one folder at a time.", the duplicate-stem folder
+refused with the collision message, flat per-run zips, and the first real
+per-frame numbers off the dashboard: ~1.7 s/frame (small FWHM) to
+~2.0 s/frame (larger FWHM) on Qatar-8.
+
+That round also caught one new bug, fixed as its own commit: the kernel's
+manifest refusal was being overwritten in the status line by the "no
+active run to receive chunks" echoes from chunks the windowed sender had
+already fired behind the refused manifest. First error now wins per
+upload (exported `makeErrorLatch`, re-armed per manifest, 3 JS tests).
+
+The rest of this batch clears every agreed-but-unscheduled item from the
+PR #2 review summary:
+
+1. **Dropzone watchdog hardening.** The upload loop's catch path now
+   drains all abandoned waiters (settling clears their 10-minute
+   watchdog timers), a per-upload `runCounter` keeps any stale watchdog
+   that fires anyway from cancelling a healthy later run, and the
+   watchdog's own `cancel` send is wrapped in try/catch so a dead comm
+   can't leave the awaited promise pending forever.
+2. **`_escape` is `html.escape`.** `dashboard_view._escape` was exactly
+   `html.escape(quote=False)`'s three replacements; it now calls it.
+3. **`_fc_peak3x3` reuse.** On the frame that runs the one-shot
+   catalog-order check, the rank-by-image fallback reuses the peaks the
+   check just computed instead of recomputing them over the same rows.
+4. **spike_comm CRC out of the timed window.** The down direction now
+   sends a pre-CRC `down_arrived` (stops the Python round-trip clock)
+   followed by the post-CRC `down_done` verdict; previously the O(size)
+   JS crc32 sat inside the measured window, asymmetrically between the
+   1 MiB and 4 MiB cases the notebook exists to compare. The results
+   cell treats a timed-but-unverdicted row as not yet arrived. The
+   throughput rerun itself is still pending (rebuild `dist/` first).
+5. **Doc anchors.** `docs/dashboard.md`'s exact line-range citations are
+   replaced with function/class-name anchors (`PhotometryDashboard._on_manifest`
+   style) so the map can't rot the way three review rounds caught it
+   rotting; same for the stale `dropzone.js` range in
+   `PhotometryDashboard`'s docstring and the `eloy/centroid.py:80` ref in
+   `fast_centroid.py`. The measured s/frame numbers and the
+   now-seven-strong JS pure-function list landed in the doc too.
+
+Suite after the batch: 163 pytest + 26 JS tests, all passing natively.

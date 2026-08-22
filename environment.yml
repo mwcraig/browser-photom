@@ -8,7 +8,7 @@ dependencies:
   # astropy-base = full astropy package without the metapackage's "recommended"
   # extras (pandas, pyarrow, dask, s3fs, h5py, ...) that astrowidgets doesn't need
   - astropy-base
-  # pure-Python (noarch); queries need the local CORS proxy — see content/proxy_setup.py
+  # pure-Python (noarch); queries need the local CORS proxy — see content/helper.py
   - astroquery
   - matplotlib
   - pillow
@@ -22,6 +22,11 @@ dependencies:
   - pydantic
   - python-dateutil
   - ipywidgets>=8
+  # noarch on conda-forge, as are all three of its deps, so it belongs here
+  # and not in the pip: block (which does not resolve dependencies). The
+  # version must match pixi.toml exactly — jupyterlite copies the prebuilt
+  # front end from the *host* env, and a mismatch silently fails to register.
+  - anywidget==0.11.0
   - ipyevents
   - bqplot>=0.13
   - bqplot-gl

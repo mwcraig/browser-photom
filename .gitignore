@@ -4,6 +4,7 @@
 
 # jupyterlite build outputs
 dist/
+dist-dash/
 _output/
 .jupyterlite.doit.db
 

@@ -373,7 +373,13 @@ merely arrival (JS `crc32`/`content_ok` and the Python `_on_msg` handler in
 `content/spike_comm.ipynb`). The down-direction clock stops at `down_arrived`,
 sent *before* the JS receiver runs its O(size) crc32 pass, so the content check
 never sits inside the measured window; the verdict follows separately in
-`down_done`.
+`down_done`. The first transfer is started by a `ready` handshake the JS side
+sends from `render()` after registering its `msg:custom` handler — a custom
+message sent before that registration is dropped silently on the front end, and
+starting the queue directly from the driver cell raced the first `down` against
+view render (a cold-cache load loses that race, wedging the whole
+one-in-flight queue at "(no reply yet)"; that is what sank the 2026-08-22
+attempt).
 
 It round-trips five sizes (64 KiB, 256 KiB, 1 MiB, 4 MiB, and 4,150,000 bytes — a
 real Seestar frame's on-disk size) in both directions, and its final code cell
@@ -406,15 +412,32 @@ measurements. The `MB/s` column is therefore `nbytes / 0.045 s`, and the reporte
 "3.98× cheaper per byte at 4 MiB" is that constant divisor restated, not a
 property of the serialization path.
 
-So **throughput in either direction remains unmeasured**, and `CHUNK_BYTES` stays
-at 1 MiB (`photom_dashboard.CHUNK_BYTES` and the comment above it) — not because 1 MiB was shown to be
-optimal, but because no data argues for moving it. The dashboard's design does not
-depend on this measurement coming back favorably; the number can be raised later
-if a clean run says to. To get one: **`pixi run build` first** (a stale `dist/` is
-what invalidated the 2026-08-11 run), then `pixi run serve` → `localhost:8000` →
-run the cells in order, and record the per-size `seconds` column here. With pacing
-in place those times should climb with transfer size; if they sit flat again, the
-served build is stale.
+**Clean run, 2026-08-22 — settled.** Rerun against a fresh build on a
+fresh browser origin (a new port, so no service-worker cache or IndexedDB
+drive copy could shadow the baked notebook), with the `ready` handshake and
+pre-CRC `down_arrived` timing in place. Every row `ok=True` — content-verified
+by crc32 in both directions this time, not length-only. Times climb with size
+as paced, independent measurements should:
+
+| size | down s / MB/s | up s / MB/s |
+|---|---|---|
+| 64 KiB | 0.007 / 10.1 | 0.007 / 9.1 |
+| 256 KiB | 0.006 / 44.4 | 0.008 / 35.0 |
+| 1 MiB | 0.006 / 184.0 | 0.011 / 94.5 |
+| 4 MiB | 0.018 / 234.3 | 0.023 / 180.8 |
+| 4,150,000 B | 0.019 / 220.7 | 0.021 / 193.9 |
+
+Per-byte cost at 1 MiB is 1.64× the cost at 4 MiB, which clears the verdict
+cell's mechanical 1.2× threshold — but the shape of the table says that ratio
+is fixed per-message overhead amortizing (~6–7 ms per round trip even at
+64 KiB), not a serialization cliff. In absolute terms chunking is noise: a
+real 4,150,000-byte frame uploaded as four 1 MiB chunks costs ~44 ms of comm
+against ~1.7–2.0 s of photometry per frame (§"Timing"), and a whole 67-frame
+night moves ~278 MB in a handful of seconds either way. Raising `CHUNK_BYTES`
+to 4 MiB would buy back ~20 ms/frame (~1%) at the price of ~3 MiB more peak
+kernel memory per in-flight chunk in a wasm heap that also holds MEMFS.
+**Recommendation: keep `CHUNK_BYTES = 1 << 20`** (`photom_dashboard.CHUNK_BYTES`);
+the measurement now exists to revisit if frame sizes grow.
 
 If binary comm had turned out to be broken outright (not just slow — truncated,
 wrong, or a wedged kernel), the documented fallback would have been base64 over

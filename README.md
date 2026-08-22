@@ -104,6 +104,15 @@ Voici's own index page also lists the developer notebooks (`demo.ipynb`,
 `watch_photometry.ipynb`, ...), which isn't what a non-Jupyter user should be
 looking at.
 
+The same build is published automatically to GitHub Pages at
+<https://mwcraig.github.io/browser-photom/> on every push to `main`
+(`.github/workflows/pages.yml`). There the root page redirects straight to the
+dashboard (`pages/index.html` replaces Voici's index); the developer notebook
+list is still reachable at
+<https://mwcraig.github.io/browser-photom/voici/>. Only the dashboard is
+meant to work on the public site — `local_images.ipynb` and the astroquery
+notebooks need the `localhost` helper described below.
+
 The form needs an AAVSO **observer code** and the site's **elevation** in
 metres; latitude and longitude come from the frame headers (`SITELAT`/
 `SITELONG`) and only need to be filled in to override what the headers say.

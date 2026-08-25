@@ -209,13 +209,14 @@ function renderDropZone({ model, el }) {
   el.innerHTML = '';
 
   const container = document.createElement('div');
-  container.style.border = '2px dashed var(--jp-border-color1, #ccc)';
-  container.style.borderRadius = '6px';
-  container.style.padding = '2em';
-  container.style.textAlign = 'center';
-  container.style.color = 'var(--jp-ui-font-color1, #333)';
-  container.style.background = 'var(--jp-layout-color2, #f5f5f5)';
-  container.style.transition = 'background 0.15s ease, opacity 0.15s ease';
+  container.className = 'bp-drop';
+
+  // Armed/disarmed/uploading glyph -- purely decorative, so it lives before
+  // hintEl and inherits pointer-events:none like the other children (see
+  // below). Its content comes from the `.bp-drop .bp-icon::before` /
+  // `.bp-drop.armed .bp-icon::before` CSS rules, not from JS.
+  const iconEl = document.createElement('span');
+  iconEl.className = 'bp-icon';
 
   const hintEl = document.createElement('div');
   const statusEl = document.createElement('div');
@@ -224,10 +225,11 @@ function renderDropZone({ model, el }) {
   statusEl.style.minHeight = '1.2em';
   // Children must not take drag events of their own, or moving the pointer
   // from the hint onto the status line fires dragleave on the container and
-  // the highlight flickers all the way through the drag.
-  hintEl.style.pointerEvents = 'none';
-  statusEl.style.pointerEvents = 'none';
+  // the highlight flickers all the way through the drag. Enforced by the
+  // `.bp-drop > *` rule in dropzone.css rather than per-element inline
+  // styles here.
 
+  container.appendChild(iconEl);
   container.appendChild(hintEl);
   container.appendChild(statusEl);
   el.appendChild(container);
@@ -243,12 +245,7 @@ function renderDropZone({ model, el }) {
   const pickerButton = document.createElement('button');
   pickerButton.type = 'button';
   pickerButton.textContent = '…or choose a folder';
-  pickerButton.style.background = 'var(--jp-layout-color1, #fff)';
-  pickerButton.style.color = 'var(--jp-ui-font-color1, #333)';
-  pickerButton.style.border = '1px solid var(--jp-border-color1, #ccc)';
-  pickerButton.style.borderRadius = '4px';
-  pickerButton.style.padding = '0.4em 0.8em';
-  pickerButton.style.transition = 'opacity 0.15s ease';
+  pickerButton.className = 'bp-btn';
 
   const pickerInput = document.createElement('input');
   pickerInput.type = 'file';
@@ -274,17 +271,19 @@ function renderDropZone({ model, el }) {
 
   function paint() {
     hintEl.textContent = model.get('hint');
-    const armed = isArmed();
-    if (armed) {
-      container.style.opacity = '1';
-      container.style.cursor = 'default';
-    } else {
-      container.style.opacity = '0.5';
-      container.style.cursor = 'not-allowed';
-    }
-    pickerButton.disabled = !armed;
-    pickerButton.style.opacity = armed ? '1' : '0.5';
-    pickerButton.style.cursor = armed ? 'pointer' : 'not-allowed';
+    // `armed` (the model trait) and `busy` (uploading) are split out rather
+    // than collapsed straight to isArmed(), because the drop zone has three
+    // distinct looks, not two: disarmed, armed-idle, and armed-but-uploading
+    // (see docs/dashboard.md §4). isArmed() itself still governs the drop/
+    // click/highlight guards below -- only the classes painted here need the
+    // finer distinction.
+    const armed = model.get('armed');
+    const busy = uploading;
+    container.classList.toggle('armed', armed && !busy);
+    container.classList.toggle('uploading', armed && busy);
+    pickerButton.disabled = !(armed && !busy);
+    pickerButton.classList.toggle('secondary', armed && !busy);
+    container.setAttribute('aria-disabled', String(!(armed && !busy)));
   }
   paint();
 
@@ -294,9 +293,7 @@ function renderDropZone({ model, el }) {
 
   function highlight(on) {
     if (!isArmed()) return;
-    container.style.background = on
-      ? 'var(--jp-brand-color3, #cce5ff)'
-      : 'var(--jp-layout-color2, #f5f5f5)';
+    container.classList.toggle('hover', on);
   }
 
   // Waiters for kernel acks/completion messages, registered ONCE for the
@@ -670,35 +667,35 @@ function renderZip({ model, el }) {
   // rebuilt on every change:runs so a run finishing mid-session shows up
   // without a reload.
   const runSelect = document.createElement('select');
-  runSelect.style.background = 'var(--jp-layout-color1, #fff)';
-  runSelect.style.color = 'var(--jp-ui-font-color1, #333)';
-  runSelect.style.border = '1px solid var(--jp-border-color1, #ccc)';
-  runSelect.style.borderRadius = '4px';
-  runSelect.style.padding = '0.4em 0.6em';
-  runSelect.style.marginRight = '0.5em';
+  runSelect.className = 'bp-select';
+  runSelect.setAttribute('aria-label', 'Night to download');
 
   const button = document.createElement('button');
-  button.style.background = 'var(--jp-brand-color1, #1976d2)';
-  button.style.color = '#fff';
-  button.style.border = 'none';
-  button.style.borderRadius = '4px';
-  button.style.padding = '0.5em 1em';
-  button.style.cursor = 'pointer';
+  // Always the primary look: this button only ever appears once `enabled`
+  // is already true (dashboard_view.py reveals it and sets `enabled` in the
+  // same _refresh), so its disabled state is only ever the transient
+  // "Preparing…" click state below -- the `.bp-btn:disabled` CSS rule wins
+  // over `.primary` there (see dropzone.css) and gives it the outline look
+  // without needing to toggle the class here.
+  button.className = 'bp-btn primary cta';
+
+  // Select + button on one row (see .bp-zip-row in dropzone.css).
+  const row = document.createElement('div');
+  row.className = 'bp-zip-row';
 
   const statusEl = document.createElement('div');
   statusEl.style.marginTop = '0.5em';
   statusEl.style.fontSize = '0.9em';
 
-  el.appendChild(runSelect);
-  el.appendChild(button);
+  row.appendChild(runSelect);
+  row.appendChild(button);
+  el.appendChild(row);
   el.appendChild(statusEl);
 
   function paint() {
     const enabled = model.get('enabled');
     button.textContent = model.get('label');
     button.disabled = !enabled;
-    button.style.opacity = enabled ? '1' : '0.5';
-    button.style.cursor = enabled ? 'pointer' : 'not-allowed';
   }
   paint();
 

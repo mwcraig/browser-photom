@@ -1,0 +1,150 @@
+/* Shared stylesheet for the DropZone and ZipDownload anywidgets. dropzone.py
+   loads this file as text and sets `_css` on both widget classes, mirroring
+   how `_ESM` is shared between them. Classes are prefixed `bp-` so they
+   cannot collide with JupyterLab's own `.jp-*` rules. */
+
+/* Disarmed (default): the metadata form hasn't validated yet, so a drop or
+   pick would be rejected. Flat/muted on purpose -- see docs/dashboard.md §4. */
+.bp-drop {
+  border: 2px dashed var(--jp-border-color2, #ddd);
+  border-radius: 6px;
+  padding: 2em;
+  text-align: center;
+  background: var(--jp-layout-color3, #eee);
+  color: var(--jp-ui-font-color3, #999);
+  font-style: italic;
+  cursor: not-allowed;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+/* Armed: the metadata form has validated and a drop/pick will be accepted. */
+.bp-drop.armed {
+  border-color: var(--jp-brand-color1, #1976d2);
+  background: var(--jp-layout-color1, #fff);
+  color: var(--jp-ui-font-color1, #333);
+  font-style: normal;
+  font-weight: 600;
+  cursor: copy;
+}
+
+/* Drag-hover fill, only while armed -- see highlight() in dropzone.js.
+   Qualifying on `.armed` means a stray hover class left on a disarmed box
+   can never tint it (isArmed() also guards highlight() itself). */
+.bp-drop.armed.hover {
+  background: var(--jp-brand-color3, #cce5ff);
+}
+
+/* Upload in flight: keeps the armed colours (so the zone doesn't look like
+   the form broke mid-upload -- see paint() in dropzone.js) but with a solid
+   border and a progress cursor. Mutually exclusive with .armed by
+   construction, so the armed colours have to be repeated here. */
+.bp-drop.uploading {
+  border-style: solid;
+  border-color: var(--jp-brand-color1, #1976d2);
+  background: var(--jp-layout-color1, #fff);
+  color: var(--jp-ui-font-color1, #333);
+  font-style: normal;
+  cursor: progress;
+}
+
+.bp-drop .bp-icon::before {
+  content: '🔒';
+  margin-right: 0.4em;
+}
+
+.bp-drop.armed .bp-icon::before {
+  content: '📂';
+}
+
+/* Children must not take drag events of their own, or moving the pointer
+   from the hint onto the status line fires dragleave on the container and
+   the highlight flickers all the way through the drag (see renderDropZone
+   in dropzone.js, where this used to be two inline pointerEvents lines). */
+.bp-drop > * {
+  pointer-events: none;
+}
+
+.bp-btn {
+  border-radius: 4px;
+  padding: 0.5em 1em;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+/* Primary: brand-filled look. Reserved for the zip-download button so it is
+   the only filled-brand element on the page once a run finishes. */
+.bp-btn.primary {
+  background: var(--jp-brand-color1, #1976d2);
+  color: #fff;
+}
+
+/* Secondary: brand-outlined look for the armed picker button. Clearly
+   clickable, but visually subordinate to .primary. */
+.bp-btn.secondary {
+  background: transparent;
+  color: var(--jp-brand-color1, #1976d2);
+  border-color: var(--jp-brand-color1, #1976d2);
+}
+
+/* Call-to-action sizing for the download button. The glyph is only shown
+   while clickable so the "Preparing…" state reads as plain text. */
+.bp-btn.cta {
+  padding: 0.75em 1.5em;
+  font-size: 1.1em;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+.bp-btn.cta:not(:disabled)::before {
+  content: '⬇ ';
+}
+.bp-btn.cta:disabled {
+  box-shadow: none;
+}
+
+/* Run chooser + download button on one row. The select is sized to match
+   .bp-btn.cta so the two sit at the same height, with a small gap between
+   them (the select is display:none below two runs, so the gap only shows
+   when both are present). */
+.bp-zip-row {
+  display: inline-flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 0.5em;
+}
+.bp-zip-row .bp-btn {
+  flex: none;
+}
+.bp-select {
+  background: var(--jp-layout-color1, #fff);
+  color: var(--jp-ui-font-color1, #333);
+  border: 1px solid var(--jp-border-color1, #ccc);
+  border-radius: 4px;
+  padding: 0.75em 0.75em;
+  font-size: 1.1em;
+}
+
+/* Result card around the done panel. dashboard_view.py adds this class to
+   the done VBox; the rule lives here because anywidget injects _css into the
+   document head, so it applies to ipywidgets DOM too. */
+.bp-done {
+  margin-top: 1em;
+  padding: 1em 1.25em;
+  border-left: 4px solid var(--jp-success-color1, #388e3c);
+  border-radius: 4px;
+  background: var(--jp-success-color3, #e8f5e9);
+}
+.bp-done h3 {
+  margin-top: 0;
+}
+
+/* Outline/disabled look. Same specificity as .bp-btn.primary/.secondary
+   (one class + one pseudo-class each), so source order decides when both
+   could apply -- this rule comes last, so a disabled primary button (e.g.
+   the zip button's "Preparing..." state) gets the outline look for free. */
+.bp-btn:disabled {
+  background: transparent;
+  color: var(--jp-ui-font-color3, #999);
+  border-color: var(--jp-border-color2, #ddd);
+  cursor: not-allowed;
+}

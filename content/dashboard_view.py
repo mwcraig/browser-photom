@@ -32,17 +32,13 @@ INSTRUCTIONS = """
   <li>Enter your <b>AAVSO observer code</b> and the <b>elevation</b> of your
       observing site. Latitude and longitude are read from the image headers;
       fill them in only to override what the headers say.</li>
-  <li>Drag the <b>folder</b> of FITS frames onto the drop zone below (or use
-      the &ldquo;choose a folder&rdquo; button). Drop one folder at a time, with the
-      FITS files directly inside it &mdash; not in subfolders. Every frame is
-      plate-solved, photometered, and written to a starlist.</li>
+  <li>Drag a <b>folder</b> of FITS frames of a <b>single object</b> onto the
+      drop zone below.  The folder can have a single night or multiple nights
+      of observations.</li>
   <li>When the run finishes, download the starlists as a single zip.</li>
 </ol>
 <p style="line-height:1.6">
-  Keep this window <b>visible</b> while it runs — a backgrounded tab is
-  throttled by the browser and runs about seven times slower. The first frame
-  takes an extra minute or two: it downloads the centroiding weights (once per
-  browser) and queries Gaia for the star field.
+  <b>Keep this tab selected</b> in its window to get the best performance.
 </p>
 """
 
@@ -122,12 +118,19 @@ class DashboardView:
 
         self.done_summary = W.HTML()
         self.done_panel = W.VBox([self.done_summary, self.zip_widget])
+        # Styled as a result card by the .bp-done rule in dropzone.css (the
+        # anywidget stylesheet is injected document-wide, so it reaches this
+        # plain ipywidgets VBox too).
+        self.done_panel.add_class("bp-done")
 
+        # The done panel sits ABOVE the drop zone so a finished run's result
+        # is the next thing after the log, and "drop another folder" (which
+        # the done summary invites) follows it in reading order.
         self.box = W.VBox([
             self.setup_panel,
             self.run_panel,
-            self.drop_zone,
             self.done_panel,
+            self.drop_zone,
         ])
 
     def display(self):

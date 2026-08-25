@@ -5,7 +5,8 @@ trait, so there is a single JS file for Node to import in `tests/js`.
 
 `_esm` is the file's *text*, not a Path: anywidget treats a Path as a
 development-mode hot-reload source, which wants `watchfiles` -- fine natively,
-absent in the wasm kernel.
+absent in the wasm kernel. `_css` (dropzone.css) is loaded as text for the
+same reason, and shared between the two widgets the same way `_esm` is.
 
 anywidget itself must be installed in the JupyterLite distribution rather than
 `%pip install`ed at runtime (manzt/anywidget#534), and its version has to match
@@ -22,12 +23,14 @@ import traitlets
 from photom_dashboard import CHUNK_BYTES
 
 _ESM = Path(__file__).with_name("dropzone.js").read_text()
+_CSS = Path(__file__).with_name("dropzone.css").read_text()
 
 
 class DropZone(anywidget.AnyWidget):
     """Folder drop target that streams FITS bytes to the kernel."""
 
     _esm = _ESM
+    _css = _CSS
     _role = traitlets.Unicode("drop").tag(sync=True)
     # Armed only once the metadata form validates, so a run cannot start
     # without an observer code and a site elevation.
@@ -42,6 +45,7 @@ class ZipDownload(anywidget.AnyWidget):
     """Button that turns comm bytes into a browser download."""
 
     _esm = _ESM
+    _css = _CSS
     _role = traitlets.Unicode("zip").tag(sync=True)
     label = traitlets.Unicode("Download starlists (.zip)").tag(sync=True)
     enabled = traitlets.Bool(True).tag(sync=True)

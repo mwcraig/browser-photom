@@ -219,6 +219,34 @@ that *did* succeed before the error would be stranded.
 | `done` | shown | shown | shown | shown ("Finished") |
 | `cancelled` | shown | shown | shown | shown ("Stopped") |
 
+"Shown" for the drop zone is not one look: `dropzone.css` (shared by both
+anywidgets via the `_css` trait, the same way `dropzone.js` is shared as
+`_esm`) gives it three distinct visual states, driven off the `.bp-drop`
+container's classes rather than inline styles. **Disarmed** (no `armed`/
+`uploading` class) is a flat, muted box — gray dashed border, gray
+background, italic muted-gray hint text, a 🔒 icon — so it reads as inert
+rather than merely faded. **Armed** (`.bp-drop.armed`) switches to a
+brand-coloured dashed border, lighter background, bold hint text, and a 📂
+icon, and drag-hover adds `.hover` to tint the background with
+`--jp-brand-color3`. **Uploading** (`.bp-drop.uploading`, set whenever
+`armed` is true but the local `uploading` flag is also true) keeps the
+armed border colour but makes it solid instead of dashed, so an upload in
+progress doesn't look like the form broke. The "…or choose a folder" picker
+button and the zip-download button share a `.bp-btn` base class with a
+deliberate hierarchy: the picker gets a brand-*outlined* `.secondary` look
+when armed, while the download button is the only brand-*filled* `.primary`
+element on the page and carries `.cta` sizing (larger, bold, ⬇ glyph). Both
+fall back to a hollow gray `:disabled` outline when not clickable. With two
+or more nights the run chooser `<select>` appears beside the download button
+in the same row (`.bp-zip-row`), sized to the same height so the pair reads
+as one "Download *this night*" control.
+
+The done panel is placed *above* the drop zone in `DashboardView.box` and
+styled as a success-tinted result card (`.bp-done`, added via `add_class`),
+so a finished run's summary and download come straight after the log, and
+the drop zone -- which the summary invites the user to use again -- follows
+in reading order.
+
 The setup panel is shown whenever a run is not active — `phase != "running"` —
 not just before the first drop: `_meta` is read fresh on every frame (§5), so the
 form has to stay editable between folders, and the done panel explicitly invites

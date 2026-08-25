@@ -118,12 +118,19 @@ class DashboardView:
 
         self.done_summary = W.HTML()
         self.done_panel = W.VBox([self.done_summary, self.zip_widget])
+        # Styled as a result card by the .bp-done rule in dropzone.css (the
+        # anywidget stylesheet is injected document-wide, so it reaches this
+        # plain ipywidgets VBox too).
+        self.done_panel.add_class("bp-done")
 
+        # The done panel sits ABOVE the drop zone so a finished run's result
+        # is the next thing after the log, and "drop another folder" (which
+        # the done summary invites) follows it in reading order.
         self.box = W.VBox([
             self.setup_panel,
             self.run_panel,
-            self.drop_zone,
             self.done_panel,
+            self.drop_zone,
         ])
 
     def display(self):

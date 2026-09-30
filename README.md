@@ -218,8 +218,8 @@ directly (against fake `bandaid`/`bandaid.photometry` modules for the
 - `content/spike_comm.ipynb` — standalone throughput probe: times a binary comm buffer
   round trip in both directions at several sizes, to check whether `CHUNK_BYTES` (in
   `content/photom_dashboard.py`) should move off 1 MiB.
-- `bandaid-src/`, `eloy-src/`, `aavso-starlist-schema-src/` — clones fetched by
-  `pixi run build` (bandaid branch `numpy-ballet`, eloy pinned to the commit bandaid
+- `bandaid-src/`, `eloy-src/`, `aavso-public-utils-src/` — clones fetched by
+  `pixi run build` (the starlist schema is `aavso-public-utils-src/schemas/starlist`) (bandaid branch `numpy-ballet`, eloy pinned to the commit bandaid
   pins), installed into the kernel via the `pip:` section.
 - `content/helper.py` — notebook-side client for the local helper: `list_images()`,
   `open_fits()`, and `use_proxy()` (routes astroquery SIMBAD/VizieR through the proxy);

@@ -12,7 +12,7 @@ _output/
 astrowidgets-src/
 bandaid-src/
 eloy-src/
-aavso-starlist-schema-src/
+aavso-public-utils-src/
 
 # python bytecode
 __pycache__/

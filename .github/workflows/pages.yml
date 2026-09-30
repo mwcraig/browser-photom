@@ -33,7 +33,8 @@ jobs:
           cache: true
 
       # Also runs the fetch-* tasks (full clones of bandaid, eloy, astrowidgets,
-      # aavso-starlist-schema) that environment.yml's pip: block points at.
+      # AAVSO/public-utils for the starlist schema) that environment.yml's pip:
+      # block points at.
       - name: Build with voici
         run: pixi run -e dash build-dash
 

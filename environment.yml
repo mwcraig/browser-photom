@@ -41,4 +41,4 @@ dependencies:
       - twirl
       - ./eloy-src
       - ./bandaid-src
-      - ./aavso-starlist-schema-src
+      - ./aavso-public-utils-src/schemas/starlist

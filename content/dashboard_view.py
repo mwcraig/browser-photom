@@ -53,10 +53,8 @@ class DashboardView:
         results_dir="results",
         tmpdir="/tmp",
         chunk_bytes=CHUNK_BYTES,
-        fast_centroid=True,
     ):
         self.results_dir = results_dir
-        self.fast_centroid = fast_centroid
         self._meta = {}
         self._log = deque(maxlen=LOG_LINES)
         self._seen_skips = 0
@@ -197,7 +195,6 @@ class DashboardView:
             return make_bandaid_processor(
                 self._meta,
                 lambda: self.dashboard.current_run_dir,
-                fast_centroid=self.fast_centroid,
                 log=self.log,
             )
         except Exception as exc:  # noqa: BLE001 - any setup failure latches

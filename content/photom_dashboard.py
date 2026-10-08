@@ -810,7 +810,7 @@ class PhotometryDashboard:
 # --------------------------------------------------------------------------
 
 
-def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=True, log=print):
+def make_bandaid_processor(user_meta, results_dir="results", *, log=print):
     """Build the real `process_frame(path, name)` used in the browser.
 
     `user_meta` is read on every frame, so the view can keep it live while the
@@ -845,15 +845,13 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
     from ballet_sgemm import load_cnn
 
     cnn = load_cnn(log=log)
-    # Installed unconditionally: the wrapper delegates to the stock
-    # implementation whenever the module flag is False, so passing
-    # fast_centroid=False restores stock behavior even in a kernel where an
-    # earlier processor enabled the fast path.
-    import fast_centroid as fc
 
-    fc.FAST_CENTROID = bool(fast_centroid)
-    fc.install(log=log)
-
+    # The default config: bandaid's measured-versus-modelled position policy
+    # (`CentroidConfig.model_faint_positions`, on by default since bandaid
+    # PR #147) CNN-centroids the brightest ~30 catalog stars by Gaia G and
+    # models the rest as the WCS-projected position plus a per-frame offset
+    # plane. That replaced this repo's own `fast_centroid` monkeypatch, and
+    # it is what makes the dashboard and the bandaid CLI agree row for row.
     config = PhotometryConfig()
     if not callable(results_dir):
         os.makedirs(results_dir, exist_ok=True)
@@ -886,6 +884,12 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
                 prep.bayer_masks,
                 config=prep.config,
                 input_photometry_coords=prep.photometry_coords,
+                # Required by the position policy: per-row Gaia G and the
+                # batch's CNN-class magnitude cut, exactly as the CLI passes
+                # them (bandaid `process_batch`). Without them bandaid raises
+                # ValueError before any work.
+                input_gaia_g=prep.gaia_g,
+                g_cut=prep.g_cut,
             )
             dest = _Path(results_dir() if callable(results_dir) else results_dir)
             write_starlist_set(by_filter, dest / (_Path(name).stem + ".star"))
@@ -909,7 +913,6 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
         # cheap when the next folder really is the same field.
         batch["prep"] = None
         batch["n"] = 0
-        fc.reset()
 
     process_frame.reset = reset
     return process_frame
@@ -926,7 +929,6 @@ def run_dashboard(
     results_dir="results",
     tmpdir="/tmp",
     chunk_bytes=CHUNK_BYTES,
-    fast_centroid=True,
 ):
     """Build and display the dashboard. This is all the notebook calls.
 
@@ -941,5 +943,4 @@ def run_dashboard(
         results_dir=results_dir,
         tmpdir=tmpdir,
         chunk_bytes=chunk_bytes,
-        fast_centroid=fast_centroid,
     ).display()

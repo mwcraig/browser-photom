@@ -974,7 +974,7 @@ Changes here:
    `tests/test_fast_centroid.py`, and the `fast_centroid=` parameter on
    `make_bandaid_processor`, `run_dashboard` and `DashboardView` are gone,
    and with them the host `numpy` pixi dependency. Dashboard and CLI now
-   agree by construction.
+   run the same centroid policy.
 
 Result of rerunning the issue #6 comparison on the 155-frame LS Psc subset
 with both routes at `33bebf5` (`docs/issue6-recheck-2026-10-07.md`): unmatched
@@ -984,4 +984,35 @@ swapping the dashboard's `SgemmBallet` for bandaid's numpy `Ballet` makes all
 round-off between the two CNN backends (≤ 1.4e-6 px), which moves the fitted
 FWHM, and so the aperture, on most frames by ~1e-5 relative and on one frame
 by 2.5 %. Whether to make the dashboard use bandaid's own `Ballet`, or to pin
-`SgemmBallet` bit-for-bit to it, is an open follow-up.
+`SgemmBallet` bit-for-bit to it, is issue #8; `docs/dashboard.md` is the one
+place the residual is described.
+
+PR #7 review fixes (Copilot plus an adversarial pass):
+
+1. **Watch notebook target lookup.** bandaid at `33bebf5` drops catalog
+   stars within the edge margin, or off frame, *per frame*
+   (`_drop_edge_catalog_stars` in `prepare_image`), so a row index found at
+   batch prep no longer points at the same star in every frame; the old
+   `l4[target_idx]` could print another star's counts, or raise `IndexError`
+   after the `.star` was written and get the frame retried five times as
+   "unreadable". The notebook now keeps the catalog star's own coordinates
+   from prep and matches them in each frame's `ra`/`dec` columns (which
+   bandaid copies through unchanged, so a 0.01 arcsec tolerance is float
+   slack, the same rule bandaid's `n_forced_measured` uses), recording
+   `None` for frames where bandaid dropped the target; the light curve
+   skips those frames.
+2. **One bandaid call site.** `make_bandaid_processor` grew `cnn=` and
+   `on_result=` keyword arguments and the notebook builds its processor
+   from it instead of carrying its own copy of the
+   `prepare_batch` → `check_frame_consistency` → `process_one_image` →
+   `write_starlist_set` sequence, so the next bandaid signature change has
+   one call to update.
+3. **`fetch-*` pixi tasks** clone only when the checkout is missing instead
+   of `cmd 2>/dev/null || git clone`, which hid the real error and then
+   failed on "destination path already exists".
+4. **Stale text**: "agree by construction" / "row for row" softened to
+   "same centroid policy" in README, this file, `docs/dashboard.md` and the
+   processor comment; "fast-centroid one-shot" comments in
+   `dashboard_view.py` and `LazyProcessor.reset` trimmed; the notebook's
+   row-order guarantee, `numpy-ballet` intro and "CNN centroiding of all
+   stars" timer label corrected.

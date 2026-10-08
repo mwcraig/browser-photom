@@ -193,11 +193,11 @@ message-handler protocol against a fake widget.
   validation, run bookkeeping (`RunState`), chunked-upload assembly straight into MEMFS
   (`ChunkAssembler`), per-frame processing (`FrameProcessor`), the `.star` zip builder,
   and the widget message handler (`PhotometryDashboard`); `make_bandaid_processor()`
-  lazily builds the real bandaid pipeline. The centroid policy now comes from bandaid
+  lazily builds the real bandaid pipeline, and is the one place this repo calls it
+  (the watch notebook goes through it too). The centroid policy comes from bandaid
   itself (CNN for the brightest ~30 stars, a WCS offset plane for the rest; bandaid
-  PR #147), and catalog stars within bandaid's 10 px edge margin are dropped, so the
-  dashboard and the bandaid CLI produce the same rows (`docs/issue6-recheck-2026-10-07.md`;
-  the residual is float32 round-off between the two Ballet backends). Everything above that function is
+  PR #147), so the dashboard and the bandaid CLI share one policy; `docs/dashboard.md`
+  describes it and what still separates their outputs. Everything above that function is
   import-free beyond the standard library, so the tests need neither numpy, astropy,
   nor bandaid.
 - `content/dashboard_view.py` — the ipywidgets shell: one `VBox` with three panels

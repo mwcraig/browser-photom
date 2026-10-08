@@ -6,17 +6,22 @@ platforms = ["osx-arm64", "linux-64"]
 version = "0.1.0"
 
 [tasks]
-fetch-astrowidgets = "git -C astrowidgets-src pull --ff-only 2>/dev/null || git clone https://github.com/astropy/astrowidgets astrowidgets-src"
+# Every fetch-* task clones only when the checkout is missing, and otherwise
+# lets the fetch/pull/checkout fail loudly: the earlier `cmd 2>/dev/null ||
+# git clone` shape hid the real error (a dirty tree, an unfetched commit) and
+# then failed on "destination path already exists" instead.
+fetch-astrowidgets = "(test -d astrowidgets-src || git clone https://github.com/astropy/astrowidgets astrowidgets-src) && git -C astrowidgets-src pull --ff-only"
 # Full clone (not shallow) so hatch-vcs sees tags. Pinned (detached HEAD) to the
 # bandaid commit the dashboard was validated against, so a redeploy cannot
 # silently pick up whatever bandaid main is at build time. 33bebf5 is the
 # merge of bandaid PR #147 (measured-versus-modelled centroid positions), which
 # made `process_one_image` require `input_gaia_g` and `g_cut`; move the pin
-# deliberately, together with the call in `make_bandaid_processor`.
-fetch-bandaid = "(git -C bandaid-src fetch && git -C bandaid-src checkout 33bebf5) 2>/dev/null || (git clone https://github.com/mwcraig/bandaid bandaid-src && git -C bandaid-src checkout 33bebf5)"
+# deliberately, together with the call in `make_bandaid_processor` (the one
+# place this repo calls bandaid; the watch notebook goes through it too).
+fetch-bandaid = "(test -d bandaid-src || git clone https://github.com/mwcraig/bandaid bandaid-src) && git -C bandaid-src fetch && git -C bandaid-src checkout 33bebf5"
 # Pinned to the commit bandaid's pyproject pins (detached HEAD)
-fetch-eloy = "(git -C eloy-src fetch && git -C eloy-src checkout a056c91a945772e0520a89695f8fcd16fda36870) 2>/dev/null || (git clone https://github.com/mwcraig/eloy eloy-src && git -C eloy-src checkout a056c91a945772e0520a89695f8fcd16fda36870)"
-fetch-starlist-schema = "git -C aavso-starlist-schema-src pull --ff-only 2>/dev/null || git clone https://github.com/mwcraig/aavso-starlist-schema aavso-starlist-schema-src"
+fetch-eloy = "(test -d eloy-src || git clone https://github.com/mwcraig/eloy eloy-src) && git -C eloy-src fetch && git -C eloy-src checkout a056c91a945772e0520a89695f8fcd16fda36870"
+fetch-starlist-schema = "(test -d aavso-starlist-schema-src || git clone https://github.com/mwcraig/aavso-starlist-schema aavso-starlist-schema-src) && git -C aavso-starlist-schema-src pull --ff-only"
 build = { cmd = "jupyter lite build --contents content --output-dir dist", depends-on = ["fetch-astrowidgets", "fetch-bandaid", "fetch-eloy", "fetch-starlist-schema"] }
 serve = "python -m http.server 8000 --directory dist"
 # Image file server + CORS proxy on :8001 (see content/helper.py), e.g.

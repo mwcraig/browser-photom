@@ -73,7 +73,11 @@ lazily on the first dropped frame via `photom_dashboard.make_bandaid_processor`,
 so the page renders and the form is usable before
 the ~39 MB Ballet CNN weights download starts. `make_bandaid_processor` builds the
 real bandaid pipeline (`prepare_batch`, `process_one_image`,
-`write_starlist_set`) with bandaid's default `PhotometryConfig`, and threads
+`write_starlist_set`) with bandaid's default `PhotometryConfig`; it is the one
+place this repo calls bandaid, since `watch_photometry.ipynb` builds its
+processor from it too (passing `on_result` to receive each frame's tables, and
+its own pre-loaded `cnn`), so the pin in `pixi.toml` has one call to move with
+it. It threads
 `prep.gaia_g` and `prep.g_cut` into `process_one_image` exactly as the bandaid
 CLI does (bandaid raises `ValueError` without them). Centroid selection is
 bandaid's measured-versus-modelled position policy
@@ -85,8 +89,17 @@ WCS-projected position plus a per-frame offset plane. Catalog stars within
 dropped before centroiding (bandaid PR #146). This replaced the repo's former
 `fast_centroid.py` monkeypatch of `bandaid.photometry.centroid_stars`, which
 made the dashboard and the bandaid CLI disagree on 8–15 % of star-list rows
-(issue #6); with the policy in bandaid the two agree by construction (bandaid's
-`docs/measured_vs_modelled_positions.md`). Everything in `photom_dashboard.py` above
+(issue #6); with the policy in bandaid the two routes now select and model
+positions the same way (bandaid's `docs/measured_vs_modelled_positions.md`).
+They are not yet byte-identical: float32 round-off between the dashboard's
+`SgemmBallet` and bandaid's numpy `Ballet` (≤ 1.4e-6 px on CNN centroids)
+nudges the fitted FWHM, and so the aperture, which moves a few rows per filter
+across the SNR cut (4–7 of 8k–15.5k on the 155-frame LS Psc subset, and a
+`fwhm` header difference in 143/155 frames; `docs/issue6-recheck-2026-10-07.md`).
+Swapping bandaid's numpy `Ballet` into the dashboard makes all 155 files
+byte-identical; whether to do that, or pin `SgemmBallet` to it, is issue #8.
+This is the one place that difference is described; README, PROGRESS and the
+code comments point here. Everything in `photom_dashboard.py` above
 `make_bandaid_processor` is import-free beyond the standard library
 (a rule its module docstring states), so the host test environment needs neither numpy,
 astropy, nor bandaid.

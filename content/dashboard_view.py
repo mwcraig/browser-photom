@@ -169,9 +169,9 @@ class DashboardView:
     def _on_new_run(self, _dashboard):
         # Every drop is a fresh batch: retry a failed setup exactly once per
         # drop rather than once per session, and re-prep the pipeline from
-        # the new folder's first frame -- batch prep and the fast-centroid
-        # one-shot check are judgements about one folder's field, and the
-        # done panel invites dropping another folder. LazyProcessor.reset()
+        # the new folder's first frame -- batch prep is a judgement about
+        # one folder's field, and the done panel invites dropping another
+        # folder. LazyProcessor.reset()
         # clears the setup-failure latch and, if a real processor was already
         # built, propagates to its own reset hook too.
         #

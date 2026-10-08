@@ -413,8 +413,8 @@ class LazyProcessor:
     def reset(self):
         """Re-arm for a new run: clear the latch, and if a real processor was
         already built, propagate to its own `reset` hook too -- batch prep
-        and the fast-centroid one-shot state are judgements about one
-        folder's first frame, and a second dropped folder needs its own.
+        is a judgement about one folder's first frame, and a second dropped
+        folder needs its own.
         """
         self._error = None
         reset = getattr(self._built, "reset", None)
@@ -810,15 +810,32 @@ class PhotometryDashboard:
 # --------------------------------------------------------------------------
 
 
-def make_bandaid_processor(user_meta, results_dir="results", *, log=print):
+def make_bandaid_processor(
+    user_meta, results_dir="results", *, log=print, cnn=None, on_result=None
+):
     """Build the real `process_frame(path, name)` used in the browser.
+
+    This is the one place the repo calls bandaid's pipeline (`prepare_batch`,
+    `check_frame_consistency`, `process_one_image`, `write_starlist_set`);
+    the watch notebook goes through it too, so a bandaid signature change
+    (the pin in `pixi.toml`) has exactly one call to update.
+
+    `process_frame(path, name)` returns None when the frame was measured and
+    its `.star` file written, or a string saying why it was skipped (batch
+    prep failure, or a per-frame `FrameError`); anything else propagates.
 
     `user_meta` is read on every frame, so the view can keep it live while the
     form is still editable. `results_dir` may be a zero-arg callable returning
     the directory to write into, re-read on every frame -- that is how the
     dashboard points frames at the current run's directory (which the kernel
     creates per manifest) through a processor that is only built once per
-    session. bandaid, astropy, numpy and scipy are imported here rather than
+    session. `cnn` is an already-loaded Ballet centroider to reuse (the watch
+    notebook pre-downloads the weights in its own cell); by default the
+    weights are loaded here. `on_result(name, by_filter, prep)` is called
+    after each measured frame's `.star` file is written, with the per-filter
+    tables and the batch prep, for callers that want the tables themselves
+    (the notebook's light curve); it should not raise, since the frame is
+    already on disk by then. bandaid, astropy, numpy and scipy are imported here rather than
     at module scope, so the host test environment never needs them. The
     environment knobs themselves (warnings filter, keyring backend,
     negative-import cache, pyodide_http, IERS settings) live in `env_setup.py`
@@ -842,16 +859,17 @@ def make_bandaid_processor(user_meta, results_dir="results", *, log=print):
     from bandaid.photometry import process_one_image
     from bandaid.scripts import check_frame_consistency
 
-    from ballet_sgemm import load_cnn
+    if cnn is None:
+        from ballet_sgemm import load_cnn
 
-    cnn = load_cnn(log=log)
+        cnn = load_cnn(log=log)
 
     # The default config: bandaid's measured-versus-modelled position policy
     # (`CentroidConfig.model_faint_positions`, on by default since bandaid
-    # PR #147) CNN-centroids the brightest ~30 catalog stars by Gaia G and
-    # models the rest as the WCS-projected position plus a per-frame offset
-    # plane. That replaced this repo's own `fast_centroid` monkeypatch, and
-    # it is what makes the dashboard and the bandaid CLI agree row for row.
+    # PR #147), which replaced this repo's own `fast_centroid` monkeypatch so
+    # the dashboard and the bandaid CLI share one centroid policy. What still
+    # separates their outputs (Ballet-backend round-off, issue #8) is
+    # described once, in docs/dashboard.md.
     config = PhotometryConfig()
     if not callable(results_dir):
         os.makedirs(results_dir, exist_ok=True)
@@ -902,6 +920,8 @@ def make_bandaid_processor(user_meta, results_dir="results", *, log=print):
         l4 = by_filter["L4"]
         log(f"[{batch['n']:>3d}] {time.monotonic() - started:5.1f}s  {name}  "
             f"{len(l4)} stars  fwhm={l4.meta['fwhm']:.2f}px")
+        if on_result is not None:
+            on_result(name, by_filter, prep)
         return None
 
     def reset():

@@ -1016,3 +1016,13 @@ PR #7 review fixes (Copilot plus an adversarial pass):
    `dashboard_view.py` and `LazyProcessor.reset` trimmed; the notebook's
    row-order guarantee, `numpy-ballet` intro and "CNN centroiding of all
    stars" timer label corrected.
+5. **Stage timer follow-ups** (Copilot's second pass on PR #7): the
+   notebook's `centroid` stage now wraps `centroid_with_catalog_model`,
+   the whole position policy, rather than `centroid_stars` alone, which
+   had charged the offset-plane fit to "other" since the pin; and
+   `make_bandaid_processor` grew an `on_prep(prep)` hook, called right
+   after `prepare_batch` succeeds, where the notebook fixes the target
+   star and restarts its stage clock, so the first frame's sample no
+   longer carries batch prep's calib/detect/fwhm/cnn time and the Gaia
+   lookup. (Moving prep inside `process_frame` in item 2 had removed the
+   old reset point.)

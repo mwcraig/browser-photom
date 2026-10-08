@@ -871,8 +871,8 @@ class PhotometryDashboard:
 
 
 def make_bandaid_processor(
-    user_meta, results_dir="results", *, log=print, cnn=None, on_result=None,
-    provenance=None,
+    user_meta, results_dir="results", *, log=print, cnn=None, on_prep=None,
+    on_result=None, provenance=None,
 ):
     """Build the real `process_frame(path, name)` used in the browser.
 
@@ -895,11 +895,17 @@ def make_bandaid_processor(
     creates per manifest) through a processor that is only built once per
     session. `cnn` is an already-loaded Ballet centroider to reuse (the watch
     notebook pre-downloads the weights in its own cell); by default the
-    weights are loaded here. `on_result(name, by_filter, prep)` is called
+    weights are loaded here. `on_prep(prep)` is called once per batch, right
+    after `prepare_batch` succeeds and before the first frame's own work --
+    the boundary between batch-level and per-frame cost, which is where the
+    notebook's stage timer restarts its clock and where the target star is
+    fixed. `on_result(name, by_filter, prep)` is called
     after each measured frame's `.star` file is written, with the per-filter
     tables and the batch prep, for callers that want the tables themselves
-    (the notebook's light curve); it should not raise, since the frame is
-    already on disk by then. bandaid, astropy, numpy and scipy are imported here rather than
+    (the notebook's light curve). Neither hook should raise: an exception
+    from `on_prep` would count a frame as failed after prep is already
+    stored, and one from `on_result` would do so after the frame is already
+    on disk. bandaid, astropy, numpy and scipy are imported here rather than
     at module scope, so the host test environment never needs them. The
     environment knobs themselves (warnings filter, keyring backend,
     negative-import cache, pyodide_http, IERS settings) live in `env_setup.py`
@@ -954,6 +960,8 @@ def make_bandaid_processor(
                 # frame retries, rather than one bad first frame killing all.
                 return f"batch prep failed: {exc}"
             log(f"Batch prep done: {len(batch['prep'].photometry_coords)} photometry stars.")
+            if on_prep is not None:
+                on_prep(batch["prep"])
         prep = batch["prep"]
         try:
             # `name` (not `path`) into the check: it is only attached to error

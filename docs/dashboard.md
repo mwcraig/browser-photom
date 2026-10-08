@@ -75,9 +75,10 @@ the ~39 MB Ballet CNN weights download starts. `make_bandaid_processor` builds t
 real bandaid pipeline (`prepare_batch`, `process_one_image`,
 `write_starlist_set`) with bandaid's default `PhotometryConfig`; it is the one
 place this repo calls bandaid, since `watch_photometry.ipynb` builds its
-processor from it too (passing `on_result` to receive each frame's tables, and
-its own pre-loaded `cnn`), so the pin in `pixi.toml` has one call to move with
-it. It threads
+processor from it too (passing `on_prep` to fix its target star and restart
+its stage timer at the prep/frame boundary, `on_result` to receive each
+frame's tables, and its own pre-loaded `cnn`), so the pin in `pixi.toml` has
+one call to move with it. It threads
 `prep.gaia_g` and `prep.g_cut` into `process_one_image` exactly as the bandaid
 CLI does (bandaid raises `ValueError` without them). Centroid selection is
 bandaid's measured-versus-modelled position policy

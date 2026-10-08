@@ -19,6 +19,9 @@ from photom_dashboard import (
 )
 
 CHUNK = 4
+# A fixed stamp so the zip-name assertions below do not depend on whether the
+# host happens to have a generated content/build_info.py.
+TAG = "bandaid-aaaaaaa.browser-photom-bbbbbbb"
 
 
 class FakeWidget:
@@ -56,10 +59,14 @@ def make_dashboard(tmp_path, process_frame=None, **kw):
             calls.append((name, f.read()))
         # Into the current run's directory, exactly like the real processor
         # (make_bandaid_processor re-reads its results_dir callable per frame).
+        # The real one stamps the provenance tag into the name too
+        # (`starlist_name`); the bare stem keeps these assertions readable,
+        # and nothing here keys on the stamp.
         (Path(holder["dash"].current_run_dir) / (name.rsplit(".", 1)[0] + ".star")).write_text(
             f"#AAVSO\n{name}\n"
         )
 
+    kw.setdefault("provenance", TAG)
     dash = PhotometryDashboard(
         process_frame=process_frame or default_process,
         drop_zone=drop,
@@ -445,13 +452,13 @@ def test_each_drop_gets_its_own_run_dir_and_its_own_zip(tmp_path):
 
     zipw.receive({"type": "zip_request"})  # no run named -> the most recent
     (content, buffers) = zipw.of_type("zip")[0]
-    assert content["filename"] == "night2-starlists.zip"
+    assert content["filename"] == f"night2-starlists.{TAG}.zip"
     with zipfile.ZipFile(io.BytesIO(buffers[0])) as zf:
         assert zf.namelist() == ["b.star"]
 
     zipw.receive({"type": "zip_request", "run": "night1"})
     (content, buffers) = zipw.of_type("zip")[1]
-    assert content["filename"] == "night1-starlists.zip"
+    assert content["filename"] == f"night1-starlists.{TAG}.zip"
     with zipfile.ZipFile(io.BytesIO(buffers[0])) as zf:
         assert zf.namelist() == ["a.star"]
 

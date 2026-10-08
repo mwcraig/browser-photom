@@ -946,3 +946,83 @@ peak wasm-heap memory a 4 MiB chunk would pin is not worth ~20 ms/frame.
 This closes the last open item from the PR #2 era backlog. (The 4 MiB
 "survives the trip" question, half-settled length-only on 2026-08-11, is
 now fully settled with content verification.)
+
+# bandaid's position policy replaces fast_centroid (2026-10-07)
+
+Issue #6 found the dashboard and the bandaid CLI disagreeing on 8–15 % of
+star-list rows, all traced to this repo's `fast_centroid` monkeypatch of
+`bandaid.photometry.centroid_stars`. A follow-up showed the plane-fit
+positions were the more accurate ones, so the policy moved into bandaid
+itself (bandaid PR #147, merge `33bebf5`): `CentroidConfig.model_faint_positions`,
+on by default, keeps CNN centroids for the brightest ~30 catalog stars by
+Gaia G (batch-fixed `g_cut`) plus forced targets and gives every other star
+its WCS-projected position plus a per-frame offset plane. bandaid PR #146
+added `PhotometryConfig.edge_margin_px` (10 px), dropping catalog stars near
+or off a frame edge before centroiding. Validation on six fields is in
+bandaid's `centroid_policy_validation/PR3b_validation.md`; design notes in
+bandaid's `docs/measured_vs_modelled_positions.md`.
+
+Changes here:
+
+1. **bandaid pinned.** `pixi.toml`'s `fetch-bandaid` checks out `33bebf5`
+   (detached HEAD) instead of tracking `main`.
+2. **`gaia_g`/`g_cut` threaded.** `make_bandaid_processor` passes
+   `input_gaia_g=prep.gaia_g, g_cut=prep.g_cut` to `process_one_image`,
+   exactly as the CLI does; bandaid raises `ValueError` without them while
+   the policy is on.
+3. **`fast_centroid` removed.** `content/fast_centroid.py`,
+   `tests/test_fast_centroid.py`, and the `fast_centroid=` parameter on
+   `make_bandaid_processor`, `run_dashboard` and `DashboardView` are gone,
+   and with them the host `numpy` pixi dependency. Dashboard and CLI now
+   run the same centroid policy.
+
+Result of rerunning the issue #6 comparison on the 155-frame LS Psc subset
+with both routes at `33bebf5` (`docs/issue6-recheck-2026-10-07.md`): unmatched
+rows fell from 2.7–6.5 % per filter to ≤ 0.05 % (4–7 rows per filter), and
+swapping the dashboard's `SgemmBallet` for bandaid's numpy `Ballet` makes all
+155 `.star` files byte-identical to the CLI's. The residual is float32
+round-off between the two CNN backends (≤ 1.4e-6 px), which moves the fitted
+FWHM, and so the aperture, on most frames by ~1e-5 relative and on one frame
+by 2.5 %. Whether to make the dashboard use bandaid's own `Ballet`, or to pin
+`SgemmBallet` bit-for-bit to it, is issue #8; `docs/dashboard.md` is the one
+place the residual is described.
+
+PR #7 review fixes (Copilot plus an adversarial pass):
+
+1. **Watch notebook target lookup.** bandaid at `33bebf5` drops catalog
+   stars within the edge margin, or off frame, *per frame*
+   (`_drop_edge_catalog_stars` in `prepare_image`), so a row index found at
+   batch prep no longer points at the same star in every frame; the old
+   `l4[target_idx]` could print another star's counts, or raise `IndexError`
+   after the `.star` was written and get the frame retried five times as
+   "unreadable". The notebook now keeps the catalog star's own coordinates
+   from prep and matches them in each frame's `ra`/`dec` columns (which
+   bandaid copies through unchanged, so a 0.01 arcsec tolerance is float
+   slack, the same rule bandaid's `n_forced_measured` uses), recording
+   `None` for frames where bandaid dropped the target; the light curve
+   skips those frames.
+2. **One bandaid call site.** `make_bandaid_processor` grew `cnn=` and
+   `on_result=` keyword arguments and the notebook builds its processor
+   from it instead of carrying its own copy of the
+   `prepare_batch` → `check_frame_consistency` → `process_one_image` →
+   `write_starlist_set` sequence, so the next bandaid signature change has
+   one call to update.
+3. **`fetch-*` pixi tasks** clone only when the checkout is missing instead
+   of `cmd 2>/dev/null || git clone`, which hid the real error and then
+   failed on "destination path already exists".
+4. **Stale text**: "agree by construction" / "row for row" softened to
+   "same centroid policy" in README, this file, `docs/dashboard.md` and the
+   processor comment; "fast-centroid one-shot" comments in
+   `dashboard_view.py` and `LazyProcessor.reset` trimmed; the notebook's
+   row-order guarantee, `numpy-ballet` intro and "CNN centroiding of all
+   stars" timer label corrected.
+5. **Stage timer follow-ups** (Copilot's second pass on PR #7): the
+   notebook's `centroid` stage now wraps `centroid_with_catalog_model`,
+   the whole position policy, rather than `centroid_stars` alone, which
+   had charged the offset-plane fit to "other" since the pin; and
+   `make_bandaid_processor` grew an `on_prep(prep)` hook, called right
+   after `prepare_batch` succeeds, where the notebook fixes the target
+   star and restarts its stage clock, so the first frame's sample no
+   longer carries batch prep's calib/detect/fwhm/cnn time and the Gaia
+   lookup. (Moving prep inside `process_frame` in item 2 had removed the
+   old reset point.)

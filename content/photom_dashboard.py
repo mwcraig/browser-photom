@@ -38,8 +38,12 @@ __all__ = [
     "RunState",
     "build_results_zip",
     "make_bandaid_processor",
+    "provenance_tag",
     "run_dashboard",
+    "software_versions",
+    "starlist_name",
     "validate_metadata",
+    "zip_name",
 ]
 
 # 1 MiB. Small enough that peak memory is one chunk plus the MEMFS file
@@ -48,11 +52,64 @@ __all__ = [
 # `spike_comm.ipynb` measures that and this number can be raised from data.
 CHUNK_BYTES = 1 << 20
 
-ZIP_NAME = "starlists.zip"
-
 
 class ProtocolError(Exception):
     """The front end sent something the assembler cannot honour."""
+
+
+# --------------------------------------------------------------------------
+# Provenance
+# --------------------------------------------------------------------------
+#
+# The starlist schema has no field yet for the software that produced a
+# starlist. Until it does, the two SHAs that determine a starlist's numbers
+# -- the pinned bandaid commit and this repo's commit -- ride in the file
+# names: every `.star` is `<stem>.<tag>.star` and the download is
+# `<run>-starlists.<tag>.zip`, with `<tag>` = `bandaid-<sha>.browser-photom-
+# <sha>`. The SHAs come from `build_info.py`, which `pixi run build-info`
+# (scripts/write_build_info.py) generates on the host from the two git
+# checkouts; the kernel cannot discover them itself.
+
+UNKNOWN_SHA = "unknown"
+
+
+def software_versions():
+    """``{"bandaid": sha, "browser_photom": sha}`` for this build.
+
+    Read from the generated ``build_info`` module. Without one (the host test
+    environment never has it) both come back as ``"unknown"``: a visible,
+    honest stamp rather than a crash in the one place the kernel writes
+    results -- and in a real build its absence means the `build-info` task
+    did not run, which the file names then say out loud.
+    """
+    try:
+        import build_info
+    except ImportError:
+        return {"bandaid": UNKNOWN_SHA, "browser_photom": UNKNOWN_SHA}
+    return {
+        "bandaid": str(getattr(build_info, "BANDAID_SHA", UNKNOWN_SHA)),
+        "browser_photom": str(getattr(build_info, "BROWSER_PHOTOM_SHA", UNKNOWN_SHA)),
+    }
+
+
+def provenance_tag(versions=None):
+    """``bandaid-<sha>.browser-photom-<sha>``, the stamp shared by every
+    output name. Dots separate the components so the stem, the two SHAs
+    and the extension stay readable in a name that already has hyphens
+    and underscores in it (Seestar frame names do)."""
+    if versions is None:
+        versions = software_versions()
+    return f"bandaid-{versions['bandaid']}.browser-photom-{versions['browser_photom']}"
+
+
+def starlist_name(stem, tag):
+    """File name of the ``.star`` written for a frame with this stem."""
+    return f"{stem}.{tag}.star"
+
+
+def zip_name(run, tag):
+    """File name of the download holding one run's starlists."""
+    return f"{run}-starlists.{tag}.zip"
 
 
 # --------------------------------------------------------------------------
@@ -413,8 +470,8 @@ class LazyProcessor:
     def reset(self):
         """Re-arm for a new run: clear the latch, and if a real processor was
         already built, propagate to its own `reset` hook too -- batch prep
-        and the fast-centroid one-shot state are judgements about one
-        folder's first frame, and a second dropped folder needs its own.
+        is a judgement about one folder's first frame, and a second dropped
+        folder needs its own.
         """
         self._error = None
         reset = getattr(self._built, "reset", None)
@@ -464,14 +521,16 @@ class PhotometryDashboard:
         kernel -> JS   {type:"file_done", name, ok, reason}
         kernel -> JS   {type:"run_done"}
         JS  -> kernel  {type:"zip_request", run?}   <- omitted run = most recent
-        kernel -> JS   {type:"zip", filename} + 1 buffer  <- <run>-starlists.zip
+        kernel -> JS   {type:"zip", filename} + 1 buffer  <- <run>-starlists.<tag>.zip
         kernel -> JS   {type:"error", reason}
 
     Each accepted manifest gets its own subdirectory of ``results/``, named
     after ``folder`` (sanitized; disambiguated ``foo``, ``foo (1)``, ...;
     ``run`` when the front end sends no folder), and `zip_request` downloads
     one run's directory -- so a second drop can never silently overwrite or
-    shadow an earlier drop's starlists.
+    shadow an earlier drop's starlists. The zip is named with the build's
+    `provenance_tag` (the bandaid and browser-photom SHAs), as each `.star`
+    inside it is; ``provenance`` overrides the tag, for tests.
 
     The ack exists to catch a wedged kernel -- each carries a run-cancelling
     timeout on the browser side -- not to pace individual chunks; pacing and
@@ -491,7 +550,7 @@ class PhotometryDashboard:
         results_dir="results",
         tmpdir="/tmp",
         chunk_bytes=CHUNK_BYTES,
-        zip_name=ZIP_NAME,
+        provenance=None,
         on_change=None,
         on_manifest=None,
     ):
@@ -499,7 +558,7 @@ class PhotometryDashboard:
         self.zip_widget = zip_widget
         self.results_dir = str(results_dir)
         self.chunk_bytes = int(chunk_bytes)
-        self.zip_name = zip_name
+        self.provenance = provenance_tag() if provenance is None else str(provenance)
         self.on_change = on_change
         self.on_manifest = on_manifest
 
@@ -759,7 +818,8 @@ class PhotometryDashboard:
             self._send(self.zip_widget, {"type": "zip_error", "reason": str(exc)})
             return
         self._send(self.zip_widget,
-                   {"type": "zip", "filename": f"{run}-{self.zip_name}"}, [data])
+                   {"type": "zip", "filename": zip_name(run, self.provenance)},
+                   [data])
 
     def _on_cancel(self):
         if self.phase != "running":
@@ -810,15 +870,42 @@ class PhotometryDashboard:
 # --------------------------------------------------------------------------
 
 
-def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=True, log=print):
+def make_bandaid_processor(
+    user_meta, results_dir="results", *, log=print, cnn=None, on_prep=None,
+    on_result=None, provenance=None,
+):
     """Build the real `process_frame(path, name)` used in the browser.
+
+    This is the one place the repo calls bandaid's pipeline (`prepare_batch`,
+    `check_frame_consistency`, `process_one_image`, `write_starlist_set`);
+    the watch notebook goes through it too, so a bandaid signature change
+    (the pin in `pixi.toml`) has exactly one call to update.
+
+    `process_frame(path, name)` returns None when the frame was measured and
+    its `.star` file written, or a string saying why it was skipped (batch
+    prep failure, or a per-frame `FrameError`); anything else propagates.
+    The `.star` is named `starlist_name(<stem of name>, tag)`, where the tag
+    is this build's `provenance_tag` (bandaid and browser-photom SHAs) unless
+    ``provenance`` overrides it.
 
     `user_meta` is read on every frame, so the view can keep it live while the
     form is still editable. `results_dir` may be a zero-arg callable returning
     the directory to write into, re-read on every frame -- that is how the
     dashboard points frames at the current run's directory (which the kernel
     creates per manifest) through a processor that is only built once per
-    session. bandaid, astropy, numpy and scipy are imported here rather than
+    session. `cnn` is an already-loaded Ballet centroider to reuse (the watch
+    notebook pre-downloads the weights in its own cell); by default the
+    weights are loaded here. `on_prep(prep)` is called once per batch, right
+    after `prepare_batch` succeeds and before the first frame's own work --
+    the boundary between batch-level and per-frame cost, which is where the
+    notebook's stage timer restarts its clock and where the target star is
+    fixed. `on_result(name, by_filter, prep)` is called
+    after each measured frame's `.star` file is written, with the per-filter
+    tables and the batch prep, for callers that want the tables themselves
+    (the notebook's light curve). Neither hook should raise: an exception
+    from `on_prep` would count a frame as failed after prep is already
+    stored, and one from `on_result` would do so after the frame is already
+    on disk. bandaid, astropy, numpy and scipy are imported here rather than
     at module scope, so the host test environment never needs them. The
     environment knobs themselves (warnings filter, keyring backend,
     negative-import cache, pyodide_http, IERS settings) live in `env_setup.py`
@@ -842,19 +929,19 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
     from bandaid.photometry import process_one_image
     from bandaid.scripts import check_frame_consistency
 
-    from ballet_sgemm import load_cnn
+    if cnn is None:
+        from ballet_sgemm import load_cnn
 
-    cnn = load_cnn(log=log)
-    # Installed unconditionally: the wrapper delegates to the stock
-    # implementation whenever the module flag is False, so passing
-    # fast_centroid=False restores stock behavior even in a kernel where an
-    # earlier processor enabled the fast path.
-    import fast_centroid as fc
+        cnn = load_cnn(log=log)
 
-    fc.FAST_CENTROID = bool(fast_centroid)
-    fc.install(log=log)
-
+    # The default config: bandaid's measured-versus-modelled position policy
+    # (`CentroidConfig.model_faint_positions`, on by default since bandaid
+    # PR #147), which replaced this repo's own `fast_centroid` monkeypatch so
+    # the dashboard and the bandaid CLI share one centroid policy. What still
+    # separates their outputs (Ballet-backend round-off, issue #8) is
+    # described once, in docs/dashboard.md.
     config = PhotometryConfig()
+    tag = provenance_tag() if provenance is None else str(provenance)
     if not callable(results_dir):
         os.makedirs(results_dir, exist_ok=True)
     # Batch prep is built from the first frame, exactly as the bandaid CLI
@@ -873,6 +960,8 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
                 # frame retries, rather than one bad first frame killing all.
                 return f"batch prep failed: {exc}"
             log(f"Batch prep done: {len(batch['prep'].photometry_coords)} photometry stars.")
+            if on_prep is not None:
+                on_prep(batch["prep"])
         prep = batch["prep"]
         try:
             # `name` (not `path`) into the check: it is only attached to error
@@ -886,9 +975,15 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
                 prep.bayer_masks,
                 config=prep.config,
                 input_photometry_coords=prep.photometry_coords,
+                # Required by the position policy: per-row Gaia G and the
+                # batch's CNN-class magnitude cut, exactly as the CLI passes
+                # them (bandaid `process_batch`). Without them bandaid raises
+                # ValueError before any work.
+                input_gaia_g=prep.gaia_g,
+                g_cut=prep.g_cut,
             )
             dest = _Path(results_dir() if callable(results_dir) else results_dir)
-            write_starlist_set(by_filter, dest / (_Path(name).stem + ".star"))
+            write_starlist_set(by_filter, dest / starlist_name(_Path(name).stem, tag))
         except FrameError as exc:
             return str(exc)
         # One line per frame, the same shape the watch notebook printed. The
@@ -898,6 +993,8 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
         l4 = by_filter["L4"]
         log(f"[{batch['n']:>3d}] {time.monotonic() - started:5.1f}s  {name}  "
             f"{len(l4)} stars  fwhm={l4.meta['fwhm']:.2f}px")
+        if on_result is not None:
+            on_result(name, by_filter, prep)
         return None
 
     def reset():
@@ -909,7 +1006,6 @@ def make_bandaid_processor(user_meta, results_dir="results", *, fast_centroid=Tr
         # cheap when the next folder really is the same field.
         batch["prep"] = None
         batch["n"] = 0
-        fc.reset()
 
     process_frame.reset = reset
     return process_frame
@@ -926,7 +1022,6 @@ def run_dashboard(
     results_dir="results",
     tmpdir="/tmp",
     chunk_bytes=CHUNK_BYTES,
-    fast_centroid=True,
 ):
     """Build and display the dashboard. This is all the notebook calls.
 
@@ -941,5 +1036,4 @@ def run_dashboard(
         results_dir=results_dir,
         tmpdir=tmpdir,
         chunk_bytes=chunk_bytes,
-        fast_centroid=fast_centroid,
     ).display()

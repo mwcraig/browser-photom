@@ -6,14 +6,29 @@ platforms = ["osx-arm64", "linux-64"]
 version = "0.1.0"
 
 [tasks]
-fetch-astrowidgets = "git -C astrowidgets-src pull --ff-only 2>/dev/null || git clone https://github.com/astropy/astrowidgets astrowidgets-src"
-# Full clone (not shallow) so hatch-vcs sees tags; main, since bandaid PR #94
-# (numpy-ballet) merged and the branch was deleted
-fetch-bandaid = "(git -C bandaid-src fetch && git -C bandaid-src checkout main && git -C bandaid-src pull --ff-only) 2>/dev/null || git clone --branch main https://github.com/mwcraig/bandaid bandaid-src"
+# Every fetch-* task clones only when the checkout is missing, and otherwise
+# lets the fetch/pull/checkout fail loudly: the earlier `cmd 2>/dev/null ||
+# git clone` shape hid the real error (a dirty tree, an unfetched commit) and
+# then failed on "destination path already exists" instead.
+fetch-astrowidgets = "(test -d astrowidgets-src || git clone https://github.com/astropy/astrowidgets astrowidgets-src) && git -C astrowidgets-src pull --ff-only"
+# Full clone (not shallow) so hatch-vcs sees tags. Pinned (detached HEAD) to the
+# bandaid commit the dashboard was validated against, so a redeploy cannot
+# silently pick up whatever bandaid main is at build time. 33bebf5 is the
+# merge of bandaid PR #147 (measured-versus-modelled centroid positions), which
+# made `process_one_image` require `input_gaia_g` and `g_cut`; move the pin
+# deliberately, together with the call in `make_bandaid_processor` (the one
+# place this repo calls bandaid; the watch notebook goes through it too).
+fetch-bandaid = "(test -d bandaid-src || git clone https://github.com/mwcraig/bandaid bandaid-src) && git -C bandaid-src fetch && git -C bandaid-src checkout 33bebf5"
 # Pinned to the commit bandaid's pyproject pins (detached HEAD)
-fetch-eloy = "(git -C eloy-src fetch && git -C eloy-src checkout a056c91a945772e0520a89695f8fcd16fda36870) 2>/dev/null || (git clone https://github.com/mwcraig/eloy eloy-src && git -C eloy-src checkout a056c91a945772e0520a89695f8fcd16fda36870)"
-fetch-starlist-schema = "git -C aavso-starlist-schema-src pull --ff-only 2>/dev/null || git clone https://github.com/mwcraig/aavso-starlist-schema aavso-starlist-schema-src"
-build = { cmd = "jupyter lite build --contents content --output-dir dist", depends-on = ["fetch-astrowidgets", "fetch-bandaid", "fetch-eloy", "fetch-starlist-schema"] }
+fetch-eloy = "(test -d eloy-src || git clone https://github.com/mwcraig/eloy eloy-src) && git -C eloy-src fetch && git -C eloy-src checkout a056c91a945772e0520a89695f8fcd16fda36870"
+fetch-starlist-schema = "(test -d aavso-starlist-schema-src || git clone https://github.com/mwcraig/aavso-starlist-schema aavso-starlist-schema-src) && git -C aavso-starlist-schema-src pull --ff-only"
+# Writes content/build_info.py (gitignored) with the bandaid and browser-photom
+# SHAs this build embeds in every starlist's file name and in the zip name --
+# the starlist schema has no software-version field yet. After fetch-bandaid
+# so the SHA is the pinned checkout's, and before either build so the module
+# is copied into the kernel with the rest of content/.
+build-info = { cmd = "python scripts/write_build_info.py", depends-on = ["fetch-bandaid"] }
+build = { cmd = "jupyter lite build --contents content --output-dir dist", depends-on = ["fetch-astrowidgets", "fetch-bandaid", "fetch-eloy", "fetch-starlist-schema", "build-info"] }
 serve = "python -m http.server 8000 --directory dist"
 # Image file server + CORS proxy on :8001 (see content/helper.py), e.g.
 #   pixi run helper ~/Downloads/ey_uma
@@ -36,9 +51,6 @@ jupyterlite-xeus = ">=5"
 # the widget if that build differs from the one the kernel imports.
 anywidget = "==0.11.0"
 pytest = "*"
-# Host-side tests for content/fast_centroid.py exercise its NumPy numerics
-# directly; nothing else in the host test env needs numpy.
-numpy = "*"
 nodejs = "*"
 
 # Voici lives in its own environment on purpose: voici 0.10 -> voici-core pins
@@ -50,7 +62,7 @@ voici = "*"
 anywidget = "==0.11.0"
 
 [feature.dash.tasks]
-build-dash = { cmd = "voici build --contents content --output-dir dist-dash", depends-on = ["fetch-astrowidgets", "fetch-bandaid", "fetch-eloy", "fetch-starlist-schema"] }
+build-dash = { cmd = "voici build --contents content --output-dir dist-dash", depends-on = ["fetch-astrowidgets", "fetch-bandaid", "fetch-eloy", "fetch-starlist-schema", "build-info"] }
 serve-dash = "python -m http.server 8010 --directory dist-dash"
 
 [environments]

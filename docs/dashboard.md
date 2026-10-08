@@ -11,11 +11,13 @@ problem — mounting a real disk folder instead of uploading).
 `watch_photometry.ipynb` is the existing developer/debug notebook: open it in
 JupyterLab, run every cell in order, drag a folder onto the file browser's
 `incoming/` panel, and a `while True` loop polls for new files once a second. It
-keeps that developer/watch workflow, but is not untouched by this work: the
-branch added its fast-centroid and validation cells, and its heavy pieces now
-import the same modules the dashboard uses (`fast_centroid.py`,
-`ballet_sgemm.py`, and `env_setup.py` for the environment knobs) instead of
-carrying inline copies that could drift.
+keeps that developer/watch workflow, but is not untouched by this work: its
+heavy pieces now import the same modules the dashboard uses
+(`ballet_sgemm.py`, and `env_setup.py` for the environment knobs) instead of
+carrying inline copies that could drift, and its watch cell passes
+`prep.gaia_g` and `prep.g_cut` to `process_one_image` just as the dashboard
+does. It no longer imports `fast_centroid.py`, which has been deleted along
+with its validation cell: centroid selection now happens inside bandaid (§2).
 
 The dashboard (`content/photometry_dashboard.ipynb`, rendered through Voici) is a
 second, non-Jupyter front end for the same pipeline: instructions, a metadata form,
@@ -71,27 +73,42 @@ lazily on the first dropped frame via `photom_dashboard.make_bandaid_processor`,
 so the page renders and the form is usable before
 the ~39 MB Ballet CNN weights download starts. `make_bandaid_processor` builds the
 real bandaid pipeline (`prepare_batch`, `process_one_image`,
-`write_starlist_set`) and, when `fast_centroid=True` (the default), installs
-`fast_centroid.install()` (`content/fast_centroid.py`), which monkey-patches
-`bandaid.photometry.centroid_stars` with `content/fast_centroid.py` — the single
-implementation `watch_photometry.ipynb` now imports too (`import fast_centroid as
-fc`), rather than carrying its own diverged copy: CNN-centroid only the brightest
-~100 in-frame stars and plane-fit the rest (`fast_centroid.py`'s module
-docstring explains the
-two measured wastes this removes). Everything in `photom_dashboard.py` above
+`write_starlist_set`) with bandaid's default `PhotometryConfig`; it is the one
+place this repo calls bandaid, since `watch_photometry.ipynb` builds its
+processor from it too (passing `on_prep` to fix its target star and restart
+its stage timer at the prep/frame boundary, `on_result` to receive each
+frame's tables, and its own pre-loaded `cnn`), so the pin in `pixi.toml` has
+one call to move with it. It threads
+`prep.gaia_g` and `prep.g_cut` into `process_one_image` exactly as the bandaid
+CLI does (bandaid raises `ValueError` without them). Centroid selection is
+bandaid's measured-versus-modelled position policy
+(`CentroidConfig.model_faint_positions`, on by default since bandaid PR #147):
+the brightest ~30 catalog stars by Gaia G (the batch-fixed `g_cut`) and any
+forced targets keep CNN centroids, and every other star takes its
+WCS-projected position plus a per-frame offset plane. Catalog stars within
+`PhotometryConfig.edge_margin_px` (10 px) of a frame edge, or off frame, are
+dropped before centroiding (bandaid PR #146). This replaced the repo's former
+`fast_centroid.py` monkeypatch of `bandaid.photometry.centroid_stars`, which
+made the dashboard and the bandaid CLI disagree on 8–15 % of star-list rows
+(issue #6); with the policy in bandaid the two routes now select and model
+positions the same way (bandaid's `docs/measured_vs_modelled_positions.md`).
+They are not yet byte-identical: float32 round-off between the dashboard's
+`SgemmBallet` and bandaid's numpy `Ballet` (≤ 1.4e-6 px on CNN centroids)
+nudges the fitted FWHM, and so the aperture, which moves a few rows per filter
+across the SNR cut (4–7 of 8k–15.5k on the 155-frame LS Psc subset, and a
+`fwhm` header difference in 143/155 frames; `docs/issue6-recheck-2026-10-07.md`).
+Swapping bandaid's numpy `Ballet` into the dashboard makes all 155 files
+byte-identical; whether to do that, or pin `SgemmBallet` to it, is issue #8.
+This is the one place that difference is described; README, PROGRESS and the
+code comments point here. Everything in `photom_dashboard.py` above
 `make_bandaid_processor` is import-free beyond the standard library
 (a rule its module docstring states), so the host test environment needs neither numpy,
-astropy, nor bandaid for this module's own tests (`tests/test_fast_centroid.py`
-covers `fast_centroid.py`'s numerics separately — see §10).
+astropy, nor bandaid.
 
 Two further fixes from the PR-review batch live in this same seam.
-`make_bandaid_processor` always installs `fast_centroid` and syncs
-`fast_centroid.FAST_CENTROID` from its own `fast_centroid=` parameter,
-so passing `fast_centroid=False` reliably
-restores stock centroiding even in a kernel where an earlier run enabled the fast
-path; it returns a `process_frame` with a `reset()` hook
-that clears the cached batch prep and re-arms
-`fast_centroid.reset()`'s one-shot state.
+`make_bandaid_processor` returns a `process_frame` with a `reset()` hook
+that clears the cached batch prep, so a second folder is never photometered
+against the first folder's catalog.
 The pipeline-setup-failure latch does not live in `DashboardView` at all: it is
 a separate, tested class (`photom_dashboard.LazyProcessor`) that
 wraps a zero-arg factory and defers calling it until the first dropped frame,
@@ -136,7 +153,7 @@ everything happens inside `PhotometryDashboard.handle_message`.
 | `cancel` | JS → kernel | `{type}` | none | front end sends this when its own upload loop unwinds after an `error`, or when an `ack`/`file_done` wait times out (`waitFor` in `dropzone.js`); ends the run cleanly instead of leaving it stuck at `"running"` |
 | `error` | kernel → JS | `{type, reason}` | none | a malformed `chunk` message or a `ProtocolError` from `ChunkAssembler`, reported without raising into the kernel |
 | `zip_request` | JS → kernel | `{type, run?}` | none | the download button asking for a fresh zip of one run's `.star` files; omitting `run` means the most recent run |
-| `zip` | kernel → JS | `{type, filename}` | 1 (zip bytes) | the built archive, named `<run>-starlists.zip`, turned into a `Blob` + object-URL download in `renderZip` (`dropzone.js`) |
+| `zip` | kernel → JS | `{type, filename}` | 1 (zip bytes) | the built archive, named `<run>-starlists.<tag>.zip` with the build's provenance tag (§7), turned into a `Blob` + object-URL download in `renderZip` (`dropzone.js`) |
 | `zip_error` | kernel → JS | `{type, reason}` | none | `results/` is missing or has no `.star` files yet, or `run` names an unknown run |
 
 Two validation layers run before any of that starts. `_on_manifest` refuses a
@@ -359,6 +376,31 @@ pixi run build-dash     # voici build --contents content --output-dir dist-dash
 pixi run serve-dash     # http.server on :8010, serving dist-dash/
 ```
 
+**Software provenance in the output names.** The starlist schema has no
+field yet for the software that produced a starlist. Until it does, the two
+SHAs that determine a starlist's numbers ride in the file names: every
+`.star` is `<frame stem>.<tag>.star` and the download is
+`<run>-starlists.<tag>.zip`, where `<tag>` is
+`bandaid-<sha>.browser-photom-<sha>` (`photom_dashboard.provenance_tag`,
+`starlist_name`, `zip_name`), e.g.
+`Light_EY_UMa_10.0s_IRCUT_20250305-040530.bandaid-33bebf5.browser-photom-e2a4c9c.star`.
+Stamping the `.star` files, not just the zip, is what makes the stamp
+survive unzipping. The kernel cannot discover either SHA itself (bandaid
+has no tags, so its hatch-vcs version string is not a reliable carrier, and
+browser-photom is not a package), so the `build-info` pixi task
+(`scripts/write_build_info.py`) runs on the host — after `fetch-bandaid`,
+before `build`/`build-dash` — and writes `content/build_info.py`
+(gitignored) from the two git checkouts; the module is copied into the
+kernel with the rest of `content/`. A checkout with tracked changes gets a
+`-dirty` suffix on its SHA, so a starlist from a locally patched tree
+cannot pass for the committed one; untracked files (the fetched clones)
+do not count. Without the module — the host test environment, or a build
+that skipped the task — the names say `unknown` rather than the kernel
+failing in its one output path. The watch notebook writes through the same
+`make_bandaid_processor`, so its starlists carry the stamp too. When the
+schema grows a software-version field, the tag's two SHAs are what should
+move into it.
+
 Entry point: `http://localhost:8010/voici/render/photometry_dashboard.html`.
 Voici's generated index page also lists the other notebooks under `content/`
 (`watch_photometry.ipynb`, `demo.ipynb`, `spike_comm.ipynb`, etc.), rendered the
@@ -530,12 +572,9 @@ chunking protocol itself. The 2026-08-11 run rules this out.
 The Python tests (`pixi run test` / `pytest`, `pytest.ini` puts `content/` on
 `sys.path` since it's a JupyterLite contents directory, not an installed package)
 and the JS tests (`pixi run test-js`) all run natively — no browser, no astropy,
-no bandaid needed anywhere, and no numpy needed for `content/photom_dashboard.py`'s
-own tests, because photometry is injected as a `process_frame(path, name)`
-callable rather than imported at module scope (the module docstring;
-`FrameProcessor`). `tests/test_fast_centroid.py` is the exception: it exercises
-`content/fast_centroid.py`'s NumPy numerics directly, which is why numpy is now a
-host pixi dependency even though nothing else in the suite touches it.
+no bandaid and no numpy needed anywhere, because photometry is injected as a
+`process_frame(path, name)` callable rather than imported at module scope (the
+module docstring; `FrameProcessor`).
 
 | file | covers |
 |---|---|
@@ -544,7 +583,7 @@ host pixi dependency even though nothing else in the suite touches it.
 | `tests/test_metadata.py` | `validate_metadata`'s required/optional field rules, numeric parsing, and lat/lon range checks |
 | `tests/test_run_state.py` | `RunState` counters — uploaded/processed/skipped/remaining bookkeeping, `finished`, and that `remaining` never goes negative |
 | `tests/test_zip.py` | `build_results_zip` — flattening to basenames, `.star`-only filtering, sorted and byte-deterministic output, and its error cases (empty/missing directory) |
-| `tests/test_fast_centroid.py` | `content/fast_centroid.py`'s NumPy numerics directly: on/band/off-frame classification, the brightest-first one-shot check and its rank-by-image fallback, the plane fit (recovery, outlier clipping, degenerate axes, too-few-rows fallback), the full pipeline's row-order preservation, the partial sparse-fit fallback, `FAST_CENTROID=False` delegating to the original, and `install()`'s patching/idempotency/logging against fake `bandaid` modules |
+| `tests/test_provenance.py` | the software stamp (§7): `provenance_tag`/`starlist_name`/`zip_name`, the `unknown` fallback without `build_info`, the dashboard picking up a generated `build_info`, and `scripts/write_build_info.py` against throwaway git repos (both SHAs recorded, `-dirty` on tracked changes only, failure outside a checkout) |
 | `tests/js/dropzone.test.mjs` | the pure functions extracted from `dropzone.js`: `isFitsName`, `collectEntries`, `sliceChunks`, `validateFound`, `byPath`, `pickRun`, and `makeErrorLatch` |
 
 The JS tests exist specifically to pin down two front-end rules that would
@@ -562,8 +601,8 @@ file'`).
 What none of this covers: the `ipywidgets` view itself (`dashboard_view.py`'s
 module docstring says so explicitly — "Nothing here is exercised by `pixi run
 test`"), the real bandaid pipeline (`make_bandaid_processor` imports bandaid,
-astropy, numpy and scipy only when called, and no test calls it — `install()`'s
-own numerics are covered above, but not the CNN it wraps), and anything that
+astropy, numpy and scipy only when called, and no test calls it; bandaid's own
+suite covers its centroid policy), and anything that
 needs an actual browser: anywidget's front-end rendering, the real widget comm
 transport, and DOM drag-and-drop events beyond the pure functions
 `dropzone.test.mjs` extracts and tests directly.

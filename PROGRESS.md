@@ -946,3 +946,42 @@ peak wasm-heap memory a 4 MiB chunk would pin is not worth ~20 ms/frame.
 This closes the last open item from the PR #2 era backlog. (The 4 MiB
 "survives the trip" question, half-settled length-only on 2026-08-11, is
 now fully settled with content verification.)
+
+# bandaid's position policy replaces fast_centroid (2026-10-07)
+
+Issue #6 found the dashboard and the bandaid CLI disagreeing on 8–15 % of
+star-list rows, all traced to this repo's `fast_centroid` monkeypatch of
+`bandaid.photometry.centroid_stars`. A follow-up showed the plane-fit
+positions were the more accurate ones, so the policy moved into bandaid
+itself (bandaid PR #147, merge `33bebf5`): `CentroidConfig.model_faint_positions`,
+on by default, keeps CNN centroids for the brightest ~30 catalog stars by
+Gaia G (batch-fixed `g_cut`) plus forced targets and gives every other star
+its WCS-projected position plus a per-frame offset plane. bandaid PR #146
+added `PhotometryConfig.edge_margin_px` (10 px), dropping catalog stars near
+or off a frame edge before centroiding. Validation on six fields is in
+bandaid's `centroid_policy_validation/PR3b_validation.md`; design notes in
+bandaid's `docs/measured_vs_modelled_positions.md`.
+
+Changes here:
+
+1. **bandaid pinned.** `pixi.toml`'s `fetch-bandaid` checks out `33bebf5`
+   (detached HEAD) instead of tracking `main`.
+2. **`gaia_g`/`g_cut` threaded.** `make_bandaid_processor` passes
+   `input_gaia_g=prep.gaia_g, g_cut=prep.g_cut` to `process_one_image`,
+   exactly as the CLI does; bandaid raises `ValueError` without them while
+   the policy is on.
+3. **`fast_centroid` removed.** `content/fast_centroid.py`,
+   `tests/test_fast_centroid.py`, and the `fast_centroid=` parameter on
+   `make_bandaid_processor`, `run_dashboard` and `DashboardView` are gone,
+   and with them the host `numpy` pixi dependency. Dashboard and CLI now
+   agree by construction.
+
+Result of rerunning the issue #6 comparison on the 155-frame LS Psc subset
+with both routes at `33bebf5` (`docs/issue6-recheck-2026-10-07.md`): unmatched
+rows fell from 2.7–6.5 % per filter to ≤ 0.05 % (4–7 rows per filter), and
+swapping the dashboard's `SgemmBallet` for bandaid's numpy `Ballet` makes all
+155 `.star` files byte-identical to the CLI's. The residual is float32
+round-off between the two CNN backends (≤ 1.4e-6 px), which moves the fitted
+FWHM, and so the aperture, on most frames by ~1e-5 relative and on one frame
+by 2.5 %. Whether to make the dashboard use bandaid's own `Ballet`, or to pin
+`SgemmBallet` bit-for-bit to it, is an open follow-up.

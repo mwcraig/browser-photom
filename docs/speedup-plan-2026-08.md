@@ -1,5 +1,11 @@
 # Speeding up in-browser photometry: findings and next step (2026-08-10)
 
+> **Note (2026-10-07):** the fast-centroid plane trick described in this
+> document has been retired from browser-photom. It now lives in bandaid as
+> the measured-versus-modelled position policy (bandaid PR #147); see bandaid's
+> `docs/measured_vs_modelled_positions.md`. The text below is kept as the
+> historical record.
+
 Self-contained handoff doc: everything measured so far about `watch_photometry.ipynb`
 performance, plus the plan for the next optimization. `PROGRESS.md` covers the arc
 through 2026-07-30; the profile in section 2 below is newer and is recorded only here.

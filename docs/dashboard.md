@@ -11,11 +11,13 @@ problem — mounting a real disk folder instead of uploading).
 `watch_photometry.ipynb` is the existing developer/debug notebook: open it in
 JupyterLab, run every cell in order, drag a folder onto the file browser's
 `incoming/` panel, and a `while True` loop polls for new files once a second. It
-keeps that developer/watch workflow, but is not untouched by this work: the
-branch added its fast-centroid and validation cells, and its heavy pieces now
-import the same modules the dashboard uses (`fast_centroid.py`,
-`ballet_sgemm.py`, and `env_setup.py` for the environment knobs) instead of
-carrying inline copies that could drift.
+keeps that developer/watch workflow, but is not untouched by this work: its
+heavy pieces now import the same modules the dashboard uses
+(`ballet_sgemm.py`, and `env_setup.py` for the environment knobs) instead of
+carrying inline copies that could drift, and its watch cell passes
+`prep.gaia_g` and `prep.g_cut` to `process_one_image` just as the dashboard
+does. It no longer imports `fast_centroid.py`, which has been deleted along
+with its validation cell: centroid selection now happens inside bandaid (§2).
 
 The dashboard (`content/photometry_dashboard.ipynb`, rendered through Voici) is a
 second, non-Jupyter front end for the same pipeline: instructions, a metadata form,
@@ -71,27 +73,28 @@ lazily on the first dropped frame via `photom_dashboard.make_bandaid_processor`,
 so the page renders and the form is usable before
 the ~39 MB Ballet CNN weights download starts. `make_bandaid_processor` builds the
 real bandaid pipeline (`prepare_batch`, `process_one_image`,
-`write_starlist_set`) and, when `fast_centroid=True` (the default), installs
-`fast_centroid.install()` (`content/fast_centroid.py`), which monkey-patches
-`bandaid.photometry.centroid_stars` with `content/fast_centroid.py` — the single
-implementation `watch_photometry.ipynb` now imports too (`import fast_centroid as
-fc`), rather than carrying its own diverged copy: CNN-centroid only the brightest
-~100 in-frame stars and plane-fit the rest (`fast_centroid.py`'s module
-docstring explains the
-two measured wastes this removes). Everything in `photom_dashboard.py` above
+`write_starlist_set`) with bandaid's default `PhotometryConfig`, and threads
+`prep.gaia_g` and `prep.g_cut` into `process_one_image` exactly as the bandaid
+CLI does (bandaid raises `ValueError` without them). Centroid selection is
+bandaid's measured-versus-modelled position policy
+(`CentroidConfig.model_faint_positions`, on by default since bandaid PR #147):
+the brightest ~30 catalog stars by Gaia G (the batch-fixed `g_cut`) and any
+forced targets keep CNN centroids, and every other star takes its
+WCS-projected position plus a per-frame offset plane. Catalog stars within
+`PhotometryConfig.edge_margin_px` (10 px) of a frame edge, or off frame, are
+dropped before centroiding (bandaid PR #146). This replaced the repo's former
+`fast_centroid.py` monkeypatch of `bandaid.photometry.centroid_stars`, which
+made the dashboard and the bandaid CLI disagree on 8–15 % of star-list rows
+(issue #6); with the policy in bandaid the two agree by construction (bandaid's
+`docs/measured_vs_modelled_positions.md`). Everything in `photom_dashboard.py` above
 `make_bandaid_processor` is import-free beyond the standard library
 (a rule its module docstring states), so the host test environment needs neither numpy,
-astropy, nor bandaid for this module's own tests (`tests/test_fast_centroid.py`
-covers `fast_centroid.py`'s numerics separately — see §10).
+astropy, nor bandaid.
 
 Two further fixes from the PR-review batch live in this same seam.
-`make_bandaid_processor` always installs `fast_centroid` and syncs
-`fast_centroid.FAST_CENTROID` from its own `fast_centroid=` parameter,
-so passing `fast_centroid=False` reliably
-restores stock centroiding even in a kernel where an earlier run enabled the fast
-path; it returns a `process_frame` with a `reset()` hook
-that clears the cached batch prep and re-arms
-`fast_centroid.reset()`'s one-shot state.
+`make_bandaid_processor` returns a `process_frame` with a `reset()` hook
+that clears the cached batch prep, so a second folder is never photometered
+against the first folder's catalog.
 The pipeline-setup-failure latch does not live in `DashboardView` at all: it is
 a separate, tested class (`photom_dashboard.LazyProcessor`) that
 wraps a zero-arg factory and defers calling it until the first dropped frame,
@@ -530,12 +533,9 @@ chunking protocol itself. The 2026-08-11 run rules this out.
 The Python tests (`pixi run test` / `pytest`, `pytest.ini` puts `content/` on
 `sys.path` since it's a JupyterLite contents directory, not an installed package)
 and the JS tests (`pixi run test-js`) all run natively — no browser, no astropy,
-no bandaid needed anywhere, and no numpy needed for `content/photom_dashboard.py`'s
-own tests, because photometry is injected as a `process_frame(path, name)`
-callable rather than imported at module scope (the module docstring;
-`FrameProcessor`). `tests/test_fast_centroid.py` is the exception: it exercises
-`content/fast_centroid.py`'s NumPy numerics directly, which is why numpy is now a
-host pixi dependency even though nothing else in the suite touches it.
+no bandaid and no numpy needed anywhere, because photometry is injected as a
+`process_frame(path, name)` callable rather than imported at module scope (the
+module docstring; `FrameProcessor`).
 
 | file | covers |
 |---|---|
@@ -544,7 +544,6 @@ host pixi dependency even though nothing else in the suite touches it.
 | `tests/test_metadata.py` | `validate_metadata`'s required/optional field rules, numeric parsing, and lat/lon range checks |
 | `tests/test_run_state.py` | `RunState` counters — uploaded/processed/skipped/remaining bookkeeping, `finished`, and that `remaining` never goes negative |
 | `tests/test_zip.py` | `build_results_zip` — flattening to basenames, `.star`-only filtering, sorted and byte-deterministic output, and its error cases (empty/missing directory) |
-| `tests/test_fast_centroid.py` | `content/fast_centroid.py`'s NumPy numerics directly: on/band/off-frame classification, the brightest-first one-shot check and its rank-by-image fallback, the plane fit (recovery, outlier clipping, degenerate axes, too-few-rows fallback), the full pipeline's row-order preservation, the partial sparse-fit fallback, `FAST_CENTROID=False` delegating to the original, and `install()`'s patching/idempotency/logging against fake `bandaid` modules |
 | `tests/js/dropzone.test.mjs` | the pure functions extracted from `dropzone.js`: `isFitsName`, `collectEntries`, `sliceChunks`, `validateFound`, `byPath`, `pickRun`, and `makeErrorLatch` |
 
 The JS tests exist specifically to pin down two front-end rules that would
@@ -562,8 +561,8 @@ file'`).
 What none of this covers: the `ipywidgets` view itself (`dashboard_view.py`'s
 module docstring says so explicitly — "Nothing here is exercised by `pixi run
 test`"), the real bandaid pipeline (`make_bandaid_processor` imports bandaid,
-astropy, numpy and scipy only when called, and no test calls it — `install()`'s
-own numerics are covered above, but not the CNN it wraps), and anything that
+astropy, numpy and scipy only when called, and no test calls it; bandaid's own
+suite covers its centroid policy), and anything that
 needs an actual browser: anywidget's front-end rendering, the real widget comm
 transport, and DOM drag-and-drop events beyond the pure functions
 `dropzone.test.mjs` extracts and tests directly.

@@ -878,3 +878,71 @@ PR #2 review summary:
    now-seven-strong JS pure-function list landed in the doc too.
 
 Suite after the batch: 163 pytest + 26 JS tests, all passing natively.
+
+# spike_comm wedge diagnosed: first message raced the widget render (2026-08-22)
+
+The throughput rerun (fresh incognito window, dist rebuilt 2026-08-21)
+wedged with every row at "(no reply yet)": the driver cell reported all
+ten transfers queued, and not one reply ever arrived. The executed
+notebook Matt saved shows why. The driver cell called `display(widget)`
+and then `_pump()` — putting the first 64 KiB `down` on the wire — in the
+same cell, milliseconds apart. On the front end, the `msg:custom` handler
+only exists once `render()` has run (display_data processed, anywidget's
+ESM dynamically imported, view attached), and a custom message that
+reaches the model before then is dropped with no error on either side.
+With exactly one transfer in flight and each started by the reply to the
+previous, losing the first message wedges the entire queue forever.
+
+The cold-cache incognito window (recommended to dodge the 2026-08-11
+service-worker/IndexedDB staleness trap) is what flipped the race: view
+setup is much slower on a cold profile, so the `down` reliably arrived
+before the handler existed. The warm-profile 2026-08-11 run won the same
+race by luck. Staleness itself is ruled out this time — the notebook Matt
+executed is byte-identical to `content/spike_comm.ipynb` and to the baked
+`dist/files/` copy, and the widget/driver protocol is self-contained in
+the notebook anyway.
+
+Fix (notebook only, no dashboard code involved — the dashboard never hits
+this because its first kernel→JS custom message is always a reaction to a
+user action long after render):
+
+- **`ready` handshake.** JS sends `{type:'ready'}` from `render()`,
+  strictly after registering `onCustomMessage`; the driver cell no longer
+  calls `_pump()` directly, and `_on_msg` starts the queue on the first
+  `ready` (a `_STARTED` guard ignores duplicates from re-rendered views).
+- **Results cell distinguishes the three stall states.** "(no reply
+  yet)" (transfer lost), "(CRC verdict pending)" with the measured time
+  (`down_arrived` landed, `down_done` didn't), and a banner when `ready`
+  itself never arrived (view never rendered — check the browser console).
+  Previously all three printed identically, which is why the wedge gave
+  no clue about where it broke.
+
+`docs/dashboard.md` §8 records the handshake. The rerun itself is still
+pending; `dist/` rebuilt with the fixed notebook.
+
+# spike_comm throughput measured for real (2026-08-22)
+
+With the `ready` handshake in place, a clean run finally happened — served
+from a **fresh port** (new browser origin), which turned out to be the
+missing trick: Matt's first post-fix attempt on :8000 still executed the
+pre-fix notebook because Chrome's incognito storage is shared across all
+incognito windows until the last one closes, so the IndexedDB drive copy
+from the wedged morning run shadowed the rebuilt build. A new port
+sidesteps every layer of that (service worker, drive copy) by
+construction; worth remembering for any future "did my rebuild take?"
+doubt.
+
+The numbers (all rows `ok=True`, crc32-verified content both directions;
+full table in `docs/dashboard.md` §8 and the notebook's fill-in cell):
+~0.007 s per round trip at 64 KiB rising to ~0.02 s at 4 MiB; 1 MiB moves
+at 184/94 MB/s (down/up), 4 MiB at 234/181, the real 4,150,000-byte frame
+size at 221/194. Per-byte ratio 1 MiB vs 4 MiB = 1.64×, above the verdict
+cell's 1.2× threshold — but the table's shape shows that is a ~6–7 ms
+fixed per-message overhead amortizing, not a serialization cliff, and in
+absolute terms comm is ~44 ms of a ~1.7–2.0 s frame (~1%). Recommendation
+recorded in the doc: **keep `CHUNK_BYTES = 1 << 20`**; the ~3 MiB of extra
+peak wasm-heap memory a 4 MiB chunk would pin is not worth ~20 ms/frame.
+
+This closes the last open item from the PR #2 era backlog. (The 4 MiB
+"survives the trip" question, half-settled length-only on 2026-08-11, is
+now fully settled with content verification.)

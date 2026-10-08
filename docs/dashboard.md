@@ -152,7 +152,7 @@ everything happens inside `PhotometryDashboard.handle_message`.
 | `cancel` | JS → kernel | `{type}` | none | front end sends this when its own upload loop unwinds after an `error`, or when an `ack`/`file_done` wait times out (`waitFor` in `dropzone.js`); ends the run cleanly instead of leaving it stuck at `"running"` |
 | `error` | kernel → JS | `{type, reason}` | none | a malformed `chunk` message or a `ProtocolError` from `ChunkAssembler`, reported without raising into the kernel |
 | `zip_request` | JS → kernel | `{type, run?}` | none | the download button asking for a fresh zip of one run's `.star` files; omitting `run` means the most recent run |
-| `zip` | kernel → JS | `{type, filename}` | 1 (zip bytes) | the built archive, named `<run>-starlists.zip`, turned into a `Blob` + object-URL download in `renderZip` (`dropzone.js`) |
+| `zip` | kernel → JS | `{type, filename}` | 1 (zip bytes) | the built archive, named `<run>-starlists.<tag>.zip` with the build's provenance tag (§7), turned into a `Blob` + object-URL download in `renderZip` (`dropzone.js`) |
 | `zip_error` | kernel → JS | `{type, reason}` | none | `results/` is missing or has no `.star` files yet, or `run` names an unknown run |
 
 Two validation layers run before any of that starts. `_on_manifest` refuses a
@@ -375,6 +375,31 @@ pixi run build-dash     # voici build --contents content --output-dir dist-dash
 pixi run serve-dash     # http.server on :8010, serving dist-dash/
 ```
 
+**Software provenance in the output names.** The starlist schema has no
+field yet for the software that produced a starlist. Until it does, the two
+SHAs that determine a starlist's numbers ride in the file names: every
+`.star` is `<frame stem>.<tag>.star` and the download is
+`<run>-starlists.<tag>.zip`, where `<tag>` is
+`bandaid-<sha>.browser-photom-<sha>` (`photom_dashboard.provenance_tag`,
+`starlist_name`, `zip_name`), e.g.
+`Light_EY_UMa_10.0s_IRCUT_20250305-040530.bandaid-33bebf5.browser-photom-e2a4c9c.star`.
+Stamping the `.star` files, not just the zip, is what makes the stamp
+survive unzipping. The kernel cannot discover either SHA itself (bandaid
+has no tags, so its hatch-vcs version string is not a reliable carrier, and
+browser-photom is not a package), so the `build-info` pixi task
+(`scripts/write_build_info.py`) runs on the host — after `fetch-bandaid`,
+before `build`/`build-dash` — and writes `content/build_info.py`
+(gitignored) from the two git checkouts; the module is copied into the
+kernel with the rest of `content/`. A checkout with tracked changes gets a
+`-dirty` suffix on its SHA, so a starlist from a locally patched tree
+cannot pass for the committed one; untracked files (the fetched clones)
+do not count. Without the module — the host test environment, or a build
+that skipped the task — the names say `unknown` rather than the kernel
+failing in its one output path. The watch notebook writes through the same
+`make_bandaid_processor`, so its starlists carry the stamp too. When the
+schema grows a software-version field, the tag's two SHAs are what should
+move into it.
+
 Entry point: `http://localhost:8010/voici/render/photometry_dashboard.html`.
 Voici's generated index page also lists the other notebooks under `content/`
 (`watch_photometry.ipynb`, `demo.ipynb`, `spike_comm.ipynb`, etc.), rendered the
@@ -557,6 +582,7 @@ module docstring; `FrameProcessor`).
 | `tests/test_metadata.py` | `validate_metadata`'s required/optional field rules, numeric parsing, and lat/lon range checks |
 | `tests/test_run_state.py` | `RunState` counters — uploaded/processed/skipped/remaining bookkeeping, `finished`, and that `remaining` never goes negative |
 | `tests/test_zip.py` | `build_results_zip` — flattening to basenames, `.star`-only filtering, sorted and byte-deterministic output, and its error cases (empty/missing directory) |
+| `tests/test_provenance.py` | the software stamp (§7): `provenance_tag`/`starlist_name`/`zip_name`, the `unknown` fallback without `build_info`, the dashboard picking up a generated `build_info`, and `scripts/write_build_info.py` against throwaway git repos (both SHAs recorded, `-dirty` on tracked changes only, failure outside a checkout) |
 | `tests/js/dropzone.test.mjs` | the pure functions extracted from `dropzone.js`: `isFitsName`, `collectEntries`, `sliceChunks`, `validateFound`, `byPath`, `pickRun`, and `makeErrorLatch` |
 
 The JS tests exist specifically to pin down two front-end rules that would

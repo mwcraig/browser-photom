@@ -38,8 +38,12 @@ __all__ = [
     "RunState",
     "build_results_zip",
     "make_bandaid_processor",
+    "provenance_tag",
     "run_dashboard",
+    "software_versions",
+    "starlist_name",
     "validate_metadata",
+    "zip_name",
 ]
 
 # 1 MiB. Small enough that peak memory is one chunk plus the MEMFS file
@@ -48,11 +52,64 @@ __all__ = [
 # `spike_comm.ipynb` measures that and this number can be raised from data.
 CHUNK_BYTES = 1 << 20
 
-ZIP_NAME = "starlists.zip"
-
 
 class ProtocolError(Exception):
     """The front end sent something the assembler cannot honour."""
+
+
+# --------------------------------------------------------------------------
+# Provenance
+# --------------------------------------------------------------------------
+#
+# The starlist schema has no field yet for the software that produced a
+# starlist. Until it does, the two SHAs that determine a starlist's numbers
+# -- the pinned bandaid commit and this repo's commit -- ride in the file
+# names: every `.star` is `<stem>.<tag>.star` and the download is
+# `<run>-starlists.<tag>.zip`, with `<tag>` = `bandaid-<sha>.browser-photom-
+# <sha>`. The SHAs come from `build_info.py`, which `pixi run build-info`
+# (scripts/write_build_info.py) generates on the host from the two git
+# checkouts; the kernel cannot discover them itself.
+
+UNKNOWN_SHA = "unknown"
+
+
+def software_versions():
+    """``{"bandaid": sha, "browser_photom": sha}`` for this build.
+
+    Read from the generated ``build_info`` module. Without one (the host test
+    environment never has it) both come back as ``"unknown"``: a visible,
+    honest stamp rather than a crash in the one place the kernel writes
+    results -- and in a real build its absence means the `build-info` task
+    did not run, which the file names then say out loud.
+    """
+    try:
+        import build_info
+    except ImportError:
+        return {"bandaid": UNKNOWN_SHA, "browser_photom": UNKNOWN_SHA}
+    return {
+        "bandaid": str(getattr(build_info, "BANDAID_SHA", UNKNOWN_SHA)),
+        "browser_photom": str(getattr(build_info, "BROWSER_PHOTOM_SHA", UNKNOWN_SHA)),
+    }
+
+
+def provenance_tag(versions=None):
+    """``bandaid-<sha>.browser-photom-<sha>``, the stamp shared by every
+    output name. Dots separate the components so the stem, the two SHAs
+    and the extension stay readable in a name that already has hyphens
+    and underscores in it (Seestar frame names do)."""
+    if versions is None:
+        versions = software_versions()
+    return f"bandaid-{versions['bandaid']}.browser-photom-{versions['browser_photom']}"
+
+
+def starlist_name(stem, tag):
+    """File name of the ``.star`` written for a frame with this stem."""
+    return f"{stem}.{tag}.star"
+
+
+def zip_name(run, tag):
+    """File name of the download holding one run's starlists."""
+    return f"{run}-starlists.{tag}.zip"
 
 
 # --------------------------------------------------------------------------
@@ -464,14 +521,16 @@ class PhotometryDashboard:
         kernel -> JS   {type:"file_done", name, ok, reason}
         kernel -> JS   {type:"run_done"}
         JS  -> kernel  {type:"zip_request", run?}   <- omitted run = most recent
-        kernel -> JS   {type:"zip", filename} + 1 buffer  <- <run>-starlists.zip
+        kernel -> JS   {type:"zip", filename} + 1 buffer  <- <run>-starlists.<tag>.zip
         kernel -> JS   {type:"error", reason}
 
     Each accepted manifest gets its own subdirectory of ``results/``, named
     after ``folder`` (sanitized; disambiguated ``foo``, ``foo (1)``, ...;
     ``run`` when the front end sends no folder), and `zip_request` downloads
     one run's directory -- so a second drop can never silently overwrite or
-    shadow an earlier drop's starlists.
+    shadow an earlier drop's starlists. The zip is named with the build's
+    `provenance_tag` (the bandaid and browser-photom SHAs), as each `.star`
+    inside it is; ``provenance`` overrides the tag, for tests.
 
     The ack exists to catch a wedged kernel -- each carries a run-cancelling
     timeout on the browser side -- not to pace individual chunks; pacing and
@@ -491,7 +550,7 @@ class PhotometryDashboard:
         results_dir="results",
         tmpdir="/tmp",
         chunk_bytes=CHUNK_BYTES,
-        zip_name=ZIP_NAME,
+        provenance=None,
         on_change=None,
         on_manifest=None,
     ):
@@ -499,7 +558,7 @@ class PhotometryDashboard:
         self.zip_widget = zip_widget
         self.results_dir = str(results_dir)
         self.chunk_bytes = int(chunk_bytes)
-        self.zip_name = zip_name
+        self.provenance = provenance_tag() if provenance is None else str(provenance)
         self.on_change = on_change
         self.on_manifest = on_manifest
 
@@ -759,7 +818,8 @@ class PhotometryDashboard:
             self._send(self.zip_widget, {"type": "zip_error", "reason": str(exc)})
             return
         self._send(self.zip_widget,
-                   {"type": "zip", "filename": f"{run}-{self.zip_name}"}, [data])
+                   {"type": "zip", "filename": zip_name(run, self.provenance)},
+                   [data])
 
     def _on_cancel(self):
         if self.phase != "running":
@@ -811,7 +871,8 @@ class PhotometryDashboard:
 
 
 def make_bandaid_processor(
-    user_meta, results_dir="results", *, log=print, cnn=None, on_result=None
+    user_meta, results_dir="results", *, log=print, cnn=None, on_result=None,
+    provenance=None,
 ):
     """Build the real `process_frame(path, name)` used in the browser.
 
@@ -823,6 +884,9 @@ def make_bandaid_processor(
     `process_frame(path, name)` returns None when the frame was measured and
     its `.star` file written, or a string saying why it was skipped (batch
     prep failure, or a per-frame `FrameError`); anything else propagates.
+    The `.star` is named `starlist_name(<stem of name>, tag)`, where the tag
+    is this build's `provenance_tag` (bandaid and browser-photom SHAs) unless
+    ``provenance`` overrides it.
 
     `user_meta` is read on every frame, so the view can keep it live while the
     form is still editable. `results_dir` may be a zero-arg callable returning
@@ -871,6 +935,7 @@ def make_bandaid_processor(
     # separates their outputs (Ballet-backend round-off, issue #8) is
     # described once, in docs/dashboard.md.
     config = PhotometryConfig()
+    tag = provenance_tag() if provenance is None else str(provenance)
     if not callable(results_dir):
         os.makedirs(results_dir, exist_ok=True)
     # Batch prep is built from the first frame, exactly as the bandaid CLI
@@ -910,7 +975,7 @@ def make_bandaid_processor(
                 g_cut=prep.g_cut,
             )
             dest = _Path(results_dir() if callable(results_dir) else results_dir)
-            write_starlist_set(by_filter, dest / (_Path(name).stem + ".star"))
+            write_starlist_set(by_filter, dest / starlist_name(_Path(name).stem, tag))
         except FrameError as exc:
             return str(exc)
         # One line per frame, the same shape the watch notebook printed. The

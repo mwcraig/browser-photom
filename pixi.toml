@@ -22,7 +22,13 @@ fetch-bandaid = "(test -d bandaid-src || git clone https://github.com/mwcraig/ba
 # Pinned to the commit bandaid's pyproject pins (detached HEAD)
 fetch-eloy = "(test -d eloy-src || git clone https://github.com/mwcraig/eloy eloy-src) && git -C eloy-src fetch && git -C eloy-src checkout a056c91a945772e0520a89695f8fcd16fda36870"
 fetch-starlist-schema = "(test -d aavso-starlist-schema-src || git clone https://github.com/mwcraig/aavso-starlist-schema aavso-starlist-schema-src) && git -C aavso-starlist-schema-src pull --ff-only"
-build = { cmd = "jupyter lite build --contents content --output-dir dist", depends-on = ["fetch-astrowidgets", "fetch-bandaid", "fetch-eloy", "fetch-starlist-schema"] }
+# Writes content/build_info.py (gitignored) with the bandaid and browser-photom
+# SHAs this build embeds in every starlist's file name and in the zip name --
+# the starlist schema has no software-version field yet. After fetch-bandaid
+# so the SHA is the pinned checkout's, and before either build so the module
+# is copied into the kernel with the rest of content/.
+build-info = { cmd = "python scripts/write_build_info.py", depends-on = ["fetch-bandaid"] }
+build = { cmd = "jupyter lite build --contents content --output-dir dist", depends-on = ["fetch-astrowidgets", "fetch-bandaid", "fetch-eloy", "fetch-starlist-schema", "build-info"] }
 serve = "python -m http.server 8000 --directory dist"
 # Image file server + CORS proxy on :8001 (see content/helper.py), e.g.
 #   pixi run helper ~/Downloads/ey_uma
@@ -56,7 +62,7 @@ voici = "*"
 anywidget = "==0.11.0"
 
 [feature.dash.tasks]
-build-dash = { cmd = "voici build --contents content --output-dir dist-dash", depends-on = ["fetch-astrowidgets", "fetch-bandaid", "fetch-eloy", "fetch-starlist-schema"] }
+build-dash = { cmd = "voici build --contents content --output-dir dist-dash", depends-on = ["fetch-astrowidgets", "fetch-bandaid", "fetch-eloy", "fetch-starlist-schema", "build-info"] }
 serve-dash = "python -m http.server 8010 --directory dist-dash"
 
 [environments]

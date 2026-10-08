@@ -91,7 +91,11 @@ A [Voici](https://github.com/voila-dashboards/voici) deployment of the same
 real bandaid pipeline as `watch_photometry.ipynb`, for someone who doesn't
 want to touch a notebook: fill in a small metadata form, drag a folder of
 FITS frames onto a drop zone, watch a progress bar, then click one button to
-download a zip of the `.star` starlists.
+download a zip of the `.star` starlists. Every `.star` file name and the zip
+name carry the bandaid and browser-photom commit SHAs that produced them
+(`<stem>.bandaid-<sha>.browser-photom-<sha>.star`), since the starlist schema
+cannot record software versions yet; `pixi run build-info` (run by both build
+tasks) writes those SHAs to a gitignored `content/build_info.py`.
 
 ```sh
 pixi run build-dash   # build content/ into dist-dash/ with voici, in a separate pixi env
@@ -224,6 +228,10 @@ message-handler protocol against a fake widget.
 - `scripts/local_helper.py` — stdlib-only local helper (`pixi run helper DIR`, port 8001);
   serves `DIR` at `/list` + `/files/<name>` (with Range support) and CORS-proxies
   `/proxy/<full-target-url>`, restricted to allowed browser origins.
+- `scripts/write_build_info.py` — the `build-info` pixi task (a dependency of
+  `build` and `build-dash`): writes the gitignored `content/build_info.py` with the
+  bandaid and browser-photom SHAs that the dashboard stamps into every `.star` and
+  zip name (`-dirty` appended for a checkout with tracked changes).
 - `docs/filesystem-access-notes.md` — record of the abandoned
   jupyterlab-filesystem-access approach to local file access.
 - `docs/dashboard.md` — the photometry dashboard's architecture, wire protocol, and
@@ -237,7 +245,8 @@ message-handler protocol against a fake widget.
   installed package.
 - `tests/` — host-side tests (`pixi run test`), covering
   `content/photom_dashboard.py`'s metadata validation, chunk assembly, run-state
-  bookkeeping, zip building, and the full message-handler flow (all against a fake
+  bookkeeping, zip building, the provenance stamp in output names (and its
+  generator script), and the full message-handler flow (all against a fake
   widget and an injected `process_frame` callable).
 - `tests/js/dropzone.test.mjs` — tests (`pixi run test-js`, Node's built-in test
   runner, no npm dependencies) for `content/dropzone.js`'s FITS-name filtering,

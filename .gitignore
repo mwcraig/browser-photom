@@ -14,5 +14,9 @@ bandaid-src/
 eloy-src/
 aavso-starlist-schema-src/
 
+# written by `pixi run build-info` (scripts/write_build_info.py): the SHAs
+# one build stamps into starlist names; describes a build, not the source
+content/build_info.py
+
 # python bytecode
 __pycache__/

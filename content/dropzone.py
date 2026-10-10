@@ -20,7 +20,7 @@ from pathlib import Path
 import anywidget
 import traitlets
 
-from photom_dashboard import CHUNK_BYTES
+from photom_dashboard import CHUNK_BYTES, SLOWDOWN_FACTOR
 
 _ESM = Path(__file__).with_name("dropzone.js").read_text()
 _CSS = Path(__file__).with_name("dropzone.css").read_text()
@@ -38,6 +38,10 @@ class DropZone(anywidget.AnyWidget):
     # Overwritten by PhotometryDashboard.attach() so the two sides cannot
     # disagree about the chunk size.
     chunk_bytes = traitlets.Int(CHUNK_BYTES).tag(sync=True)
+    # How much a hidden tab slows a run, quoted by the front end's warnings
+    # (modal, toast, tab title). Pushed by attach() like chunk_bytes, so the
+    # JS and the Python notice/banner quote one number.
+    slowdown_factor = traitlets.Int(SLOWDOWN_FACTOR).tag(sync=True)
     hint = traitlets.Unicode("Drag a folder of FITS images here").tag(sync=True)
 
 

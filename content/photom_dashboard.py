@@ -32,14 +32,19 @@ __all__ = [
     "CHUNK_BYTES",
     "ChunkAssembler",
     "FrameProcessor",
+    "HIDDEN_NOTICE_MIN_MS",
     "LazyProcessor",
     "PhotometryDashboard",
     "ProtocolError",
     "RunState",
+    "SLOWDOWN_FACTOR",
     "build_results_zip",
+    "format_duration",
+    "hidden_banner_text",
     "make_bandaid_processor",
     "provenance_tag",
     "run_dashboard",
+    "running_notice",
     "software_versions",
     "starlist_name",
     "validate_metadata",
@@ -51,6 +56,20 @@ __all__ = [
 # not depend on how large a single binary comm buffer xeus-wasm can carry --
 # `spike_comm.ipynb` measures that and this number can be raised from data.
 CHUNK_BYTES = 1 << 20
+
+# How much slower a run goes while its tab is hidden: Chrome throttles a
+# background tab's main thread, and every widget-comm message passes through
+# it. Measured ~7x on the notebook path (`docs/speedup-plan-2026-08.md` §1
+# rule a); the dashboard's own slowdown has not been re-measured, which is
+# why this is the one place the number lives. `DropZone.slowdown_factor`
+# defaults to it and `PhotometryDashboard.attach()` pushes it to the front
+# end, so the JS warnings and the Python notice/banner always quote the same
+# figure.
+SLOWDOWN_FACTOR = 7
+
+# A hidden episode shorter than this in which no frame finished is not worth
+# a banner: a glance at another tab should not produce one.
+HIDDEN_NOTICE_MIN_MS = 2000
 
 
 class ProtocolError(Exception):
@@ -262,6 +281,81 @@ class RunState:
         if median is not None:
             text += f" · median {median:.1f} s/frame"
         return text
+
+
+# --------------------------------------------------------------------------
+# Tab-visibility warnings (issue #9)
+# --------------------------------------------------------------------------
+#
+# Plain text throughout: the view escapes these before painting them into an
+# HTML widget.
+
+
+def format_duration(seconds):
+    """``"45 s"``, ``"3 min 20 s"``, ``"1 h 5 min"``.
+
+    Rounded to whole seconds *before* splitting into units, so 59.6 s reads
+    "1 min" rather than "60 s"; seconds are dropped once the duration runs
+    to hours. Anything negative, non-finite or non-numeric reads "0 s".
+    """
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return "0 s"
+    if not math.isfinite(value) or value <= 0:
+        return "0 s"
+    total = int(round(value))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+    if minutes:
+        return f"{minutes} min {secs} s" if secs else f"{minutes} min"
+    return f"{secs} s"
+
+
+def running_notice(factor):
+    """The persistent notice shown in the run panel while a run is going."""
+    return (
+        f"Keep this tab visible until the run finishes — switching tabs or "
+        f"minimizing the window slows it ~{factor}×."
+    )
+
+
+def hidden_banner_text(hidden_ms, frames, factor, episodes=1):
+    """The banner shown when the user comes back to a hidden tab.
+
+    ``hidden_ms`` and ``frames`` are totals over ``episodes`` hidden spells.
+    """
+    duration = format_duration(hidden_ms / 1000)
+    if episodes > 1:
+        when = f"This tab was hidden {episodes} times, {duration} in total"
+    else:
+        when = f"This tab was hidden for {duration}"
+    if frames == 0:
+        done = "no frames finished meanwhile"
+    elif frames == 1:
+        done = "1 frame finished meanwhile"
+    else:
+        done = f"{frames} frames finished meanwhile"
+    return (
+        f"{when}; {done}. Hidden tabs run ~{factor}× slower — keep this tab "
+        f"visible until the run finishes."
+    )
+
+
+def _episode_count(value):
+    """A non-negative int from a browser-supplied number, or None.
+
+    Rejects bool (an int subclass), strings, NaN, infinities and negatives:
+    the hidden-episode message only feeds a banner, so a malformed one is
+    dropped rather than guessed at.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return int(value)
 
 
 # --------------------------------------------------------------------------
@@ -523,6 +617,18 @@ class PhotometryDashboard:
         JS  -> kernel  {type:"zip_request", run?}   <- omitted run = most recent
         kernel -> JS   {type:"zip", filename} + 1 buffer  <- <run>-starlists.<tag>.zip
         kernel -> JS   {type:"error", reason}
+        JS  -> kernel  {type:"hidden_episode", hidden_ms, frames}
+        kernel -> JS   {type:"hidden_episode_error", reason}  <- never `error`
+
+    ``hidden_episode`` is sent when the tab becomes visible again after
+    being hidden during a run (often after the run ended, so it is accepted
+    in any phase): how long it was hidden and how many ``file_done`` the
+    front end received meanwhile. It only feeds the run panel's banner
+    (`hidden_notice`), so a malformed one is ignored, and a handler failure
+    replies ``hidden_episode_error``, which the front end ignores -- an
+    ``error`` would cancel the run. ``slowdown_factor`` (default
+    `SLOWDOWN_FACTOR`) is pushed to the drop zone by `attach()`, like
+    ``chunk_bytes``.
 
     Each accepted manifest gets its own subdirectory of ``results/``, named
     after ``folder`` (sanitized; disambiguated ``foo``, ``foo (1)``, ...;
@@ -550,6 +656,7 @@ class PhotometryDashboard:
         results_dir="results",
         tmpdir="/tmp",
         chunk_bytes=CHUNK_BYTES,
+        slowdown_factor=SLOWDOWN_FACTOR,
         provenance=None,
         on_change=None,
         on_manifest=None,
@@ -558,6 +665,7 @@ class PhotometryDashboard:
         self.zip_widget = zip_widget
         self.results_dir = str(results_dir)
         self.chunk_bytes = int(chunk_bytes)
+        self.slowdown_factor = int(slowdown_factor)
         self.provenance = provenance_tag() if provenance is None else str(provenance)
         self.on_change = on_change
         self.on_manifest = on_manifest
@@ -574,6 +682,10 @@ class PhotometryDashboard:
         self._runs = []
         self.current_run_name = None
         self.current_run_dir = self.results_dir
+        # (hidden_ms, frames) per reported hidden-tab episode of the current
+        # run; reset by each accepted manifest.
+        self.hidden_episodes = []
+        self.hidden_notice_dismissed = False
         os.makedirs(self.results_dir, exist_ok=True)
 
     # -- wiring ------------------------------------------------------------
@@ -582,6 +694,7 @@ class PhotometryDashboard:
         self.drop_zone.on_msg(self._dispatch)
         self.zip_widget.on_msg(self._dispatch)
         self.drop_zone.chunk_bytes = self.chunk_bytes
+        self.drop_zone.slowdown_factor = self.slowdown_factor
         return self
 
     def _dispatch(self, _widget, content, buffers):
@@ -607,6 +720,11 @@ class PhotometryDashboard:
                          "zip_widget", "zip_error"),
         "cancel": (lambda self, content, buffers: self._on_cancel(),
                    "drop_zone", "error"),
+        # Deliberately NOT "error": this message only feeds a banner, often
+        # arrives after the run ended, and an `error` would cancel a run
+        # still in progress. The front end ignores unknown reply types.
+        "hidden_episode": (lambda self, content, buffers: self._on_hidden_episode(content),
+                           "drop_zone", "hidden_episode_error"),
     }
 
     def handle_message(self, content, buffers=()):
@@ -692,6 +810,8 @@ class PhotometryDashboard:
         self.current_run_dir = str(run_dir)
         self.assembler.reset()  # a second drop starts clean
         self.state.seed(names, sizes)
+        self.hidden_episodes = []
+        self.hidden_notice_dismissed = False
         self.phase = "running"
         if self.on_manifest is not None:
             self.on_manifest(self)
@@ -835,6 +955,38 @@ class PhotometryDashboard:
         self.phase = "cancelled"
         self._push_runs()
         self._changed()
+
+    def _on_hidden_episode(self, content):
+        # Accepted in any phase: the run usually finishes while the user is
+        # away, so this typically lands after run_done (or a cancel).
+        if not isinstance(content, dict):
+            return
+        hidden_ms = _episode_count(content.get("hidden_ms"))
+        frames = _episode_count(content.get("frames"))
+        if hidden_ms is None or frames is None:
+            return
+        if hidden_ms < HIDDEN_NOTICE_MIN_MS and frames == 0:
+            return
+        self.hidden_episodes.append((hidden_ms, frames))
+        self.hidden_notice_dismissed = False
+        self._changed()
+
+    def dismiss_hidden_notice(self):
+        """Hide the hidden-tab banner until the next reported episode."""
+        self.hidden_notice_dismissed = True
+        self._changed()
+
+    @property
+    def hidden_notice(self):
+        """Banner text totalled over this run's hidden episodes, or None."""
+        if not self.hidden_episodes or self.hidden_notice_dismissed:
+            return None
+        return hidden_banner_text(
+            sum(ms for ms, _ in self.hidden_episodes),
+            sum(n for _, n in self.hidden_episodes),
+            self.slowdown_factor,
+            episodes=len(self.hidden_episodes),
+        )
 
     # -- helpers -----------------------------------------------------------
 

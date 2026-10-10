@@ -83,7 +83,8 @@ because all contents-drive I/O is brokered on the (throttled) main thread —
 and keep the dropped folder **closed** in the file browser, which is 6.5 vs
 3.4 s/frame: an open listing makes JupyterLab re-poll the drive on every
 tick. The photometry dashboard below removes the second rule; the
-visible-window rule still applies there too.
+visible-window rule still applies there too, but the dashboard now warns about
+it itself (see below).
 
 ### Photometry dashboard (no Jupyter UI)
 
@@ -134,10 +135,18 @@ leftovers.
 run from a notebook one frame at a time, with the file-browser watch loop
 described above (and its two operational rules). The dashboard removes the
 closed-file-browser rule — images never touch the contents drive — but the
-visible-tab rule still applies. See `docs/dashboard.md` for the dashboard's
-architecture, wire protocol, and known limits, chief among them: **no resume
-across a page reload** — refreshing the tab mid-run loses progress, unlike
-the watch-loop notebooks' IndexedDB-backed queue.
+visible-tab rule still applies: a hidden tab slows a dashboard run about 7x
+too. The dashboard says so at each point it matters: a dialog before the run
+starts (with a "Don't show this again" box, remembered in the browser), a
+notice above the progress bar for the whole run, a one-time reminder if the
+pointer leaves the page mid-run, a "⚠ Slowed ~7×" prefix on the tab title
+while the tab is hidden, and, on coming back, a banner saying how long the tab
+was hidden and how many frames finished meanwhile — even when the run finished
+while you were away. To do other things during a run, drag the dashboard's tab
+into its own window and leave that window open. See `docs/dashboard.md` for
+the dashboard's architecture, wire protocol, and known limits, chief among
+them: **no resume across a page reload** — refreshing the tab mid-run loses
+progress, unlike the watch-loop notebooks' IndexedDB-backed queue.
 
 ### astroquery (through the same helper)
 
@@ -167,7 +176,10 @@ pixi run test-js   # Node's built-in test runner over content/dropzone.js
 photometry step is injected into `PhotometryDashboard` as a plain
 `process_frame(path, name)` callable, so the tests exercise metadata
 validation, chunk assembly, run-state bookkeeping, zip building, and the full
-message-handler protocol against a fake widget.
+message-handler protocol against a fake widget. `tests/test_dashboard_view.py`
+also builds the real ipywidgets view headlessly to check the tab-visibility
+notice and banner; it needs ipywidgets and anywidget, which the default pixi
+environment has (anywidget is pinned there for the build).
 `pixi run test-js` has no npm dependencies; it runs directly against
 `content/dropzone.js` with `node --test`.
 
@@ -246,12 +258,19 @@ message-handler protocol against a fake widget.
 - `tests/` — host-side tests (`pixi run test`), covering
   `content/photom_dashboard.py`'s metadata validation, chunk assembly, run-state
   bookkeeping, zip building, the provenance stamp in output names (and its
-  generator script), and the full message-handler flow (all against a fake
-  widget and an injected `process_frame` callable).
+  generator script), and the full message-handler flow including the
+  `hidden_episode` message (all against a fake widget and an injected
+  `process_frame` callable).
+- `tests/test_tab_visibility.py`, `tests/test_dashboard_view.py` — the
+  tab-visibility warnings' kernel side: the banner/notice text builders, and the
+  `DashboardView` built headlessly (needs ipywidgets and anywidget, both in the
+  default pixi env) with messages injected through the drop zone's comm handler.
 - `tests/js/dropzone.test.mjs` — tests (`pixi run test-js`, Node's built-in test
   runner, no npm dependencies) for `content/dropzone.js`'s FITS-name filtering,
-  folder-entry collection, chunk slicing, and the drop-validation rules
-  (`validateFound`: flat-folder-only, empty-file filtering).
+  folder-entry collection, chunk slicing, the drop-validation rules
+  (`validateFound`: flat-folder-only, empty-file filtering), and the
+  tab-visibility helpers (hidden-episode timing, tab title, the dialog's
+  "Don't show this again" storage).
 - `pixi.toml` — host-side build tooling (jupyterlite-core, jupyterlite-xeus); also the
   `dash` feature environment (`voici`, pinned `anywidget`) used by `pixi run build-dash`.
 - `PLAN.md` — the original three-step plan (trim the WASM env, local file access,

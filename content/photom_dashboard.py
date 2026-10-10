@@ -317,8 +317,8 @@ def format_duration(seconds):
 def running_notice(factor):
     """The persistent notice shown in the run panel while a run is going."""
     return (
-        f"Keep this tab visible until the run finishes — switching tabs or "
-        f"minimizing the window slows it ~{factor}×."
+        f"Keep this tab visible until the run finishes — switching tabs, "
+        f"minimizing the window or covering it completely slows it ~{factor}×."
     )
 
 

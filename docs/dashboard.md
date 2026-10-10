@@ -648,10 +648,11 @@ chunking protocol itself. The 2026-08-11 run rules this out.
   viewport-exit signal: it may miss in some browsers, and in the JupyterLab dev
   site cross-origin iframes can trigger it falsely — at most once per run, since
   it never fires twice. "Hidden" is the browser's `visibilityState`, not what the
-  user can see: Chrome's occlusion tracking on macOS and Windows can report a
-  window that is fully covered by another as hidden (and throttle it), while a
-  tab in its own, partly visible window stays visible — which is why the copy
-  suggests dragging the tab into its own window. The ~7× figure was measured on
+  user can see: Chrome's occlusion tracking on macOS and Windows reports a
+  window that other windows cover completely as hidden, and throttles it
+  (confirmed by hand on 2026-10-10), while a tab in its own, partly visible
+  window stays visible — which is why the copy says to drag the tab into its
+  own window and keep part of that window uncovered. The ~7× figure was measured on
   the notebook path (`docs/speedup-plan-2026-08.md`) and has not been
   re-measured for the dashboard; it lives in one constant for when it is. The
   banner's frame count is approximate (§3). And throttling stretches timers too:
@@ -722,5 +723,5 @@ transport, and DOM drag-and-drop events beyond the pure functions
 in that last group: the `<dialog>` (Esc, Cancel, start, "Don't show this
 again" surviving a reload), the pointer-exit toast, `visibilitychange` driving
 the title and the `hidden_episode` message, and the `AbortController` teardown
-are only checked by hand in a browser, and those checks are still pending
-(`PROGRESS.md`, 2026-10-10).
+are only checked by hand in a browser; the 2026-10-10 pass of those checks is
+recorded in `PROGRESS.md`.

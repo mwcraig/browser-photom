@@ -1092,24 +1092,14 @@ notice, title and banner still cover it); Chrome's occlusion tracking on
 macOS and Windows can treat a fully covered window as hidden; and timers
 under throttling, including the 10-minute watchdog, fire late, never early.
 
-**Not yet verified in a browser.** None of the DOM wiring has been checked
-by hand. Still to do, against `pixi run build-dash && pixi run serve-dash`
-and `http://localhost:8010/voici/render/photometry_dashboard.html` with a
-small folder:
-
-- the dialog appears on drop and on the picker; Esc and Cancel leave the
-  zone armed with no manifest sent (the kernel stays in setup); "Got it"
-  starts the run; ticking "Don't show this again" then starting skips the
-  dialog on the next drop, and still after a reload;
-- during the run: the notice above the progress bar; pointer out of the
-  viewport gives the toast once, not again (in Chrome and Firefox);
-  switching tabs in the same window changes the title, and returning
-  restores it and shows the banner with a duration and frame count, which
-  Dismiss hides; with the tab dragged into its own window, clicking another
-  window changes nothing; minimizing that window changes the title and
-  gives a banner on restore;
-- hiding the tab until the run finishes, then returning, shows the banner on
-  the done panel; dropping another folder clears it;
-- in setup and after a run, switching tabs changes nothing;
-- the console shows no `error` or `hidden_episode_error` replies in normal
-  use.
+**Verified in a browser (2026-10-10).** Matt ran the plan's hand checks
+against `pixi run build-dash && pixi run serve-dash` and found the wiring
+working: the dialog on both paths with Esc and Cancel leaving the zone
+armed, the skip flag surviving a reload, the one-time toast, the title
+change and restore, and the banner on return, on the done panel and
+cleared by the next drop. One finding: a tab in its own window is also
+throttled when other windows cover it completely, which is Chrome's
+occlusion tracking (`docs/dashboard.md` §9). "Leave that window open" was
+therefore the wrong advice; the setup instructions, the running notice and
+the README now say to keep at least part of the window uncovered, as the
+dialog already did.

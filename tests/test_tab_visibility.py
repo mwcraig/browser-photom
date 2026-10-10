@@ -47,6 +47,9 @@ def test_running_notice_names_the_factor_and_what_to_avoid():
     text = running_notice(7)
     assert "~7×" in text
     assert "visible" in text
+    # Confirmed by hand on 2026-10-10: Chrome's occlusion tracking throttles
+    # a window that other windows cover completely, not just a hidden tab.
+    assert "covering" in text
 
 
 def test_hidden_banner_text_for_one_episode_with_several_frames():

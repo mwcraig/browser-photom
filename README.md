@@ -143,10 +143,12 @@ pointer leaves the page mid-run, a "⚠ Slowed ~7×" prefix on the tab title
 while the tab is hidden, and, on coming back, a banner saying how long the tab
 was hidden and how many frames finished meanwhile — even when the run finished
 while you were away. To do other things during a run, drag the dashboard's tab
-into its own window and leave that window open. See `docs/dashboard.md` for
-the dashboard's architecture, wire protocol, and known limits, chief among
-them: **no resume across a page reload** — refreshing the tab mid-run loses
-progress, unlike the watch-loop notebooks' IndexedDB-backed queue.
+into its own window and keep at least part of that window uncovered: a window
+that other windows cover completely is throttled just like a hidden tab. See
+`docs/dashboard.md` for the dashboard's architecture, wire protocol, and known
+limits, chief among them: **no resume across a page reload** — refreshing the
+tab mid-run loses progress, unlike the watch-loop notebooks' IndexedDB-backed
+queue.
 
 ### astroquery (through the same helper)
 

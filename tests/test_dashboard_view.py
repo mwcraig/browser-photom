@@ -140,3 +140,4 @@ def test_the_instructions_carry_the_slowdown_factor():
     assert f"~{SLOWDOWN_FACTOR}×" in INSTRUCTIONS
     assert "visible" in INSTRUCTIONS
     assert "own window" in INSTRUCTIONS
+    assert "uncovered" in INSTRUCTIONS

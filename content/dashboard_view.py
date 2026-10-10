@@ -42,10 +42,10 @@ INSTRUCTIONS = f"""
   <li>When the run finishes, download the starlists as a single zip.</li>
 </ol>
 <p style="line-height:1.6">
-  <b>Keep this tab visible for the whole run.</b> Switching to another tab or
-  minimizing the window slows the run ~{SLOWDOWN_FACTOR}×. To do other things
-  while it runs, drag this tab into its own window and leave that window
-  open.
+  <b>Keep this tab visible for the whole run.</b> Switching to another tab,
+  minimizing the window, or covering it completely with other windows slows
+  the run ~{SLOWDOWN_FACTOR}×. To do other things while it runs, drag this
+  tab into its own window and keep at least part of that window uncovered.
 </p>
 """
 

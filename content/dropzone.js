@@ -201,12 +201,185 @@ export function makeErrorLatch() {
   };
 }
 
+// ---------------------------------------------------------------------
+// Tab-visibility warnings (issue #9)
+//
+// Chrome throttles a hidden tab's main thread, and every widget-comm
+// message is brokered there, so a run slows by `slowdown_factor` (a synced
+// trait; one Python constant behind it) while the tab is hidden. The
+// helpers below are DOM-free so node can test them; renderDropZone wires
+// them to the dialog, the toast, document.title and visibilitychange.
+// ---------------------------------------------------------------------
+
+// Versioned so a future change to what the dialog says can re-show it to
+// people who ticked "Don't show this again" on the old wording.
+export const SKIP_TAB_WARNING_KEY = 'browser-photom:dashboard:skip-tab-warning:v1';
+
+/** One-line warning used for the dialog heading and the toast. */
+export function tabWarningText(factor) {
+  return `Keep this tab visible — hiding it slows the run ~${factor}×.`;
+}
+
+/**
+ * document.title while the tab is hidden mid-run: the warning first (tab
+ * strips truncate from the right), then the original title so the tab is
+ * still recognisable. No dangling separator when there is no original.
+ */
+export function hiddenTitle(original, factor) {
+  const warning = `⚠ Slowed ~${factor}× – switch back`;
+  return original ? `${warning} · ${original}` : warning;
+}
+
+/**
+ * Whether the dialog closed via the start button. MDN does not define
+ * returnValue after Esc (the caller resets it to '' before every
+ * showModal()), so only the start button's own value counts.
+ */
+export function dialogChoseStart(returnValue) {
+  return returnValue === 'start';
+}
+
+/**
+ * Heuristic for "the pointer left the page": a document-level mouseout
+ * whose relatedTarget is null went to no element at all. Not a documented
+ * guarantee (MDN does not specify viewport exit), which is why it only
+ * drives a one-time hint.
+ */
+export function isViewportExit(ev) {
+  return Boolean(ev) && ev.relatedTarget == null;
+}
+
+/**
+ * Whether the user asked not to see the pre-run dialog again. localStorage
+ * can be missing or throw SecurityError (site data blocked), and either
+ * way the answer is "show the dialog".
+ */
+export function readSkipTabWarning(storage) {
+  try {
+    return Boolean(storage) && storage.getItem(SKIP_TAB_WARNING_KEY) === '1';
+  } catch (err) {
+    return false;
+  }
+}
+
+/** Save (true) or clear (false) the skip flag; returns whether it stuck. */
+export function writeSkipTabWarning(storage, value) {
+  if (!storage) return false;
+  try {
+    if (value) storage.setItem(SKIP_TAB_WARNING_KEY, '1');
+    else storage.removeItem(SKIP_TAB_WARNING_KEY);
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+/**
+ * Run-scoped hidden-tab bookkeeping, fed wall-clock readings by the caller
+ * (Date.now(), not performance.now(), which may not advance through a
+ * macOS sleep). Separate from the drop zone's `uploading` flag, which is
+ * also true while a folder is being enumerated and while the dialog is
+ * open -- neither of those is a run the kernel is working on.
+ *
+ * - start(now, hiddenNow): a run began; resets the frame count and the
+ *   pointer nudge, and opens a hidden interval at once if the tab is
+ *   already hidden. Returns whether it did (so the caller can retitle).
+ * - hide(now): opens an interval, only mid-run and only if not already
+ *   hidden. Returns whether it did.
+ * - fileDone(): counts a finished frame, only while hidden mid-run.
+ * - stop(now): the run ended; an open interval is capped here, since the
+ *   slowdown ended with the run, but is kept for show() to report.
+ * - show(now): the tab is visible again; returns { hiddenMs, frames } for
+ *   the episode (hiddenMs never negative) and clears it, or null.
+ * - pointerLeft(): true at most once per run, and only while visible.
+ */
+export function makeTabWatch() {
+  let running = false;
+  let hiddenAt = null;
+  let endAt = null;
+  let frames = 0;
+  let nudged = false;
+
+  return {
+    start(nowMs, hiddenNow) {
+      running = true;
+      frames = 0;
+      nudged = false;
+      endAt = null;
+      hiddenAt = hiddenNow ? nowMs : null;
+      return Boolean(hiddenNow);
+    },
+    stop(nowMs) {
+      if (!running) return;
+      running = false;
+      if (hiddenAt !== null) endAt = nowMs;
+    },
+    hide(nowMs) {
+      if (!running || hiddenAt !== null) return false;
+      hiddenAt = nowMs;
+      endAt = null;
+      return true;
+    },
+    fileDone() {
+      if (running && hiddenAt !== null) frames += 1;
+    },
+    show(nowMs) {
+      if (hiddenAt === null) return null;
+      const end = endAt === null ? nowMs : endAt;
+      const episode = { hiddenMs: Math.max(0, Math.round(end - hiddenAt)), frames };
+      hiddenAt = null;
+      endAt = null;
+      frames = 0;
+      return episode;
+    },
+    pointerLeft() {
+      if (!running || hiddenAt !== null || nudged) return false;
+      nudged = true;
+      return true;
+    },
+  };
+}
+
 /**
  * Drop-zone widget: drag a folder of FITS frames in, stream them to the
  * kernel over the comm in chunk_bytes-sized pieces.
  */
-function renderDropZone({ model, el }) {
+// Fallback for `slowdown_factor` when the Python side predates the trait.
+// The real value is the synced trait (one Python constant behind it); this
+// is only what the copy says if that trait is missing.
+const DEFAULT_SLOWDOWN_FACTOR = 7;
+
+// How long the pointer-exit toast stays up if nobody dismisses it.
+const TOAST_MS = 15_000;
+
+function renderDropZone({ model, el, signal }) {
   el.innerHTML = '';
+
+  // Every document-level listener this view adds hangs off this controller,
+  // so cleanup (ours, or anywidget aborting the render `signal`) removes
+  // them all at once -- a re-rendered view must not leave the old view's
+  // visibilitychange handler retitling the page or sending episodes.
+  const ac = new AbortController();
+  if (signal) {
+    if (signal.aborted) ac.abort();
+    else signal.addEventListener('abort', () => ac.abort(), { once: true });
+  }
+  const listen = { signal: ac.signal };
+
+  function slowdownFactor() {
+    const f = model.get('slowdown_factor');
+    return Number.isFinite(f) && f > 0 ? f : DEFAULT_SLOWDOWN_FACTOR;
+  }
+
+  // Merely touching window.localStorage can throw SecurityError when site
+  // data is blocked; the read/write helpers then see null and fall back.
+  function safeStorage() {
+    try {
+      return window.localStorage;
+    } catch (err) {
+      return null;
+    }
+  }
 
   const container = document.createElement('div');
   container.className = 'bp-drop';
@@ -256,6 +429,206 @@ function renderDropZone({ model, el }) {
   pickerRow.appendChild(pickerButton);
   pickerRow.appendChild(pickerInput);
   el.appendChild(pickerRow);
+
+  // Pre-run warning dialog (issue #9, item 1). Built once per view and
+  // appended to `el` -- not to the container, whose children are
+  // pointer-events:none -- so it is connected before showModal() (which
+  // throws otherwise). It fires before the manifest, while Python still
+  // shows this widget; during the run `el` is display:none.
+  const dialog = document.createElement('dialog');
+  dialog.className = 'bp-dialog';
+  const dialogForm = document.createElement('form');
+  dialogForm.method = 'dialog';
+  const dialogHeading = document.createElement('h3');
+  const dialogBody = document.createElement('p');
+  const skipLabel = document.createElement('label');
+  skipLabel.className = 'bp-dialog-skip';
+  const skipBox = document.createElement('input');
+  skipBox.type = 'checkbox';
+  skipLabel.appendChild(skipBox);
+  skipLabel.appendChild(document.createTextNode(' Don’t show this again'));
+  const dialogActions = document.createElement('div');
+  dialogActions.className = 'bp-dialog-actions';
+  // Start first in DOM order and autofocused, so Enter starts the run.
+  const startButton = document.createElement('button');
+  startButton.type = 'submit';
+  startButton.value = 'start';
+  startButton.className = 'bp-btn primary';
+  startButton.autofocus = true;
+  startButton.textContent = 'Got it — start the run';
+  const cancelButton = document.createElement('button');
+  cancelButton.type = 'submit';
+  cancelButton.value = 'cancel';
+  cancelButton.className = 'bp-btn secondary';
+  cancelButton.textContent = 'Cancel';
+  dialogActions.appendChild(startButton);
+  dialogActions.appendChild(cancelButton);
+  dialogForm.appendChild(dialogHeading);
+  dialogForm.appendChild(dialogBody);
+  dialogForm.appendChild(skipLabel);
+  dialogForm.appendChild(dialogActions);
+  dialog.appendChild(dialogForm);
+  el.appendChild(dialog);
+
+  // A folder dropped on the backdrop lands on the dialog element; without
+  // these the browser would navigate away to the dropped file.
+  dialog.addEventListener('dragover', (ev) => {
+    ev.preventDefault();
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'none';
+  });
+  dialog.addEventListener('drop', (ev) => ev.preventDefault());
+
+  // Resolves true to go ahead with the run, false to leave the zone armed.
+  // Only the start button's value counts as yes (dialogChoseStart): Esc,
+  // Cancel and a cleanup abort are all no.
+  function confirmRun() {
+    if (readSkipTabWarning(safeStorage())) return Promise.resolve(true);
+    if (ac.signal.aborted) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const factor = slowdownFactor();
+      dialogHeading.textContent = tabWarningText(factor);
+      dialogBody.textContent =
+        'Your browser slows down pages it thinks you are not looking at. ' +
+        'Every frame of the run passes through this tab, so switching to ' +
+        `another tab or minimizing this window makes the run take about ${factor}× ` +
+        'as long. To use other tabs meanwhile, drag this tab into its own window ' +
+        'first and keep that window at least partly visible.';
+      skipBox.checked = false;
+      // returnValue persists across closes and is undefined after Esc, so
+      // it must be cleared before every showModal().
+      dialog.returnValue = '';
+      const finish = (go) => {
+        dialog.removeEventListener('close', onClose);
+        ac.signal.removeEventListener('abort', onAbort);
+        resolve(go);
+      };
+      function onClose() {
+        const go = dialogChoseStart(dialog.returnValue);
+        if (go && skipBox.checked) writeSkipTabWarning(safeStorage(), true);
+        finish(go);
+      }
+      function onAbort() {
+        finish(false);
+      }
+      dialog.addEventListener('close', onClose);
+      ac.signal.addEventListener('abort', onAbort);
+      try {
+        dialog.showModal();
+      } catch (err) {
+        // No dialog support, or not connected after all: run anyway. The
+        // run-panel notice and the on-return banner still cover the user.
+        finish(true);
+      }
+    });
+  }
+
+  // Run-scoped hidden-tab bookkeeping (see makeTabWatch).
+  const watch = makeTabWatch();
+
+  // document.title while hidden mid-run (issue #9, item 4). The original is
+  // captured at hide time, and only put back if the title is still the one
+  // we set -- anything else changed it since and owns it now.
+  let savedTitle = null;
+  let ourTitle = null;
+  function applyHiddenTitle() {
+    if (ourTitle !== null && document.title === ourTitle) return;
+    savedTitle = document.title;
+    document.title = hiddenTitle(savedTitle, slowdownFactor());
+    // Read back: the title getter collapses whitespace.
+    ourTitle = document.title;
+  }
+  function restoreTitle() {
+    if (ourTitle === null) return;
+    if (document.title === ourTitle) document.title = savedTitle;
+    ourTitle = null;
+    savedTitle = null;
+  }
+
+  // One-time pointer-exit toast (issue #9, item 3). It goes on
+  // document.body, not `el`: Python hides this widget for the whole run.
+  let toast = null;
+  let toastTimer = null;
+  function dismissToast() {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+    if (toast) {
+      toast.remove();
+      toast = null;
+    }
+  }
+  function showToast() {
+    dismissToast();
+    toast = document.createElement('div');
+    toast.className = 'bp-toast';
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('aria-live', 'polite');
+    const text = document.createElement('span');
+    text.textContent = tabWarningText(slowdownFactor());
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Dismiss');
+    close.textContent = '×';
+    close.addEventListener('click', dismissToast);
+    toast.appendChild(text);
+    toast.appendChild(close);
+    document.body.appendChild(toast);
+    toastTimer = setTimeout(dismissToast, TOAST_MS);
+  }
+
+  // The kernel must never answer this with `error` (that would kill the
+  // run -- see onCustomMessage), and a dead comm must not throw out of an
+  // event handler either.
+  function sendQuiet(content) {
+    try {
+      model.send(content);
+    } catch (err) {
+      // Comm is gone; the episode is only advisory.
+    }
+  }
+
+  // Bubbling mouseout on document with no relatedTarget is the pointer
+  // leaving the page (a heuristic -- see isViewportExit).
+  document.addEventListener(
+    'mouseout',
+    (ev) => {
+      if (!isViewportExit(ev) || !watch.pointerLeft()) return;
+      showToast();
+    },
+    listen
+  );
+
+  // Hidden mid-run: retitle. Visible again: restore, and report the
+  // episode -- even when the run ended while the tab was away, which is
+  // the usual case (the kernel accepts it in any phase).
+  document.addEventListener(
+    'visibilitychange',
+    () => {
+      const now = Date.now();
+      dismissToast();
+      if (document.visibilityState === 'hidden') {
+        if (watch.hide(now)) applyHiddenTitle();
+        return;
+      }
+      restoreTitle();
+      const episode = watch.show(now);
+      if (episode) {
+        sendQuiet({ type: 'hidden_episode', hidden_ms: episode.hiddenMs, frames: episode.frames });
+      }
+    },
+    listen
+  );
+
+  // DOM state outside this view's own nodes, torn down however the view
+  // goes away (our cleanup or anywidget's signal).
+  ac.signal.addEventListener(
+    'abort',
+    () => {
+      if (dialog.open) dialog.close();
+      restoreTitle();
+      dismissToast();
+    },
+    { once: true }
+  );
 
   // Local upload-in-progress flag. This is NOT the `armed` model trait
   // (that one is driven by Python, from form validity upstream) — it's a
@@ -363,6 +736,12 @@ function renderDropZone({ model, el }) {
       setStatus(`Error: ${msg.reason || 'unknown error'}`);
       return;
     }
+    // Frames finished while the tab is hidden, for the on-return banner.
+    // Counted here, at arrival, so the count is taken at the real moment
+    // the user comes back. Any other type no waiter wants (including
+    // `hidden_episode_error`, deliberately not `error`) falls through the
+    // loop below untouched and never trips the error latch.
+    if (msg.type === 'file_done') watch.fileDone();
     for (let i = waiters.length - 1; i >= 0; i--) {
       if (waiters[i].predicate(msg)) {
         const [w] = waiters.splice(i, 1);
@@ -400,6 +779,10 @@ function renderDropZone({ model, el }) {
       folder: files[0].path.split('/')[0],
       files: files.map((f) => ({ name: basename(f.path), size: f.file.size })),
     });
+    // The run is live from here (not from `uploading`, which also covers
+    // folder enumeration and the dialog). A tab already hidden by now gets
+    // no visibilitychange, so start() opens that interval itself.
+    if (watch.start(Date.now(), document.visibilityState === 'hidden')) applyHiddenTitle();
 
     // First failure wins. Waiters this loop is not currently awaiting must
     // never reject unobserved (that's an unhandled rejection and a lost
@@ -506,6 +889,11 @@ function renderDropZone({ model, el }) {
         // recovery, and the status line above says so as well as it can.
       }
     } finally {
+      // The slowdown ends with the run: cap any open hidden interval (it is
+      // still reported on return) and drop the title and toast now.
+      watch.stop(Date.now());
+      restoreTitle();
+      dismissToast();
       uploading = false;
       paint();
     }
@@ -523,6 +911,11 @@ function renderDropZone({ model, el }) {
     const result = validateFound(found);
     if (!result.ok) {
       setStatus(result.message);
+      return;
+    }
+
+    if (!(await confirmRun())) {
+      setStatus('Run not started — drop or choose the folder again when you are ready.');
       return;
     }
 
@@ -621,20 +1014,33 @@ function renderDropZone({ model, el }) {
   });
 
   pickerInput.addEventListener('change', async () => {
-    const found = [...pickerInput.files]
-      .map((file) => ({ path: file.webkitRelativePath || file.name, file }))
-      .filter((f) => isFitsName(basename(f.path)))
-      .sort(byPath);
-    // Let the same folder be picked again later (e.g. after fixing it).
-    pickerInput.value = '';
+    // Same claim as the drop handler: the dialog in validateAndUpload is an
+    // await point, and a drop landing behind it must not start a second run.
+    uploading = true;
+    paint();
+    try {
+      const found = [...pickerInput.files]
+        .map((file) => ({ path: file.webkitRelativePath || file.name, file }))
+        .filter((f) => isFitsName(basename(f.path)))
+        .sort(byPath);
+      // Let the same folder be picked again later (e.g. after fixing it).
+      pickerInput.value = '';
 
-    await validateAndUpload(found);
+      await validateAndUpload(found);
+    } finally {
+      uploading = false;
+      paint();
+    }
   });
 
   model.on('change:armed', paint);
   model.on('change:hint', paint);
 
   return () => {
+    // Removes the document listeners and, via the abort handler above,
+    // closes an open dialog (resolving confirmRun to false), restores the
+    // title and removes the toast.
+    ac.abort();
     model.off('msg:custom', onCustomMessage);
     model.off('change:armed', paint);
     model.off('change:hint', paint);
@@ -784,10 +1190,10 @@ function renderZip({ model, el }) {
   };
 }
 
-function render({ model, el }) {
+function render({ model, el, signal }) {
   return model.get('_role') === 'zip'
     ? renderZip({ model, el })
-    : renderDropZone({ model, el });
+    : renderDropZone({ model, el, signal });
 }
 
 export default { render };

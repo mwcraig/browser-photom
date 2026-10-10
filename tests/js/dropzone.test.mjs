@@ -1,6 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isFitsName, collectEntries, sliceChunks, validateFound, byPath, pickRun, makeErrorLatch } from '../../content/dropzone.js';
+import {
+  isFitsName,
+  collectEntries,
+  sliceChunks,
+  validateFound,
+  byPath,
+  pickRun,
+  makeErrorLatch,
+  SKIP_TAB_WARNING_KEY,
+  tabWarningText,
+  hiddenTitle,
+  dialogChoseStart,
+  isViewportExit,
+  readSkipTabWarning,
+  writeSkipTabWarning,
+  makeTabWatch,
+} from '../../content/dropzone.js';
 
 // ---------------------------------------------------------------------
 // Fake FileSystemEntry helpers.
@@ -355,4 +371,275 @@ test('makeErrorLatch starts armed', () => {
   // An error arriving before any upload (nothing has armed the latch yet)
   // must still be shown.
   assert.equal(makeErrorLatch().trip(), true);
+});
+
+// ---------------------------------------------------------------------
+// makeTabWatch
+// ---------------------------------------------------------------------
+//
+// Times are plain numbers standing in for Date.now() readings, so every
+// interval below is exact and no fake clock is needed.
+
+test('makeTabWatch ignores hide, show and pointerLeft before any run has started', () => {
+  // Nothing may fire when no run is active (issue #9): a tab switch while
+  // the user is still filling in the form is none of our business.
+  const watch = makeTabWatch();
+
+  assert.equal(watch.hide(1000), false);
+  assert.equal(watch.show(4000), null);
+  assert.equal(watch.pointerLeft(), false);
+});
+
+test('makeTabWatch reports how long the tab was hidden when it returns mid-run', () => {
+  const watch = makeTabWatch();
+  watch.start(0, false);
+
+  assert.equal(watch.hide(1000), true);
+  assert.deepEqual(watch.show(4000), { hiddenMs: 3000, frames: 0 });
+});
+
+test('makeTabWatch keeps the first hide time when hide repeats', () => {
+  // visibilitychange can be followed by a second hidden signal (e.g. the
+  // window is minimized after the tab was already switched away); the
+  // episode began at the first one.
+  const watch = makeTabWatch();
+  watch.start(0, false);
+  watch.hide(1000);
+
+  assert.equal(watch.hide(2000), false);
+  assert.deepEqual(watch.show(4000), { hiddenMs: 3000, frames: 0 });
+});
+
+test('makeTabWatch returns null from show when the tab was never hidden', () => {
+  const watch = makeTabWatch();
+  watch.start(0, false);
+
+  assert.equal(watch.show(4000), null);
+});
+
+test('makeTabWatch clears the episode once show has reported it', () => {
+  const watch = makeTabWatch();
+  watch.start(0, false);
+  watch.hide(1000);
+  watch.show(4000);
+
+  assert.equal(watch.show(5000), null);
+});
+
+test('makeTabWatch opens the interval at start when the run begins with the tab already hidden', () => {
+  // The user can confirm the dialog and switch away before the manifest
+  // goes out; no visibilitychange will ever fire for that hide.
+  const watch = makeTabWatch();
+
+  assert.equal(watch.start(500, true), true);
+  assert.deepEqual(watch.show(3500), { hiddenMs: 3000, frames: 0 });
+});
+
+test('makeTabWatch start returns false when the tab is visible', () => {
+  assert.equal(makeTabWatch().start(0, false), false);
+});
+
+test('makeTabWatch caps the hidden interval at run end and still reports it on return', () => {
+  // The run usually finishes while the user is away. The slowdown stopped
+  // when the run did, so the time after that is not the user's cost -- but
+  // the episode must still be reported when they come back.
+  const watch = makeTabWatch();
+  watch.start(0, false);
+  watch.hide(1000);
+  watch.stop(5000);
+
+  assert.deepEqual(watch.show(60000), { hiddenMs: 4000, frames: 0 });
+});
+
+test('makeTabWatch ignores a hide after the run ended', () => {
+  const watch = makeTabWatch();
+  watch.start(0, false);
+  watch.stop(1000);
+
+  assert.equal(watch.hide(2000), false);
+  assert.equal(watch.show(5000), null);
+});
+
+test('makeTabWatch counts file_done messages received while hidden, not before or after', () => {
+  const watch = makeTabWatch();
+  watch.start(0, false);
+  watch.fileDone(); // visible: not counted
+  watch.hide(1000);
+  watch.fileDone();
+  watch.fileDone();
+  watch.fileDone();
+
+  assert.deepEqual(watch.show(4000), { hiddenMs: 3000, frames: 3 });
+
+  watch.fileDone(); // visible again: not counted
+  watch.hide(5000);
+
+  assert.deepEqual(watch.show(6000), { hiddenMs: 1000, frames: 0 });
+});
+
+test('makeTabWatch does not count file_done after the run ended, even while still hidden', () => {
+  const watch = makeTabWatch();
+  watch.start(0, false);
+  watch.hide(1000);
+  watch.fileDone();
+  watch.stop(2000);
+  watch.fileDone();
+
+  assert.deepEqual(watch.show(9000), { hiddenMs: 1000, frames: 1 });
+});
+
+test('makeTabWatch resets the frame count on a new start', () => {
+  const watch = makeTabWatch();
+  watch.start(0, false);
+  watch.hide(1000);
+  watch.fileDone();
+  watch.stop(2000);
+
+  watch.start(3000, true);
+
+  assert.deepEqual(watch.show(4000), { hiddenMs: 1000, frames: 0 });
+});
+
+test('makeTabWatch nudges on pointer exit once per run, and again after a new start', () => {
+  // The toast is a one-time hint; a second one every time the pointer
+  // wanders off the page would be nagging.
+  const watch = makeTabWatch();
+  watch.start(0, false);
+
+  assert.equal(watch.pointerLeft(), true);
+  assert.equal(watch.pointerLeft(), false);
+
+  watch.stop(1000);
+  assert.equal(watch.pointerLeft(), false); // no run active
+
+  watch.start(2000, false);
+  assert.equal(watch.pointerLeft(), true);
+});
+
+test('makeTabWatch never nudges on pointer exit while the tab is hidden', () => {
+  const watch = makeTabWatch();
+  watch.start(0, false);
+  watch.hide(1000);
+
+  assert.equal(watch.pointerLeft(), false);
+
+  watch.show(2000);
+  assert.equal(watch.pointerLeft(), true); // the nudge was not used up while hidden
+});
+
+test('makeTabWatch never reports a negative duration when the clock goes backwards', () => {
+  // Date.now() is wall-clock time and can step backwards (NTP, a manual
+  // clock change); a negative hidden_ms would be refused by the kernel.
+  const watch = makeTabWatch();
+  watch.start(0, false);
+  watch.hide(5000);
+
+  assert.deepEqual(watch.show(1000), { hiddenMs: 0, frames: 0 });
+});
+
+// ---------------------------------------------------------------------
+// Tab-warning text, dialog result, pointer exit
+// ---------------------------------------------------------------------
+
+test('hiddenTitle prefixes the warning and keeps the original title', () => {
+  const title = hiddenTitle('photometry_dashboard', 7);
+
+  assert.match(title, /^⚠ /);
+  assert.match(title, /~7×/);
+  assert.ok(title.endsWith(' · photometry_dashboard'));
+});
+
+test('hiddenTitle leaves no dangling separator when the original title is empty', () => {
+  const title = hiddenTitle('', 7);
+
+  assert.match(title, /~7×/);
+  assert.ok(!title.includes('·'));
+  assert.equal(title, title.trim());
+});
+
+test('tabWarningText and hiddenTitle quote the factor they are given', () => {
+  // The factor is a synced trait with one Python constant behind it; no
+  // copy in the front end may hard-code 7.
+  assert.match(tabWarningText(5), /~5×/);
+  assert.doesNotMatch(tabWarningText(5), /7/);
+  assert.match(hiddenTitle('x', 5), /~5×/);
+  assert.doesNotMatch(hiddenTitle('x', 5), /7/);
+});
+
+test('tabWarningText asks for the tab to stay visible', () => {
+  assert.match(tabWarningText(7), /visible/);
+  assert.match(tabWarningText(7), /~7×/);
+});
+
+test('dialogChoseStart is true only for exactly "start"', () => {
+  // MDN does not define returnValue after Esc, so anything but the start
+  // button's own value must count as "not started".
+  assert.equal(dialogChoseStart('start'), true);
+  assert.equal(dialogChoseStart(''), false);
+  assert.equal(dialogChoseStart('cancel'), false);
+  assert.equal(dialogChoseStart(undefined), false);
+  assert.equal(dialogChoseStart('Start'), false);
+});
+
+test('isViewportExit is true only when the pointer left for nothing', () => {
+  assert.equal(isViewportExit({ relatedTarget: null }), true);
+  assert.equal(isViewportExit({}), true); // undefined relatedTarget
+  assert.equal(isViewportExit({ relatedTarget: { tagName: 'DIV' } }), false);
+  assert.equal(isViewportExit(null), false);
+  assert.equal(isViewportExit(undefined), false);
+});
+
+// ---------------------------------------------------------------------
+// readSkipTabWarning / writeSkipTabWarning
+// ---------------------------------------------------------------------
+
+function fakeStorage() {
+  const map = new Map();
+  return {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => map.set(k, String(v)),
+    removeItem: (k) => map.delete(k),
+    _map: map,
+  };
+}
+
+function throwingStorage() {
+  // What localStorage does with site data blocked: every access throws a
+  // SecurityError.
+  const boom = () => {
+    throw new Error('SecurityError');
+  };
+  return { getItem: boom, setItem: boom, removeItem: boom };
+}
+
+test('readSkipTabWarning is false for missing storage, an unset key, and a throwing getItem', () => {
+  assert.equal(readSkipTabWarning(null), false);
+  assert.equal(readSkipTabWarning(undefined), false);
+  assert.equal(readSkipTabWarning(fakeStorage()), false);
+  assert.equal(readSkipTabWarning(throwingStorage()), false);
+});
+
+test('writeSkipTabWarning round-trips through readSkipTabWarning under the versioned key', () => {
+  const storage = fakeStorage();
+
+  assert.equal(writeSkipTabWarning(storage, true), true);
+
+  assert.equal(readSkipTabWarning(storage), true);
+  assert.ok(storage._map.has(SKIP_TAB_WARNING_KEY));
+  assert.match(SKIP_TAB_WARNING_KEY, /^browser-photom:/);
+});
+
+test('writeSkipTabWarning false clears a saved skip', () => {
+  const storage = fakeStorage();
+  writeSkipTabWarning(storage, true);
+
+  assert.equal(writeSkipTabWarning(storage, false), true);
+
+  assert.equal(readSkipTabWarning(storage), false);
+  assert.equal(storage._map.has(SKIP_TAB_WARNING_KEY), false);
+});
+
+test('writeSkipTabWarning returns false when storage is missing or setItem throws', () => {
+  assert.equal(writeSkipTabWarning(null, true), false);
+  assert.equal(writeSkipTabWarning(throwingStorage(), true), false);
 });

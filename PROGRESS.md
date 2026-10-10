@@ -1026,3 +1026,80 @@ PR #7 review fixes (Copilot plus an adversarial pass):
    longer carries batch prep's calib/detect/fwhm/cnn time and the Gaia
    lookup. (Moving prep inside `process_frame` in item 2 had removed the
    old reset point.)
+
+# Tab-visibility warnings for the dashboard (2026-10-10)
+
+Issue #9: a dashboard run slows ~7× while its tab is hidden, because Chrome
+throttles a background tab's main thread and every widget-comm message
+passes through it. The only hint was one sentence in the setup
+instructions, and those are hidden for the whole running phase, which is
+exactly when it matters. Five layered warnings now cover it, all scoped to a
+run (nothing fires in setup or between runs). Branch
+`feature/tab-visibility-warnings`; details in `docs/dashboard.md` §3, §4,
+§9 and §10.
+
+1. **One number.** `SLOWDOWN_FACTOR = 7` in `photom_dashboard.py` (with
+   `HIDDEN_NOTICE_MIN_MS = 2000`) is the only place the factor lives. It
+   reaches the front end as a synced `DropZone.slowdown_factor` trait that
+   `attach()` pushes, like `chunk_bytes`, so the JS copy and the Python copy
+   cannot drift. The 7 was measured on the notebook path, not the
+   dashboard; this is where to change it once the dashboard is measured.
+2. **Pre-run dialog.** A `<dialog>` opened from `validateAndUpload`, so the
+   drop and picker paths both get it; only the start button starts the run.
+   "Don't show this again" is kept in `localStorage` under a versioned key
+   (`browser-photom:dashboard:skip-tab-warning:v1`) so reworded copy can be
+   shown again, and every storage access is wrapped because it can throw.
+   The picker's `change` handler now claims `uploading` around the await,
+   as the drop handler did, so a drop behind the open dialog can't start a
+   second run.
+3. **Run-panel notice and on-return banner, painted by Python.** Python
+   hides the drop-zone widget for the whole run, so anything shown during
+   or after the run can't live in it. The notice shows only while running;
+   the banner (how long hidden, how many frames finished meanwhile, totalled
+   per run, with Dismiss) persists into the done panel until dismissed or
+   the next drop, because the run usually finishes while the user is away.
+4. **`hidden_episode` message.** The front end sends `{type:
+   'hidden_episode', hidden_ms, frames}` whenever a hidden interval that
+   began during a run ends, including after the run finished; the kernel
+   accepts it in any phase. Its failure reply is `hidden_episode_error`,
+   not `error`, because the front end treats `error` as fatal and would
+   cancel a live run over a banner; malformed payloads are dropped
+   silently, and episodes under 2 s with no frames finished are not
+   reported. The frame count is taken in JS from `file_done` arrivals while
+   hidden, so it can be off by a frame or two.
+5. **Toast and tab title.** A one-time toast on `document.body` when the
+   pointer leaves the page mid-run (document `mouseout` with a null
+   `relatedTarget` — a heuristic MDN does not document, so it only drives a
+   hint, auto-dismissed after 15 s), and a `⚠ Slowed ~7× – switch back`
+   title prefix while hidden mid-run, restored on return or at run end, and
+   only if the title is still the one we set.
+6. **Teardown.** Every document listener hangs off one `AbortController`
+   chained to anywidget's render `signal`; aborting it closes an open
+   dialog, restores the title and removes the toast, so a re-rendered view
+   leaves nothing behind.
+
+Tests: 25 new JS tests for the DOM-free helpers (`makeTabWatch`,
+`hiddenTitle`, `tabWarningText`, `dialogChoseStart`, `isViewportExit`,
+`readSkipTabWarning`/`writeSkipTabWarning`); a tab-visibility section in
+`tests/test_dashboard_flow.py`; and two new files, `tests/test_tab_visibility.py`
+(text builders) and `tests/test_dashboard_view.py`, the first tests of
+`DashboardView` itself, built headlessly with messages injected through the
+drop zone's comm handler (needs ipywidgets/anywidget, which the default pixi
+env has). `pixi run test-js` (51) and `pixi run test` (198) pass.
+
+Known limits: a keyboard tab switch gives no early nudge (the dialog,
+notice, title and banner still cover it); Chrome's occlusion tracking on
+macOS and Windows can treat a fully covered window as hidden; and timers
+under throttling, including the 10-minute watchdog, fire late, never early.
+
+**Verified in a browser (2026-10-10).** Matt ran the plan's hand checks
+against `pixi run build-dash && pixi run serve-dash` and found the wiring
+working: the dialog on both paths with Esc and Cancel leaving the zone
+armed, the skip flag surviving a reload, the one-time toast, the title
+change and restore, and the banner on return, on the done panel and
+cleared by the next drop. One finding: a tab in its own window is also
+throttled when other windows cover it completely, which is Chrome's
+occlusion tracking (`docs/dashboard.md` §9). "Leave that window open" was
+therefore the wrong advice; the setup instructions, the running notice and
+the README now say to keep at least part of the window uncovered, as the
+dialog already did.

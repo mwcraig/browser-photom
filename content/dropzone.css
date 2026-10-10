@@ -138,6 +138,90 @@
   margin-top: 0;
 }
 
+/* Tab-visibility warnings (issue #9; see docs/dashboard.md §4). */
+
+/* Pre-run dialog. Lives inside the drop zone's own element (built in
+   renderDropZone), shown with showModal() so the page behind is inert. */
+.bp-dialog {
+  max-width: 32em;
+  padding: 1.25em 1.5em;
+  border: 1px solid var(--jp-border-color1, #ccc);
+  border-top: 4px solid var(--jp-warn-color1, #f57c00);
+  border-radius: 6px;
+  background: var(--jp-layout-color1, #fff);
+  color: var(--jp-ui-font-color1, #333);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+/* Literal colour: ::backdrop does not reliably inherit custom properties
+   across browsers. */
+.bp-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+.bp-dialog h3 {
+  margin-top: 0;
+}
+.bp-dialog-skip {
+  display: block;
+  margin: 1em 0;
+  font-size: 0.9em;
+  cursor: pointer;
+}
+.bp-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em;
+}
+
+/* One-time pointer-exit toast. On document.body, not in the widget, which
+   Python hides for the whole run -- hence fixed positioning. */
+.bp-toast {
+  position: fixed;
+  top: 1em;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  gap: 0.75em;
+  max-width: calc(100vw - 2em);
+  padding: 0.75em 1em;
+  border-left: 4px solid var(--jp-warn-color1, #f57c00);
+  border-radius: 4px;
+  background: var(--jp-layout-color1, #fff);
+  color: var(--jp-ui-font-color1, #333);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+.bp-toast button {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 1.2em;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* Run-panel notice (shown only while running) and the on-return banner
+   (persists into the done panel until dismissed). Both are ipywidgets that
+   dashboard_view.py tags with add_class; like .bp-done, the rules live here
+   because anywidget injects _css into the document head. */
+.bp-tab-notice {
+  padding: 0.5em 0.75em;
+  border-left: 4px solid var(--jp-warn-color1, #f57c00);
+  border-radius: 4px;
+  background: var(--jp-warn-color3, #ffe0b2);
+  font-weight: 600;
+}
+.bp-tab-banner {
+  margin: 0.5em 0;
+  padding: 0.5em 1em;
+  border-left: 4px solid var(--jp-warn-color1, #f57c00);
+  border-radius: 4px;
+  background: var(--jp-warn-color3, #ffe0b2);
+  align-items: center;
+  gap: 1em;
+}
+
 /* Outline/disabled look. Same specificity as .bp-btn.primary/.secondary
    (one class + one pseudo-class each), so source order decides when both
    could apply -- this rule comes last, so a disabled primary button (e.g.

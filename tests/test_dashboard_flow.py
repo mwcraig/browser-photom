@@ -790,3 +790,190 @@ def test_lazy_processor_reset_before_any_frame_ran_does_not_touch_the_factory():
     proc.reset()  # nothing built yet -- must not build just to reset it
 
     assert calls == []
+
+
+# --- tab visibility ---------------------------------------------------------
+#
+# A hidden tab slows a run ~7x (issue #9). The front end measures each
+# hidden episode that started during a run and reports it on return as
+# {type:"hidden_episode", hidden_ms, frames}; the kernel only keeps the
+# record the view paints into the run panel's banner. The run usually
+# finishes while the user is away, so the message must be accepted after
+# run_done too -- and it must never come back as an `error`, which the
+# front end treats as fatal to the run.
+
+
+def send_episode(drop, hidden_ms, frames):
+    drop.receive({"type": "hidden_episode", "hidden_ms": hidden_ms, "frames": frames})
+
+
+def test_attach_pushes_the_default_slowdown_factor(tmp_path):
+    _, drop, _, _ = make_dashboard(tmp_path)
+    assert drop.slowdown_factor == 7
+
+
+def test_attach_pushes_a_custom_slowdown_factor(tmp_path):
+    _, drop, _, _ = make_dashboard(tmp_path, slowdown_factor=5)
+    assert drop.slowdown_factor == 5
+
+
+def test_a_hidden_episode_mid_run_is_recorded_and_published(tmp_path):
+    seen = []
+    dash, drop, _, _ = make_dashboard(
+        tmp_path, on_change=lambda d: seen.append(d.hidden_notice)
+    )
+    send_manifest(drop, [{"name": "a.fit", "size": 4}, {"name": "b.fit", "size": 4}])
+    assert dash.hidden_notice is None
+
+    send_episode(drop, 200_000, 1)
+
+    assert dash.hidden_episodes == [(200_000, 1)]
+    assert dash.phase == "running"
+    assert "3 min 20 s" in dash.hidden_notice
+    assert "1 frame finished" in dash.hidden_notice
+    assert seen[-1] == dash.hidden_notice
+    assert drop.of_type("error") == []
+
+
+def test_a_hidden_episode_after_the_run_finished_is_still_recorded(tmp_path):
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    send_file(drop, "a.fit", b"aaaa")
+    assert dash.phase == "done"
+
+    send_episode(drop, 60_000, 1)
+
+    assert dash.phase == "done"
+    assert dash.hidden_episodes == [(60_000, 1)]
+    assert dash.hidden_notice is not None
+    assert drop.of_type("error") == []
+
+
+def test_a_hidden_episode_after_a_cancel_is_still_recorded(tmp_path):
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}, {"name": "b.fit", "size": 4}])
+    drop.receive({"type": "cancel"})
+
+    send_episode(drop, 5_000, 0)
+
+    assert dash.phase == "cancelled"
+    assert dash.hidden_episodes == [(5_000, 0)]
+
+
+def test_hidden_episodes_accumulate_and_the_notice_reports_totals(tmp_path):
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    send_episode(drop, 100_000, 2)
+    send_episode(drop, 200_000, 3)
+
+    assert dash.hidden_episodes == [(100_000, 2), (200_000, 3)]
+    assert "2 times" in dash.hidden_notice
+    assert "5 min in total" in dash.hidden_notice
+    assert "5 frames finished" in dash.hidden_notice
+
+
+def test_a_short_episode_with_no_frames_is_not_reported(tmp_path):
+    # A glance at another tab must not produce a banner.
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    send_episode(drop, 1_999, 0)
+    assert dash.hidden_episodes == []
+    assert dash.hidden_notice is None
+
+
+def test_a_short_episode_in_which_frames_finished_is_reported(tmp_path):
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    send_episode(drop, 500, 1)
+    assert dash.hidden_episodes == [(500, 1)]
+
+
+def test_a_new_manifest_clears_episodes_and_the_dismissed_flag(tmp_path):
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    send_episode(drop, 10_000, 1)
+    dash.dismiss_hidden_notice()
+    assert dash.hidden_notice_dismissed
+
+    send_manifest(drop, [{"name": "b.fit", "size": 4}])
+
+    assert dash.hidden_episodes == []
+    assert dash.hidden_notice_dismissed is False
+    assert dash.hidden_notice is None
+
+
+def test_a_refused_manifest_leaves_the_episodes_alone(tmp_path):
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    send_episode(drop, 10_000, 1)
+
+    send_manifest(drop, [])  # refused
+    send_manifest(drop, [{"name": "a.fit", "size": 4}, {"name": "a.fits", "size": 4}])
+
+    assert dash.hidden_episodes == [(10_000, 1)]
+    assert dash.hidden_notice is not None
+
+
+def test_dismiss_hides_the_notice_until_the_next_episode(tmp_path):
+    seen = []
+    dash, drop, _, _ = make_dashboard(tmp_path, on_change=lambda d: seen.append(d.hidden_notice))
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    send_episode(drop, 10_000, 1)
+
+    dash.dismiss_hidden_notice()
+    assert dash.hidden_notice is None
+    assert seen[-1] is None  # the view hears about the dismissal
+
+    send_episode(drop, 20_000, 2)
+    # Back, with the totals of both episodes.
+    assert "2 times" in dash.hidden_notice
+    assert "3 frames finished" in dash.hidden_notice
+
+
+@pytest.mark.parametrize("payload", [
+    {"frames": 1},                                  # missing hidden_ms
+    {"hidden_ms": -5_000, "frames": 1},
+    {"hidden_ms": "5000", "frames": 1},
+    {"hidden_ms": True, "frames": 1},
+    {"hidden_ms": float("nan"), "frames": 1},
+    {"hidden_ms": float("inf"), "frames": 1},
+    {"hidden_ms": 5_000},                           # missing frames
+    {"hidden_ms": 5_000, "frames": -1},
+    {"hidden_ms": 5_000, "frames": None},
+])
+def test_a_malformed_hidden_episode_is_ignored_without_an_error(tmp_path, payload):
+    # `error` on the drop zone would cancel the run in progress -- over a
+    # message that only feeds a banner.
+    dash, drop, zipw, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    before = list(drop.sent)
+
+    drop.receive({"type": "hidden_episode", **payload})
+
+    assert drop.sent == before  # nothing at all, let alone an error
+    assert zipw.sent == []
+    assert dash.phase == "running"
+    assert dash.hidden_episodes == []
+
+
+def test_a_hidden_episode_failure_is_never_routed_as_an_error():
+    # Pin the routing: should the handler ever raise, _report_failure must
+    # reply with something the front end ignores, not the fatal `error`.
+    _handler, target, reply = PhotometryDashboard._HANDLERS["hidden_episode"]
+    assert target == "drop_zone"
+    assert reply == "hidden_episode_error"
+    assert reply != "error"
+
+
+def test_a_hidden_episode_whose_view_update_raises_replies_non_fatally(tmp_path):
+    def boom(_dash):
+        raise RuntimeError("view fell over")
+
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    dash.on_change = boom
+    send_episode(drop, 10_000, 1)
+
+    assert drop.of_type("error") == []
+    assert drop.of_type("hidden_episode_error")
+    assert dash.phase == "running"

@@ -817,6 +817,14 @@ def test_attach_pushes_a_custom_slowdown_factor(tmp_path):
     assert drop.slowdown_factor == 5
 
 
+@pytest.mark.parametrize("factor", [0, -3])
+def test_a_nonpositive_slowdown_factor_is_refused(tmp_path, factor):
+    # The browser falls back to the default for such a value while the
+    # Python notice and banner would quote it, so the two would disagree.
+    with pytest.raises(ValueError, match="slowdown_factor must be positive"):
+        make_dashboard(tmp_path, slowdown_factor=factor)
+
+
 def test_a_hidden_episode_mid_run_is_recorded_and_published(tmp_path):
     seen = []
     dash, drop, _, _ = make_dashboard(
@@ -900,6 +908,30 @@ def test_a_new_manifest_clears_episodes_and_the_dismissed_flag(tmp_path):
     assert dash.hidden_episodes == []
     assert dash.hidden_notice_dismissed is False
     assert dash.hidden_notice is None
+
+
+def test_the_notice_tells_the_user_to_keep_the_tab_visible_only_mid_run(tmp_path):
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    send_episode(drop, 10_000, 0)
+    assert "keep this tab visible until the run finishes" in dash.hidden_notice
+
+    send_file(drop, "a.fit", b"abcd")
+    assert dash.phase == "done"
+    # The same episodes, re-read on the done panel: the instruction is gone.
+    assert "until the run finishes" not in dash.hidden_notice
+    send_episode(drop, 20_000, 1)
+    assert "2 times" in dash.hidden_notice
+    assert "until the run finishes" not in dash.hidden_notice
+
+
+def test_the_notice_drops_the_instruction_after_a_cancel_too(tmp_path):
+    dash, drop, _, _ = make_dashboard(tmp_path)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    drop.receive({"type": "cancel"})
+    assert dash.phase == "cancelled"
+    send_episode(drop, 10_000, 0)
+    assert "until the run finishes" not in dash.hidden_notice
 
 
 def test_a_refused_manifest_leaves_the_episodes_alone(tmp_path):

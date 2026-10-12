@@ -460,6 +460,40 @@ test('makeTabWatch ignores a hide after the run ended', () => {
   assert.equal(watch.show(5000), null);
 });
 
+test('makeTabWatch discard forgets an interval opened during a run the kernel refused', () => {
+  // The watch starts when the manifest is sent, before the kernel has
+  // accepted it. Time hidden during a refused drop (a stem collision, say)
+  // must not come back as an episode on the previous run's banner.
+  const watch = makeTabWatch();
+  watch.start(0, false);
+  watch.hide(1000);
+  watch.fileDone();
+  watch.discard();
+
+  assert.equal(watch.show(5000), null);
+  assert.equal(watch.hide(6000), false);
+  assert.equal(watch.pointerLeft(), false);
+});
+
+test('makeTabWatch discard also drops an interval that was open from the start', () => {
+  const watch = makeTabWatch();
+  watch.start(0, true);
+  watch.discard();
+
+  assert.equal(watch.show(5000), null);
+});
+
+test('makeTabWatch is reusable for a new run after a discard', () => {
+  const watch = makeTabWatch();
+  watch.start(0, false);
+  watch.hide(1000);
+  watch.discard();
+
+  watch.start(10000, false);
+  watch.hide(11000);
+  assert.deepEqual(watch.show(14000), { hiddenMs: 3000, frames: 0 });
+});
+
 test('makeTabWatch counts file_done messages received while hidden, not before or after', () => {
   const watch = makeTabWatch();
   watch.start(0, false);

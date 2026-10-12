@@ -137,7 +137,8 @@ described above (and its two operational rules). The dashboard removes the
 closed-file-browser rule — images never touch the contents drive — but the
 visible-tab rule still applies: a hidden tab slows a dashboard run about 7x
 too. The dashboard says so at each point it matters: a dialog before the run
-starts (with a "Don't show this again" box, remembered in the browser), a
+starts (with a "Don't show this again" box, remembered in the browser; a
+"Show the tab warning again" button appears under the drop zone to undo it), a
 notice above the progress bar for the whole run, a one-time reminder if the
 pointer leaves the page mid-run, a "⚠ Slowed ~7×" prefix on the tab title
 while the tab is hidden, and, on coming back, a banner saying how long the tab

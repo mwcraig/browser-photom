@@ -1103,3 +1103,17 @@ occlusion tracking (`docs/dashboard.md` §9). "Leave that window open" was
 therefore the wrong advice; the setup instructions, the running notice and
 the README now say to keep at least part of the window uncovered, as the
 dialog already did.
+
+**Review fixes (2026-10-12).** PR #10's review (four findings from an
+adversarial pass, two from Copilot) led to six small changes, all approved on
+GitHub first: the tab watch is discarded instead of capped when the kernel
+refuses the manifest (first `ack`/`file_done` marks acceptance), so time
+hidden during a refused drop no longer lands on the previous run's banner;
+the banner drops "keep this tab visible until the run finishes" once the
+phase is done or cancelled; the dialog's cause list now includes a covered
+window like the other three copies; a "Show the tab warning again" button
+under the drop zone undoes "Don't show this again"; the dialog is named for
+screen readers via `aria-labelledby`/`aria-describedby`; and a nonpositive
+`slowdown_factor` raises `ValueError` rather than letting the JS fallback and
+the Python copy quote different numbers. `pixi run test-js` (54) and
+`pixi run test` (205) pass.

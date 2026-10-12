@@ -79,10 +79,28 @@ def test_hidden_banner_text_reports_totals_over_several_episodes():
     assert "6 frames finished" in text
 
 
+def test_hidden_banner_text_tells_a_mid_run_user_to_keep_the_tab_visible():
+    text = hidden_banner_text(45_000, 1, 7)
+    assert text.endswith("keep this tab visible until the run finishes.")
+
+
+def test_hidden_banner_text_drops_the_instruction_once_the_run_has_finished():
+    # The banner usually appears on the done panel, next to "Finished";
+    # telling the user to keep the tab visible there is contradictory.
+    text = hidden_banner_text(45_000, 1, 7, finished=True)
+    assert "until the run finishes" not in text
+    assert "keep this tab" not in text
+    assert text.endswith("Hidden tabs run ~7× slower.")
+    # Everything else is unchanged.
+    assert "45 s" in text
+    assert "1 frame finished" in text
+
+
 def test_a_non_default_factor_flows_through_every_builder():
     # The factor is a single constant so it can be re-measured for the
     # dashboard path; nothing may hard-code the 7.
     for text in (running_notice(5), hidden_banner_text(10_000, 2, 5),
-                 hidden_banner_text(10_000, 2, 5, episodes=2)):
+                 hidden_banner_text(10_000, 2, 5, episodes=2),
+                 hidden_banner_text(10_000, 2, 5, finished=True)):
         assert "~5×" in text
         assert "7" not in text

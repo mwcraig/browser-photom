@@ -117,6 +117,20 @@ def test_the_banner_survives_into_the_done_panel(view):
     assert shown(view.hidden_banner)
 
 
+def test_the_done_panel_banner_does_not_say_to_keep_the_tab_visible(view):
+    # Next to "Finished … download the starlists" that instruction would
+    # contradict the panel it sits above.
+    manifest(view, "a.fit", "b.fit")
+    episode(view, 200_000, 1)
+    assert "until the run finishes" in view.hidden_text.value
+
+    upload(view, "a.fit")
+    upload(view, "b.fit")
+    assert shown(view.done_panel)
+    assert shown(view.hidden_banner)
+    assert "until the run finishes" not in view.hidden_text.value
+
+
 def test_a_new_drop_clears_the_banner(view):
     manifest(view, "a.fit")
     upload(view, "a.fit")

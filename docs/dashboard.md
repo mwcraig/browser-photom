@@ -229,7 +229,11 @@ the count at the real moment the user came back rather than whenever the kernel
 gets to the message — but it is approximate: a `file_done` that was already in
 flight when the tab hid or showed can land on either side, so expect it to be off
 by a frame or two. Episodes are kept per run and reset by the next accepted
-manifest (a refused one leaves them alone).
+manifest (a refused one leaves them alone). The front end matches that: its
+watch starts when the manifest is sent, but if the kernel refuses it (so no
+`ack` or `file_done` ever arrives) the watch is discarded rather than capped,
+and time hidden during the refused drop is never sent — it would otherwise land
+on the previous run's banner.
 
 The slowdown figure the warnings quote comes from one constant,
 `photom_dashboard.SLOWDOWN_FACTOR = 7`. `DropZone.slowdown_factor` is a synced
@@ -335,7 +339,12 @@ episode that started during one:
    saved under the `localStorage` key
    `browser-photom:dashboard:skip-tab-warning:v1` — versioned so a change to what
    the dialog says can be shown again to people who ticked it — and is saved only
-   when the run is actually started. Every `localStorage` access is wrapped
+   when the run is actually started. The undo is a "Show the tab warning again"
+   button under the drop zone, shown only while a skip is saved (the flag is
+   browser-local, so Python cannot offer one); clearing site data works too. The
+   dialog is named for assistive technology by `aria-labelledby` /
+   `aria-describedby` pointing at its heading and body (a `dialog` gets no name
+   from its content). Every `localStorage` access is wrapped
    (`safeStorage`, `readSkipTabWarning`, `writeSkipTabWarning`), because merely
    touching it can throw when site data is blocked; failing that, the dialog is
    simply shown every time. If `showModal()` itself throws, the run goes ahead
@@ -361,7 +370,9 @@ episode that started during one:
    that began during a run ends — including after the run finished, the usual
    case, with the interval capped at the run's end since the slowdown ended
    there. The banner persists into the done/cancelled panel until dismissed or
-   the next accepted manifest.
+   the next accepted manifest, and once the phase is `done` or `cancelled` it
+   drops the "keep this tab visible until the run finishes" instruction, which
+   would contradict the "Finished" panel it sits above.
 
 Where each piece lives follows from the table above: Python hides the drop zone
 for the whole of `running`, so the widget's own `el` is invisible during a run.
@@ -657,7 +668,9 @@ chunking protocol itself. The 2026-08-11 run rules this out.
   re-measured for the dashboard; it lives in one constant for when it is. The
   banner's frame count is approximate (§3). And throttling stretches timers too:
   the `KERNEL_TIMEOUT_MS` watchdog (§3) and the toast's 15 s auto-dismiss fire
-  late, never early, while the tab is hidden.
+  late, never early, while the tab is hidden. "Don't show this again" is undone
+  from the page (the button under the drop zone, §4) or by clearing the
+  `browser-photom:dashboard:skip-tab-warning:v1` key from site data.
 - **Still unmeasured/unverified.** A browser run on 2026-08-11 (`PROGRESS.md`)
   settled the largest structural unknown: anywidget's custom comm messages behave
   the same way under Voici as under plain JupyterLab — the page rendered, the drop
@@ -691,14 +704,14 @@ module docstring; `FrameProcessor`).
 | file | covers |
 |---|---|
 | `tests/test_chunk_assembly.py` | `ChunkAssembler` (ordering, out-of-order/duplicate/mismatched-`nchunks` rejection, basename sanitization against `../` paths, binary exactness, multiple files in flight) and `FrameProcessor` (MEMFS copy removed on success, on a returned skip string, and on a raised exception) |
-| `tests/test_dashboard_flow.py` | `PhotometryDashboard`'s full message protocol end to end, via a `FakeWidget` stand-in for anywidget: manifest → chunk/ack sequencing → file_done → run_done, cancel mid-upload, zip_request/zip/zip_error, malformed and buffer-less chunk messages, a second manifest restarting a finished run, and `hidden_episode` (recorded mid-run, after `run_done` and after a cancel; the 2 s threshold; reset by a new manifest but not a refused one; dismiss; malformed payloads ignored with no `error`; the `_HANDLERS` row's failure reply pinned to `hidden_episode_error`) |
+| `tests/test_dashboard_flow.py` | `PhotometryDashboard`'s full message protocol end to end, via a `FakeWidget` stand-in for anywidget: manifest → chunk/ack sequencing → file_done → run_done, cancel mid-upload, zip_request/zip/zip_error, malformed and buffer-less chunk messages, a second manifest restarting a finished run, and `hidden_episode` (recorded mid-run, after `run_done` and after a cancel; the 2 s threshold; reset by a new manifest but not a refused one; dismiss; the banner's "keep this tab visible" instruction only mid-run; malformed payloads ignored with no `error`; the `_HANDLERS` row's failure reply pinned to `hidden_episode_error`; a nonpositive `slowdown_factor` refused) |
 | `tests/test_metadata.py` | `validate_metadata`'s required/optional field rules, numeric parsing, and lat/lon range checks |
 | `tests/test_run_state.py` | `RunState` counters — uploaded/processed/skipped/remaining bookkeeping, `finished`, and that `remaining` never goes negative |
 | `tests/test_zip.py` | `build_results_zip` — flattening to basenames, `.star`-only filtering, sorted and byte-deterministic output, and its error cases (empty/missing directory) |
 | `tests/test_provenance.py` | the software stamp (§7): `provenance_tag`/`starlist_name`/`zip_name`, the `unknown` fallback without `build_info`, the dashboard picking up a generated `build_info`, and `scripts/write_build_info.py` against throwaway git repos (both SHAs recorded, `-dirty` on tracked changes only, failure outside a checkout) |
 | `tests/test_tab_visibility.py` | the tab-visibility text builders (§4): `format_duration` (rounding before splitting into units, so 59.6 s reads "1 min"; bad input reads "0 s"), `running_notice`, `hidden_banner_text` (singular/plural, no frames, totals over several episodes), and a non-default factor flowing through all of them |
-| `tests/test_dashboard_view.py` | `DashboardView` built headlessly, with messages injected through the drop zone's own `_handle_custom_msg`: `slowdown_factor` is a synced trait, the running notice shows only while running, a `hidden_episode` shows the banner, Dismiss hides it, it survives into the done panel and is cleared by the next drop, its text is escaped, and `INSTRUCTIONS` quotes the factor. Needs ipywidgets and anywidget (both in the default pixi env) |
-| `tests/js/dropzone.test.mjs` | the pure functions extracted from `dropzone.js`: `isFitsName`, `collectEntries`, `sliceChunks`, `validateFound`, `byPath`, `pickRun`, and `makeErrorLatch`; and the tab-visibility helpers `makeTabWatch` (episode timing, capping at run end, frame counting only while hidden mid-run, the once-per-run pointer nudge, no negative durations), `hiddenTitle`, `tabWarningText`, `dialogChoseStart`, `isViewportExit`, and `readSkipTabWarning`/`writeSkipTabWarning` against missing and throwing storage |
+| `tests/test_dashboard_view.py` | `DashboardView` built headlessly, with messages injected through the drop zone's own `_handle_custom_msg`: `slowdown_factor` is a synced trait, the running notice shows only while running, a `hidden_episode` shows the banner, Dismiss hides it, it survives into the done panel (without the "keep this tab visible" instruction) and is cleared by the next drop, its text is escaped, and `INSTRUCTIONS` quotes the factor. Needs ipywidgets and anywidget (both in the default pixi env) |
+| `tests/js/dropzone.test.mjs` | the pure functions extracted from `dropzone.js`: `isFitsName`, `collectEntries`, `sliceChunks`, `validateFound`, `byPath`, `pickRun`, and `makeErrorLatch`; and the tab-visibility helpers `makeTabWatch` (episode timing, capping at run end, frame counting only while hidden mid-run, the once-per-run pointer nudge, no negative durations, discarding a refused run), `hiddenTitle`, `tabWarningText`, `dialogChoseStart`, `isViewportExit`, and `readSkipTabWarning`/`writeSkipTabWarning` against missing and throwing storage |
 
 The JS tests exist specifically to pin down two front-end rules that would
 otherwise only be discoverable by testing in a real Chromium tab: Chromium's

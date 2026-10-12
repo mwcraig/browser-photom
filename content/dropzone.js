@@ -289,6 +289,9 @@ export function writeSkipTabWarning(storage, value) {
  * - fileDone(): counts a finished frame, only while hidden mid-run.
  * - stop(now): the run ended; an open interval is capped here, since the
  *   slowdown ended with the run, but is kept for show() to report.
+ * - discard(): the kernel never accepted the run (the manifest was refused
+ *   before any ack or file_done); forget it, open interval included, so
+ *   time hidden during a refused drop is never reported as an episode.
  * - show(now): the tab is visible again; returns { hiddenMs, frames } for
  *   the episode (hiddenMs never negative) and clears it, or null.
  * - pointerLeft(): true at most once per run, and only while visible.
@@ -313,6 +316,12 @@ export function makeTabWatch() {
       if (!running) return;
       running = false;
       if (hiddenAt !== null) endAt = nowMs;
+    },
+    discard() {
+      running = false;
+      hiddenAt = null;
+      endAt = null;
+      frames = 0;
     },
     hide(nowMs) {
       if (!running || hiddenAt !== null) return false;
@@ -430,6 +439,22 @@ function renderDropZone({ model, el, signal }) {
   pickerRow.appendChild(pickerInput);
   el.appendChild(pickerRow);
 
+  // The only way back from "Don't show this again" (the flag is browser-
+  // local, so Python cannot offer one). Shown only while there is a saved
+  // skip to undo; paint() keeps that in step with the stored flag.
+  const showAgainRow = document.createElement('div');
+  showAgainRow.className = 'bp-show-warning';
+  const showAgainButton = document.createElement('button');
+  showAgainButton.type = 'button';
+  showAgainButton.className = 'bp-btn secondary';
+  showAgainButton.textContent = 'Show the tab warning again';
+  showAgainButton.addEventListener('click', () => {
+    writeSkipTabWarning(safeStorage(), false);
+    paint();
+  });
+  showAgainRow.appendChild(showAgainButton);
+  el.appendChild(showAgainRow);
+
   // Pre-run warning dialog (issue #9, item 1). Built once per view and
   // appended to `el` -- not to the container, whose children are
   // pointer-events:none -- so it is connected before showModal() (which
@@ -441,6 +466,15 @@ function renderDropZone({ model, el, signal }) {
   dialogForm.method = 'dialog';
   const dialogHeading = document.createElement('h3');
   const dialogBody = document.createElement('p');
+  // A dialog gets no accessible name from its content, so the heading and
+  // body are wired in by id -- unique per view, since a view can be
+  // re-rendered -- rather than a static aria-label, which would not track
+  // the factor the heading is rebuilt with on every confirmRun().
+  const dialogId = `bp-dialog-${Math.random().toString(36).slice(2, 10)}`;
+  dialogHeading.id = `${dialogId}-title`;
+  dialogBody.id = `${dialogId}-body`;
+  dialog.setAttribute('aria-labelledby', dialogHeading.id);
+  dialog.setAttribute('aria-describedby', dialogBody.id);
   const skipLabel = document.createElement('label');
   skipLabel.className = 'bp-dialog-skip';
   const skipBox = document.createElement('input');
@@ -490,9 +524,10 @@ function renderDropZone({ model, el, signal }) {
       dialogBody.textContent =
         'Your browser slows down pages it thinks you are not looking at. ' +
         'Every frame of the run passes through this tab, so switching to ' +
-        `another tab or minimizing this window makes the run take about ${factor}× ` +
-        'as long. To use other tabs meanwhile, drag this tab into its own window ' +
-        'first and keep that window at least partly visible.';
+        'another tab, minimizing this window, or covering it completely with ' +
+        `other windows makes the run take about ${factor}× as long. To use other ` +
+        'tabs meanwhile, drag this tab into its own window first and keep that ' +
+        'window at least partly visible.';
       skipBox.checked = false;
       // returnValue persists across closes and is undefined after Esc, so
       // it must be cleared before every showModal().
@@ -657,6 +692,7 @@ function renderDropZone({ model, el, signal }) {
     pickerButton.disabled = !(armed && !busy);
     pickerButton.classList.toggle('secondary', armed && !busy);
     container.setAttribute('aria-disabled', String(!(armed && !busy)));
+    showAgainRow.hidden = !readSkipTabWarning(safeStorage());
   }
   paint();
 
@@ -680,6 +716,12 @@ function renderDropZone({ model, el, signal }) {
   // waiters (settling clears their timers), and this counter is the
   // belt-and-braces for any timer that fires anyway.
   let runCounter = 0;
+
+  // Whether the kernel has accepted the current run: set by the first ack
+  // or file_done. A manifest it refuses (a stem collision, say) only ever
+  // draws an `error`, and startUpload's finally uses this to tell the two
+  // apart -- a refused run's tab watch is discarded, not capped.
+  let accepted = false;
 
   // Each waiter times out on its own: a healthy kernel always acks or
   // finishes, so if it stops responding entirely (a wedged Pyodide worker,
@@ -741,6 +783,7 @@ function renderDropZone({ model, el, signal }) {
     // the user comes back. Any other type no waiter wants (including
     // `hidden_episode_error`, deliberately not `error`) falls through the
     // loop below untouched and never trips the error latch.
+    if (msg.type === 'ack' || msg.type === 'file_done') accepted = true;
     if (msg.type === 'file_done') watch.fileDone();
     for (let i = waiters.length - 1; i >= 0; i--) {
       if (waiters[i].predicate(msg)) {
@@ -771,6 +814,7 @@ function renderDropZone({ model, el, signal }) {
     // run counter first orphans any watchdog left over from the previous
     // run (see waitFor).
     runCounter += 1;
+    accepted = false;
     errorLatch.arm();
     model.send({
       type: 'manifest',
@@ -781,7 +825,9 @@ function renderDropZone({ model, el, signal }) {
     });
     // The run is live from here (not from `uploading`, which also covers
     // folder enumeration and the dialog). A tab already hidden by now gets
-    // no visibilitychange, so start() opens that interval itself.
+    // no visibilitychange, so start() opens that interval itself. The
+    // kernel has not accepted the manifest yet; if it never does, the
+    // finally below discards whatever the watch recorded meanwhile.
     if (watch.start(Date.now(), document.visibilityState === 'hidden')) applyHiddenTitle();
 
     // First failure wins. Waiters this loop is not currently awaiting must
@@ -890,8 +936,11 @@ function renderDropZone({ model, el, signal }) {
       }
     } finally {
       // The slowdown ends with the run: cap any open hidden interval (it is
-      // still reported on return) and drop the title and toast now.
-      watch.stop(Date.now());
+      // still reported on return) and drop the title and toast now. A run
+      // the kernel refused never slowed anything, and its hidden time must
+      // not land on the previous run's banner, so that one is discarded.
+      if (accepted) watch.stop(Date.now());
+      else watch.discard();
       restoreTitle();
       dismissToast();
       uploading = false;

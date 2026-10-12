@@ -322,10 +322,13 @@ def running_notice(factor):
     )
 
 
-def hidden_banner_text(hidden_ms, frames, factor, episodes=1):
+def hidden_banner_text(hidden_ms, frames, factor, episodes=1, finished=False):
     """The banner shown when the user comes back to a hidden tab.
 
     ``hidden_ms`` and ``frames`` are totals over ``episodes`` hidden spells.
+    ``finished`` drops the "keep this tab visible" instruction, which would
+    contradict the done panel it usually sits above: the run normally ends
+    while the user is away.
     """
     duration = format_duration(hidden_ms / 1000)
     if episodes > 1:
@@ -338,10 +341,10 @@ def hidden_banner_text(hidden_ms, frames, factor, episodes=1):
         done = "1 frame finished meanwhile"
     else:
         done = f"{frames} frames finished meanwhile"
-    return (
-        f"{when}; {done}. Hidden tabs run ~{factor}× slower — keep this tab "
-        f"visible until the run finishes."
-    )
+    advice = f"Hidden tabs run ~{factor}× slower"
+    if not finished:
+        advice += " — keep this tab visible until the run finishes"
+    return f"{when}; {done}. {advice}."
 
 
 def _episode_count(value):
@@ -666,6 +669,13 @@ class PhotometryDashboard:
         self.results_dir = str(results_dir)
         self.chunk_bytes = int(chunk_bytes)
         self.slowdown_factor = int(slowdown_factor)
+        if self.slowdown_factor <= 0:
+            # The browser side falls back to SLOWDOWN_FACTOR for a
+            # nonpositive value while the Python notice and banner would
+            # quote it as given; refuse rather than warn with two numbers.
+            raise ValueError(
+                f"slowdown_factor must be positive, got {slowdown_factor!r}"
+            )
         self.provenance = provenance_tag() if provenance is None else str(provenance)
         self.on_change = on_change
         self.on_manifest = on_manifest
@@ -774,8 +784,8 @@ class PhotometryDashboard:
         # that differ only in extension -- a.fit and a.fits -- would
         # silently overwrite each other's starlist just like exact
         # duplicates. Refuse rather than guess which one the user meant.
-        # The front end refuses non-flat folders, which makes collisions
-        # impossible there; this backs it up for any other front end.
+        # The front end refuses non-flat folders, but a flat folder can
+        # still hold a.fit beside a.fits, so this is reachable from it.
         by_stem = {}
         for n in names:
             by_stem.setdefault(Path(n).stem, []).append(n)
@@ -986,6 +996,7 @@ class PhotometryDashboard:
             sum(n for _, n in self.hidden_episodes),
             self.slowdown_factor,
             episodes=len(self.hidden_episodes),
+            finished=self.phase in ("done", "cancelled"),
         )
 
     # -- helpers -----------------------------------------------------------

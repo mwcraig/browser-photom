@@ -373,6 +373,39 @@ test('makeErrorLatch starts armed', () => {
   assert.equal(makeErrorLatch().trip(), true);
 });
 
+test('makeErrorLatch keeps the first error for the upload loop', () => {
+  // Issue #11: a manifest refused while the loop is still reading its
+  // first chunk finds no waiter to reject, so the loop's rethrow() has to
+  // get the refusal from the latch itself -- and the refusal, not the
+  // "no active run" echo that follows it.
+  const latch = makeErrorLatch();
+  assert.equal(latch.error(), null);
+
+  const refusal = new Error('a: output name collides with a.fits');
+  const echo = new Error('a: no active run to receive chunks');
+  assert.equal(latch.trip(refusal), true);
+  assert.equal(latch.trip(echo), false);
+
+  assert.equal(latch.error(), refusal);
+});
+
+test('makeErrorLatch drops the kept error when re-armed', () => {
+  // The next run's manifest must not be unwound by the previous run's
+  // refusal.
+  const latch = makeErrorLatch();
+  latch.trip(new Error('refused'));
+
+  latch.arm();
+
+  assert.equal(latch.error(), null);
+});
+
+test('makeErrorLatch tripped without an error keeps none', () => {
+  const latch = makeErrorLatch();
+  latch.trip();
+  assert.equal(latch.error(), null);
+});
+
 // ---------------------------------------------------------------------
 // makeTabWatch
 // ---------------------------------------------------------------------

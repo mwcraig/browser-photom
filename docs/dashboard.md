@@ -99,8 +99,14 @@ across the SNR cut (4–7 of 8k–15.5k on the 155-frame LS Psc subset, and a
 `fwhm` header difference in 143/155 frames; `docs/issue6-recheck-2026-10-07.md`).
 Swapping bandaid's numpy `Ballet` into the dashboard makes all 155 files
 byte-identical; whether to do that, or pin `SgemmBallet` to it, is issue #8.
-This is the one place that difference is described; README, PROGRESS and the
-code comments point here. Everything in `photom_dashboard.py` above
+Those numbers are from bandaid 33bebf5. The pin has since moved to b7fb737,
+which carries bandaid PR #154: the FWHM fit that turned a 1e-6 px shift into a
+2.5 % `fwhm` change on one frame now runs to floating-point noise, so the
+residual at the current pin is expected to be only the rows on the SNR cut (a
+rerun is owed). The larger browser-versus-native position difference, about
+3e-5 px from float32 rounding under numpy 2, is bandaid #155 and is in no pin
+yet. This is the one place that difference is described; README, PROGRESS and
+the code comments point here. Everything in `photom_dashboard.py` above
 `make_bandaid_processor` is import-free beyond the standard library
 (a rule its module docstring states), so the host test environment needs neither numpy,
 astropy, nor bandaid.

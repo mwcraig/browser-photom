@@ -8,6 +8,7 @@ import {
   byPath,
   pickRun,
   makeErrorLatch,
+  makeRunFailure,
   SKIP_TAB_WARNING_KEY,
   tabWarningText,
   hiddenTitle,
@@ -371,6 +372,96 @@ test('makeErrorLatch starts armed', () => {
   // An error arriving before any upload (nothing has armed the latch yet)
   // must still be shown.
   assert.equal(makeErrorLatch().trip(), true);
+});
+
+test('makeErrorLatch keeps the first error for the upload loop', () => {
+  // Issue #11: a manifest refused while the loop is still reading its
+  // first chunk finds no waiter to reject, so the loop's rethrow() has to
+  // get the refusal from the latch itself -- and the refusal, not the
+  // "no active run" echo that follows it.
+  const latch = makeErrorLatch();
+  assert.equal(latch.error(), null);
+
+  const refusal = new Error('a: output name collides with a.fits');
+  const echo = new Error('a: no active run to receive chunks');
+  assert.equal(latch.trip(refusal), true);
+  assert.equal(latch.trip(echo), false);
+
+  assert.equal(latch.error(), refusal);
+});
+
+test('makeErrorLatch drops the kept error when re-armed', () => {
+  // The next run's manifest must not be unwound by the previous run's
+  // refusal.
+  const latch = makeErrorLatch();
+  latch.trip(new Error('refused'));
+
+  latch.arm();
+
+  assert.equal(latch.error(), null);
+});
+
+test('makeErrorLatch tripped without an error keeps none', () => {
+  const latch = makeErrorLatch();
+  latch.trip();
+  assert.equal(latch.error(), null);
+});
+
+// ---------------------------------------------------------------------
+// makeRunFailure
+// ---------------------------------------------------------------------
+//
+// The loop-facing half of the issue #11 fix: rethrow() must surface a
+// kernel error that tripped the latch while nothing was guarded, not only
+// one that came back through a rejected waiter.
+
+test('makeRunFailure rethrows a latched error nobody was waiting for', () => {
+  const latch = makeErrorLatch();
+  const run = makeRunFailure(latch);
+  run.rethrow(); // nothing has happened yet
+
+  const refusal = new Error('a: output name collides with a.fits');
+  latch.trip(refusal);
+
+  assert.throws(() => run.rethrow(), (err) => err === refusal);
+});
+
+test('makeRunFailure records the first guarded rejection and swallows the rest', async () => {
+  const latch = makeErrorLatch();
+  const run = makeRunFailure(latch);
+  const first = new Error('ack: kernel not responding');
+  const second = new Error('file_done: kernel not responding');
+
+  // guard() never rejects, so awaiting it directly is the loop's own use.
+  await run.guard(Promise.reject(first));
+  await run.guard(Promise.reject(second));
+  await run.guard(Promise.resolve('ok'));
+
+  assert.throws(() => run.rethrow(), (err) => err === first);
+});
+
+test('makeRunFailure prefers the guarded failure over the latch', async () => {
+  // When a waiter was pending, the same kernel error rejects it and sits
+  // in the latch; either way one error is thrown. A local failure that
+  // happened first must not be replaced by a later kernel error.
+  const latch = makeErrorLatch();
+  const run = makeRunFailure(latch);
+  const local = new Error('NotReadableError');
+  await run.guard(Promise.reject(local));
+  latch.trip(new Error('later kernel error'));
+
+  assert.throws(() => run.rethrow(), (err) => err === local);
+});
+
+test('makeRunFailure for the next run does not see the previous refusal', () => {
+  const latch = makeErrorLatch();
+  latch.trip(new Error('refused'));
+  makeRunFailure(latch); // run N's slot
+
+  latch.arm(); // startUpload re-arms before making run N+1's slot
+  const next = makeRunFailure(latch);
+
+  next.rethrow();
 });
 
 // ---------------------------------------------------------------------

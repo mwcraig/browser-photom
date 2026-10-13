@@ -182,6 +182,18 @@ Either timeout sends `cancel` to the kernel and rejects with a message telling t
 user to reload — there is no retry that un-wedges a dead wasm kernel from the
 front end, so a reload really is the recovery path.
 
+The watchdog is the last resort, not the way a refused manifest unwinds the loop.
+A kernel `error` rejects every pending waiter, but the refusal can arrive while the
+loop is still reading its first chunk, before any waiter exists (issue #11); with
+nobody to reject, the loop would send chunks for a run the kernel never seeded,
+the error latch would swallow the "no active run" echoes those draw, and the drop
+zone would stay locked until the first ack's 10-minute watchdog fired — with the
+"kernel not responding" advice, which would be wrong. So `makeErrorLatch` keeps
+the first error of the run as well as gating it, and the loop's `rethrow()` (from
+`makeRunFailure`, run after every await, including that first read) throws it
+whether it came through a waiter or not. The loop's own catch then sends the `cancel` and releases the
+zone.
+
 Back-pressure is per *file*, not per chunk: the sender runs up to one file
 ahead of the kernel (`DONE_LOOKAHEAD = 2` outstanding `file_done`s — the frame
 the kernel is computing plus the one file queued behind it).
@@ -711,7 +723,7 @@ module docstring; `FrameProcessor`).
 | `tests/test_provenance.py` | the software stamp (§7): `provenance_tag`/`starlist_name`/`zip_name`, the `unknown` fallback without `build_info`, the dashboard picking up a generated `build_info`, and `scripts/write_build_info.py` against throwaway git repos (both SHAs recorded, `-dirty` on tracked changes only, failure outside a checkout) |
 | `tests/test_tab_visibility.py` | the tab-visibility text builders (§4): `format_duration` (rounding before splitting into units, so 59.6 s reads "1 min"; bad input reads "0 s"), `running_notice`, `hidden_banner_text` (singular/plural, no frames, totals over several episodes), and a non-default factor flowing through all of them |
 | `tests/test_dashboard_view.py` | `DashboardView` built headlessly, with messages injected through the drop zone's own `_handle_custom_msg`: `slowdown_factor` is a synced trait, the running notice shows only while running, a `hidden_episode` shows the banner, Dismiss hides it, it survives into the done panel (without the "keep this tab visible" instruction) and is cleared by the next drop, its text is escaped, and `INSTRUCTIONS` quotes the factor. Needs ipywidgets and anywidget (both in the default pixi env) |
-| `tests/js/dropzone.test.mjs` | the pure functions extracted from `dropzone.js`: `isFitsName`, `collectEntries`, `sliceChunks`, `validateFound`, `byPath`, `pickRun`, and `makeErrorLatch`; and the tab-visibility helpers `makeTabWatch` (episode timing, capping at run end, frame counting only while hidden mid-run, the once-per-run pointer nudge, no negative durations, discarding a refused run), `hiddenTitle`, `tabWarningText`, `dialogChoseStart`, `isViewportExit`, and `readSkipTabWarning`/`writeSkipTabWarning` against missing and throwing storage |
+| `tests/js/dropzone.test.mjs` | the pure functions extracted from `dropzone.js`: `isFitsName`, `collectEntries`, `sliceChunks`, `validateFound`, `byPath`, `pickRun`, `makeErrorLatch` (first error only, re-arming, and keeping that error), and `makeRunFailure` (the upload loop's first-failure slot: a guarded rejection or a latched kernel error nobody was waiting for, first one wins, cleared by re-arming); and the tab-visibility helpers `makeTabWatch` (episode timing, capping at run end, frame counting only while hidden mid-run, the once-per-run pointer nudge, no negative durations, discarding a refused run), `hiddenTitle`, `tabWarningText`, `dialogChoseStart`, `isViewportExit`, and `readSkipTabWarning`/`writeSkipTabWarning` against missing and throwing storage |
 
 The JS tests exist specifically to pin down two front-end rules that would
 otherwise only be discoverable by testing in a real Chromium tab: Chromium's

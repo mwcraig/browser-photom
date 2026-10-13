@@ -187,16 +187,60 @@ const DONE_LOOKAHEAD = 2;
 // died; the echoes behind it would overwrite the status line. The latch
 // keeps the first and swallows the rest; startUpload re-arms it when the
 // next run's manifest goes out.
+//
+// The latch also holds that first error, because rejecting the pending
+// waiters is not enough to reach the upload loop. The refusal can land
+// while the loop is still reading its first chunk, before it has
+// registered any waiter at all (issue #11): with nobody to reject, the
+// loop would carry on sending chunks for a run the kernel never seeded,
+// every echo those draw is swallowed here, and nothing unwinds it until
+// an ack watchdog fires ten minutes later. So the loop's rethrow() asks
+// the latch for the first error as well as its own failure slot.
 export function makeErrorLatch() {
   let tripped = false;
+  let first = null;
   return {
     arm() {
       tripped = false;
+      first = null;
     },
-    trip() {
+    // Returns true for the first error of a run (the caller should act on
+    // it) and false for every echo after it. `err` is kept for error().
+    trip(err) {
       if (tripped) return false;
       tripped = true;
+      first = err || null;
       return true;
+    },
+    // The error that tripped the latch this run, or null if none has.
+    error() {
+      return first;
+    },
+  };
+}
+
+// One upload's first-failure slot. Waiters the loop is not currently
+// awaiting must never reject unobserved (that's an unhandled rejection and
+// a lost error), so every stored waiter goes through guard(): it records
+// the first failure and swallows the rest. rethrow() surfaces it at the
+// next point the loop can act on it. A kernel error reaches the slot only
+// through a rejected waiter, and there may be none registered yet when it
+// arrives (a manifest refused during the first chunk read, issue #11), so
+// rethrow() also consults the latch, which keeps the first kernel error of
+// the run whether or not anyone was waiting. Exported so that contract can
+// be tested without the DOM-bound loop around it; startUpload makes a
+// fresh one per run, after re-arming the latch.
+export function makeRunFailure(latch) {
+  let failure = null;
+  return {
+    guard(promise) {
+      return promise.catch((err) => {
+        if (!failure) failure = err;
+      });
+    },
+    rethrow() {
+      const err = failure || latch.error();
+      if (err) throw err;
     },
   };
 }
@@ -765,15 +809,20 @@ function renderDropZone({ model, el, signal }) {
     if (msg.type === 'error') {
       // First error wins: anything after it this run is an echo of the
       // same death (see makeErrorLatch) and must not overwrite the reason.
-      if (!errorLatch.trip()) return;
+      // The latch keeps the error too, for the upload loop's rethrow():
+      // there may be no waiter to reject yet if this landed during the
+      // loop's first chunk read (issue #11).
+      const err = new Error(msg.reason || 'Kernel error');
+      if (!errorLatch.trip(err)) return;
       // No way to know which in-flight step a kernel-side error belongs
       // to, so fail every pending waiter and let the upload loop unwind.
-      const err = new Error(msg.reason || 'Kernel error');
       const pending = waiters.splice(0, waiters.length);
       for (const w of pending) w.reject(err);
       // Tell the kernel the run is over. Without this it would sit at
       // "running" forever waiting for files this loop is never going to
-      // send, and the download button would never appear.
+      // send, and the download button would never appear. With no waiter
+      // pending the loop itself sends it, from its catch, once rethrow()
+      // picks the error up from the latch.
       if (pending.length > 0) model.send({ type: 'cancel' });
       setStatus(`Error: ${msg.reason || 'unknown error'}`);
       return;
@@ -830,19 +879,9 @@ function renderDropZone({ model, el, signal }) {
     // finally below discards whatever the watch recorded meanwhile.
     if (watch.start(Date.now(), document.visibilityState === 'hidden')) applyHiddenTitle();
 
-    // First failure wins. Waiters this loop is not currently awaiting must
-    // never reject unobserved (that's an unhandled rejection and a lost
-    // error), so everything stored is guarded: the guard records the first
-    // failure and swallows the rest, and rethrow() surfaces it at the next
-    // point the loop can act on it.
-    let failure = null;
-    const guard = (promise) =>
-      promise.catch((err) => {
-        if (!failure) failure = err;
-      });
-    const rethrow = () => {
-      if (failure) throw failure;
-    };
+    // First failure wins, whether it came through a guarded waiter or
+    // straight from the kernel via the latch (see makeRunFailure).
+    const { guard, rethrow } = makeRunFailure(errorLatch);
 
     // Acks are batched per file, not flattened across the whole run: a
     // file's acks all precede its file_done on the wire (kernel-side
@@ -877,7 +916,12 @@ function renderDropZone({ model, el, signal }) {
         const fileAcks = [];
         for (const c of chunks) {
           const buf = await file.slice(c.start, c.end).arrayBuffer();
-          rethrow(); // a kernel error may have landed during the read
+          // A kernel error may have landed during the read -- a refused
+          // manifest, typically -- with no waiter yet to carry it; the
+          // latch has it (issue #11). Sending this chunk anyway would only
+          // draw a "no active run" echo and leave the loop waiting on an
+          // ack that never comes.
+          rethrow();
           model.send(
             { type: 'chunk', name, index: c.index, nchunks: chunks.length },
             null,

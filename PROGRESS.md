@@ -1117,3 +1117,45 @@ screen readers via `aria-labelledby`/`aria-describedby`; and a nonpositive
 `slowdown_factor` raises `ValueError` rather than letting the JS fallback and
 the Python copy quote different numbers. `pixi run test-js` (54) and
 `pixi run test` (205) pass.
+
+# Refused manifest no longer locks the drop zone for ten minutes (2026-10-12)
+
+Issue #11, found while verifying the refused-manifest finding on PR #10.
+A kernel `error` unwinds the upload loop by rejecting the pending waiters,
+but the refusal can land during the loop's *first* chunk read, before any
+waiter has been registered. The error latch then latched it and painted
+the status line, but the loop's failure slot stayed empty: it sent chunk 0
+for a run the kernel never seeded, the "no active run to receive chunks"
+echoes were swallowed by the latch, no ack ever came, and only the
+600 s `KERNEL_TIMEOUT_MS` watchdog released the zone -- overwriting the
+real reason with "kernel not responding -- reload the page", which was
+wrong. Rare (the reply has to beat one `arrayBuffer()` read of at most
+1 MiB), but a ten-minute lockout with misleading advice when it hits.
+
+Fix: `makeErrorLatch` now keeps the first error of the run (`trip(err)`
+stores it, `error()` returns it, `arm()` clears it) and the loop's
+`rethrow()` throws `failure || errorLatch.error()`. The `rethrow()`
+straight after each chunk read therefore does what its comment always
+promised, and the loop's existing catch sends the `cancel` and releases
+the zone. No new state in `renderDropZone`: the issue's proposed
+`kernelFailure` slot is the latch's stored error, which also keeps the
+testable part in the exported helper. Three JS tests cover keeping the
+first error over its echoes, clearing it on re-arm, and `trip()` with no
+error. `docs/dashboard.md` §3 explains why the watchdog is the last
+resort rather than the refused-manifest path. Matt's hand check with an
+`a.fit`/`a.fits` folder passed, though as the review below notes it
+exercised the ordinary unwind path, not the race.
+
+**Adversarial review (2026-10-12).** A fresh subagent reviewed PR #12 and
+posted on GitHub. Its first finding was applied: the three latch tests
+pinned the helper only, so deleting the latch lookup from `rethrow()`
+left every test green. The failure slot (`guard`/`rethrow`) is now the
+exported `makeRunFailure(latch)`, made fresh per run by `startUpload`,
+with four tests: a latched error nobody was waiting for is rethrown, the
+first guarded rejection wins and later ones are swallowed, a guarded
+failure takes precedence over the latch, and a re-armed latch gives the
+next run a clean slot. Two findings left as notes: the hand check does
+not reach the first-read window without a forced delay, and a kernel
+error from run N arriving in run N+1's first-read window (errors carry no
+run id) would now unwind N+1 where before it only painted the status
+line; a real fix needs run-scoped kernel errors.

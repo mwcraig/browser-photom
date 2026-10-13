@@ -219,6 +219,32 @@ export function makeErrorLatch() {
   };
 }
 
+// One upload's first-failure slot. Waiters the loop is not currently
+// awaiting must never reject unobserved (that's an unhandled rejection and
+// a lost error), so every stored waiter goes through guard(): it records
+// the first failure and swallows the rest. rethrow() surfaces it at the
+// next point the loop can act on it. A kernel error reaches the slot only
+// through a rejected waiter, and there may be none registered yet when it
+// arrives (a manifest refused during the first chunk read, issue #11), so
+// rethrow() also consults the latch, which keeps the first kernel error of
+// the run whether or not anyone was waiting. Exported so that contract can
+// be tested without the DOM-bound loop around it; startUpload makes a
+// fresh one per run, after re-arming the latch.
+export function makeRunFailure(latch) {
+  let failure = null;
+  return {
+    guard(promise) {
+      return promise.catch((err) => {
+        if (!failure) failure = err;
+      });
+    },
+    rethrow() {
+      const err = failure || latch.error();
+      if (err) throw err;
+    },
+  };
+}
+
 // ---------------------------------------------------------------------
 // Tab-visibility warnings (issue #9)
 //
@@ -853,24 +879,9 @@ function renderDropZone({ model, el, signal }) {
     // finally below discards whatever the watch recorded meanwhile.
     if (watch.start(Date.now(), document.visibilityState === 'hidden')) applyHiddenTitle();
 
-    // First failure wins. Waiters this loop is not currently awaiting must
-    // never reject unobserved (that's an unhandled rejection and a lost
-    // error), so everything stored is guarded: the guard records the first
-    // failure and swallows the rest, and rethrow() surfaces it at the next
-    // point the loop can act on it. A kernel error reaches this slot only
-    // through a rejected waiter, and there may be none registered yet when
-    // it arrives (a manifest refused during the first chunk read, issue
-    // #11), so rethrow() also consults the error latch, which keeps the
-    // first kernel error of the run whether or not anyone was waiting.
-    let failure = null;
-    const guard = (promise) =>
-      promise.catch((err) => {
-        if (!failure) failure = err;
-      });
-    const rethrow = () => {
-      const err = failure || errorLatch.error();
-      if (err) throw err;
-    };
+    // First failure wins, whether it came through a guarded waiter or
+    // straight from the kernel via the latch (see makeRunFailure).
+    const { guard, rethrow } = makeRunFailure(errorLatch);
 
     // Acks are batched per file, not flattened across the whole run: a
     // file's acks all precede its file_done on the wire (kernel-side

@@ -1142,5 +1142,20 @@ the zone. No new state in `renderDropZone`: the issue's proposed
 testable part in the exported helper. Three JS tests cover keeping the
 first error over its echoes, clearing it on re-arm, and `trip()` with no
 error. `docs/dashboard.md` §3 explains why the watchdog is the last
-resort rather than the refused-manifest path. Hand check still owed: a
-flat folder holding `a.fit` and `a.fits` against `pixi run build-dash`.
+resort rather than the refused-manifest path. Matt's hand check with an
+`a.fit`/`a.fits` folder passed, though as the review below notes it
+exercised the ordinary unwind path, not the race.
+
+**Adversarial review (2026-10-12).** A fresh subagent reviewed PR #12 and
+posted on GitHub. Its first finding was applied: the three latch tests
+pinned the helper only, so deleting the latch lookup from `rethrow()`
+left every test green. The failure slot (`guard`/`rethrow`) is now the
+exported `makeRunFailure(latch)`, made fresh per run by `startUpload`,
+with four tests: a latched error nobody was waiting for is rethrown, the
+first guarded rejection wins and later ones are swallowed, a guarded
+failure takes precedence over the latch, and a re-armed latch gives the
+next run a clean slot. Two findings left as notes: the hand check does
+not reach the first-read window without a forced delay, and a kernel
+error from run N arriving in run N+1's first-read window (errors carry no
+run id) would now unwind N+1 where before it only painted the status
+line; a real fix needs run-scoped kernel errors.

@@ -8,6 +8,7 @@ import {
   byPath,
   pickRun,
   makeErrorLatch,
+  makeRunFailure,
   SKIP_TAB_WARNING_KEY,
   tabWarningText,
   hiddenTitle,
@@ -404,6 +405,63 @@ test('makeErrorLatch tripped without an error keeps none', () => {
   const latch = makeErrorLatch();
   latch.trip();
   assert.equal(latch.error(), null);
+});
+
+// ---------------------------------------------------------------------
+// makeRunFailure
+// ---------------------------------------------------------------------
+//
+// The loop-facing half of the issue #11 fix: rethrow() must surface a
+// kernel error that tripped the latch while nothing was guarded, not only
+// one that came back through a rejected waiter.
+
+test('makeRunFailure rethrows a latched error nobody was waiting for', () => {
+  const latch = makeErrorLatch();
+  const run = makeRunFailure(latch);
+  run.rethrow(); // nothing has happened yet
+
+  const refusal = new Error('a: output name collides with a.fits');
+  latch.trip(refusal);
+
+  assert.throws(() => run.rethrow(), (err) => err === refusal);
+});
+
+test('makeRunFailure records the first guarded rejection and swallows the rest', async () => {
+  const latch = makeErrorLatch();
+  const run = makeRunFailure(latch);
+  const first = new Error('ack: kernel not responding');
+  const second = new Error('file_done: kernel not responding');
+
+  // guard() never rejects, so awaiting it directly is the loop's own use.
+  await run.guard(Promise.reject(first));
+  await run.guard(Promise.reject(second));
+  await run.guard(Promise.resolve('ok'));
+
+  assert.throws(() => run.rethrow(), (err) => err === first);
+});
+
+test('makeRunFailure prefers the guarded failure over the latch', async () => {
+  // When a waiter was pending, the same kernel error rejects it and sits
+  // in the latch; either way one error is thrown. A local failure that
+  // happened first must not be replaced by a later kernel error.
+  const latch = makeErrorLatch();
+  const run = makeRunFailure(latch);
+  const local = new Error('NotReadableError');
+  await run.guard(Promise.reject(local));
+  latch.trip(new Error('later kernel error'));
+
+  assert.throws(() => run.rethrow(), (err) => err === local);
+});
+
+test('makeRunFailure for the next run does not see the previous refusal', () => {
+  const latch = makeErrorLatch();
+  latch.trip(new Error('refused'));
+  makeRunFailure(latch); // run N's slot
+
+  latch.arm(); // startUpload re-arms before making run N+1's slot
+  const next = makeRunFailure(latch);
+
+  next.rethrow();
 });
 
 // ---------------------------------------------------------------------

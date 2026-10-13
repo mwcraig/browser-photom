@@ -1159,3 +1159,36 @@ not reach the first-read window without a forced delay, and a kernel
 error from run N arriving in run N+1's first-read window (errors carry no
 run id) would now unwind N+1 where before it only painted the status
 line; a real fix needs run-scoped kernel errors.
+
+# bandaid pin moved to b7fb737 (2026-10-13)
+
+The dashboard's bandaid pin moves from 33bebf5 (the PR #147 merge) to
+b7fb737, the PR #154 merge, eleven commits later. What comes with it:
+
+- **PR #154, stable FWHM fit (bandaid #150).** The Gaussian fit of the
+  stacked PSF now runs to floating-point noise and lives in bandaid
+  (`_gaussian_fwhm`). This was the amplifier behind issue #8's worst case:
+  float32 round-off between the CNN backends is at most 1.4e-6 px, but
+  the old fit turned it into a 2.5 % FWHM change on one LS Psc frame. With
+  the fit stable, the residual between the dashboard and the CLI should
+  collapse to the handful of rows per filter that sit on the SNR cut.
+- **PR #153, `CentroidPlaneError`.** A frame whose offset plane fits its
+  own CNN stars with rms above `CentroidConfig.max_plane_rms_pix` (1.0) is
+  skipped instead of photometered at poorly modelled positions. It is a
+  `FrameError` subclass, so `make_bandaid_processor`'s existing
+  `except FrameError` reports it as that frame's skip reason with no code
+  change here.
+- **PRs #151 and #152.** Quieter command-line warnings and `-v`/`-vv`
+  frame logging; CLI-only, nothing the dashboard calls.
+
+No signature this repo calls changed (`process_one_image`,
+`prepare_batch`, `write_starlist_set`, `check_frame_consistency`,
+`PhotometryConfig`), and `tests/test_bandaid_api.py` still finds every
+name `ballet_sgemm.py` imports. `pixi run test` passes (205). The
+provenance tag embedded in every starlist name picks the new SHA up from
+`build-info` automatically.
+
+Still owed: a rerun of the 155-frame LS Psc comparison at b7fb737 to
+confirm the 2.5 % outlier is gone, which decides issue #8. The numpy-2
+float32 centroid rounding found in the 2026-10-08 browser check is filed
+as bandaid #155 and is not in this pin.

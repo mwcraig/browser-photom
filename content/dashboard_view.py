@@ -6,8 +6,10 @@ destroys its front-end view -- which for the drop zone would run anywidget's
 cleanup and unregister the `msg:custom` listener the upload loop is waiting
 on, wedging the run mid-folder.
 
-Nothing here is exercised by `pixi run test`: the tested surface is
-`photom_dashboard`, and this module is the browser-only shell around it.
+`tests/test_dashboard_view.py` builds this view headlessly and drives it
+through the drop zone's comm handler, covering the tab-visibility notice and
+banner; the rest of the layout is checked by hand in a browser. Most of the
+logic lives in `photom_dashboard`, which has the bulk of the tests.
 """
 
 import html
@@ -21,12 +23,14 @@ from dropzone import DropZone, ZipDownload
 from photom_dashboard import (
     CHUNK_BYTES,
     LazyProcessor,
+    SLOWDOWN_FACTOR,
     PhotometryDashboard,
     make_bandaid_processor,
+    running_notice,
     validate_metadata,
 )
 
-INSTRUCTIONS = """
+INSTRUCTIONS = f"""
 <h2 style="margin-top:0">Seestar photometry</h2>
 <ol style="margin-top:0.5em;line-height:1.6">
   <li>Enter your <b>AAVSO observer code</b> and the <b>elevation</b> of your
@@ -38,7 +42,10 @@ INSTRUCTIONS = """
   <li>When the run finishes, download the starlists as a single zip.</li>
 </ol>
 <p style="line-height:1.6">
-  <b>Keep this tab selected</b> in its window to get the best performance.
+  <b>Keep this tab visible for the whole run.</b> Switching to another tab,
+  minimizing the window, or covering it completely with other windows slows
+  the run ~{SLOWDOWN_FACTOR}×. To do other things while it runs, drag this
+  tab into its own window and keep at least part of that window uncovered.
 </p>
 """
 
@@ -112,7 +119,29 @@ class DashboardView:
                                       layout=W.Layout(width="100%"))
         self.counts = W.HTML()
         self.log_view = W.HTML()
-        self.run_panel = W.VBox([self.progress, self.counts, self.log_view])
+        # Tab-visibility warnings (issue #9): a hidden tab slows the run
+        # ~SLOWDOWN_FACTOR x. The notice shows only while a run is going; the
+        # banner reports what happened while the tab was hidden and persists
+        # into the done/cancelled panel (the run usually finishes while the
+        # user is away) until dismissed or the next drop. Styled by
+        # .bp-tab-notice / .bp-tab-banner in dropzone.css.
+        self.tab_notice = W.HTML(
+            f'<div role="note">'
+            f"{_escape(running_notice(self.dashboard.slowdown_factor))}</div>"
+        )
+        self.tab_notice.add_class("bp-tab-notice")
+        self.hidden_text = W.HTML()
+        self.dismiss_hidden = W.Button(description="Dismiss")
+        self.dismiss_hidden.on_click(lambda _button: self.dashboard.dismiss_hidden_notice())
+        self.hidden_banner = W.HBox([self.hidden_text, self.dismiss_hidden])
+        self.hidden_banner.add_class("bp-tab-banner")
+        self.run_panel = W.VBox([
+            self.tab_notice,
+            self.hidden_banner,
+            self.progress,
+            self.counts,
+            self.log_view,
+        ])
 
         self.done_summary = W.HTML()
         self.done_panel = W.VBox([self.done_summary, self.zip_widget])
@@ -246,6 +275,12 @@ class DashboardView:
         )
         self._paint_log()
 
+        notice = self.dashboard.hidden_notice
+        self.hidden_text.value = (
+            "" if notice is None
+            else f'<div role="status">{_escape(notice)}</div>'
+        )
+
         # "cancelled" is also an ending: the front end sends it when a
         # protocol error unwinds its upload loop, and without offering the
         # download here the frames that *did* succeed would be stranded.
@@ -273,6 +308,8 @@ class DashboardView:
         _show(self.setup_panel, phase != "running")
         _show(self.run_panel, phase != "setup")
         _show(self.done_panel, finished)
+        _show(self.tab_notice, phase == "running")
+        _show(self.hidden_banner, notice is not None)
         # The drop zone is only ever hidden, never detached: detaching would
         # tear down the front end mid-upload.
         _show(self.drop_zone, phase != "running")

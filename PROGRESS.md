@@ -1192,3 +1192,57 @@ Still owed: a rerun of the 155-frame LS Psc comparison at b7fb737 to
 confirm the 2.5 % outlier is gone, which decides issue #8. The numpy-2
 float32 centroid rounding found in the 2026-10-08 browser check is filed
 as bandaid #155 and is not in this pin.
+
+# bandaid pin moved to d6ba44a; `make_bandaid_processor` on `process_frame` (2026-10-15)
+
+The dashboard's bandaid pin moves from b7fb737 (the PR #154 merge) to
+d6ba44a, the merge of bandaid PR #159, which lifts the per-frame body of
+`process_batch` into a public `process_frame(file, prep, *,
+user_specific_metadata, label, fail_fast) -> FrameResult` and makes the QA
+record builders public. `make_bandaid_processor` is rewritten on it:
+
+- One bandaid call per frame instead of three. `check_frame_consistency`
+  and `process_one_image` are no longer imported here; `process_frame`
+  runs them, threads `prep.gaia_g`/`prep.g_cut` itself, applies the
+  no-usable-stars check before returning, and hands back the tables, the
+  error and the frame's QA row (`FrameResult.qa`, keyed by
+  `QA_MANIFEST_COLUMNS`, plain Python values). `label=name` keeps the
+  dropped name in messages and the row. `astropy.io.fits` is gone from the
+  processor (bandaid loads the frame).
+- `fail_fast=False`: an unexpected error inside bandaid's step is an
+  `error` result with a QA row, returned as the skip string
+  `<Type>: <message>`, which is exactly what `FrameProcessor` printed when
+  the same exception propagated, so the dashboard's counters and reasons
+  are unchanged. A failed write that is not a `FrameError`, or a raising
+  hook, still propagates as before.
+- A `FrameError` raised by the writer after photometry
+  (`StarListValidationError`) is skipped with its row rebuilt by
+  `qa_record_skipped(name, exc, pointing_offset=result.pointing_offset)`,
+  as bandaid's own `process_batch` does.
+- New hook `on_qa(name, qa)`, called once per frame that reached the
+  per-frame step (ok, skipped, error, write-time skip) with the final row.
+  Nothing consumes it yet; it is the payload for the planned tester
+  feedback report (the sender maps `inf`/NaN to null itself; `g_cut` is
+  `inf` on sparse frames, `fwhm`/`solve_offset_deg` can be NaN). A batch
+  prep failure has no row (bandaid has none for it either).
+- `write_starlist_set` is looked up on the `bandaid` module at call time,
+  so the notebook's stage timer wrapping it works whether or not the cell
+  ran before the processor was built. The timer's
+  `check_frame_consistency` wrap still takes effect: `process_frame`
+  resolves it as a `bandaid.scripts` global.
+- Also in the pin: PR #156, an opt-in `photutils-dev` extra for native
+  installs; the browser build stays on released photutils.
+
+Checks: `pixi run test` 205 passed with the checkout at d6ba44a
+(`tests/test_bandaid_api.py` still finds every name `ballet_sgemm.py`
+imports). Native smoke run of the rewritten processor in the eloy env with
+`bandaid-src/src` (d6ba44a) on `PYTHONPATH`, five LS Psc frames: all five
+measured, `on_result` and `on_qa` fired with `status: ok` rows, a
+non-FITS file came back as the skip string `OSError: No SIMPLE card ...`
+with an `error: OSError` row. The five `.star` files against the native
+b7fb737 reference (`~/Downloads/ls_psc_reference_star_b7fb737/`): every
+row matched, max `fwhm` difference 1.6e-7 relative, max `x`/`y` 9.5e-7 px,
+max `tot_count` 4.8e-7 relative -- the SgemmBallet-versus-numpy round-off
+of issue #8, nothing from the refactor. Docs, README, `pixi.toml` and the
+watch notebook's comments updated. Still owed: a browser run at the new
+pin (the smoke run exercised the processor natively, not under Pyodide).

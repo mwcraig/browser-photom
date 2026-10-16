@@ -13,15 +13,16 @@ version = "0.1.0"
 fetch-astrowidgets = "(test -d astrowidgets-src || git clone https://github.com/astropy/astrowidgets astrowidgets-src) && git -C astrowidgets-src pull --ff-only"
 # Full clone (not shallow) so hatch-vcs sees tags. Pinned (detached HEAD) to the
 # bandaid commit the dashboard was validated against, so a redeploy cannot
-# silently pick up whatever bandaid main is at build time. b7fb737 is the
-# merge of bandaid PR #154 (stable FWHM fit, bandaid #150); it also carries
-# PR #153 (frames whose offset plane fits poorly are skipped with the new
-# `CentroidPlaneError`, a `FrameError` the dashboard already reports as a
-# skip reason) and PR #147's `process_one_image` signature, which requires
-# `input_gaia_g` and `g_cut`. Move the pin deliberately, together with the
-# call in `make_bandaid_processor` (the one place this repo calls bandaid;
-# the watch notebook goes through it too).
-fetch-bandaid = "(test -d bandaid-src || git clone https://github.com/mwcraig/bandaid bandaid-src) && git -C bandaid-src fetch && git -C bandaid-src checkout b7fb737"
+# silently pick up whatever bandaid main is at build time. d6ba44a is the
+# merge of bandaid PR #159, the public per-frame API: `process_frame(file,
+# prep, *, user_specific_metadata, label, fail_fast)` returns a `FrameResult`
+# (outcome, per-filter tables, error, QA record) and `qa_record_skipped`
+# rebuilds the record when the writer raises; `make_bandaid_processor` is
+# written against those, not `process_one_image`. It also carries PR #156
+# (an opt-in photutils-dev extra; not used here). Move the pin deliberately,
+# together with the call in `make_bandaid_processor` (the one place this
+# repo calls bandaid; the watch notebook goes through it too).
+fetch-bandaid = "(test -d bandaid-src || git clone https://github.com/mwcraig/bandaid bandaid-src) && git -C bandaid-src fetch && git -C bandaid-src checkout d6ba44a"
 # Pinned to the commit bandaid's pyproject pins (detached HEAD)
 fetch-eloy = "(test -d eloy-src || git clone https://github.com/mwcraig/eloy eloy-src) && git -C eloy-src fetch && git -C eloy-src checkout a056c91a945772e0520a89695f8fcd16fda36870"
 fetch-starlist-schema = "(test -d aavso-starlist-schema-src || git clone https://github.com/mwcraig/aavso-starlist-schema aavso-starlist-schema-src) && git -C aavso-starlist-schema-src pull --ff-only"

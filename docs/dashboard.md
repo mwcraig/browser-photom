@@ -14,10 +14,11 @@ JupyterLab, run every cell in order, drag a folder onto the file browser's
 keeps that developer/watch workflow, but is not untouched by this work: its
 heavy pieces now import the same modules the dashboard uses
 (`ballet_sgemm.py`, and `env_setup.py` for the environment knobs) instead of
-carrying inline copies that could drift, and its watch cell passes
-`prep.gaia_g` and `prep.g_cut` to `process_one_image` just as the dashboard
-does. It no longer imports `fast_centroid.py`, which has been deleted along
-with its validation cell: centroid selection now happens inside bandaid (§2).
+carrying inline copies that could drift, and its watch cell builds its
+processor from the dashboard's `make_bandaid_processor`, so the two front
+ends call bandaid through one function. It no longer imports
+`fast_centroid.py`, which has been deleted along with its validation cell:
+centroid selection now happens inside bandaid (§2).
 
 The dashboard (`content/photometry_dashboard.ipynb`, rendered through Voici) is a
 second, non-Jupyter front end for the same pipeline: instructions, a metadata form,
@@ -72,15 +73,29 @@ else lives in the modules above.
 lazily on the first dropped frame via `photom_dashboard.make_bandaid_processor`,
 so the page renders and the form is usable before
 the ~39 MB Ballet CNN weights download starts. `make_bandaid_processor` builds the
-real bandaid pipeline (`prepare_batch`, `process_one_image`,
-`write_starlist_set`) with bandaid's default `PhotometryConfig`; it is the one
-place this repo calls bandaid, since `watch_photometry.ipynb` builds its
-processor from it too (passing `on_prep` to fix its target star and restart
-its stage timer at the prep/frame boundary, `on_result` to receive each
-frame's tables, and its own pre-loaded `cnn`), so the pin in `pixi.toml` has
-one call to move with it. It threads
-`prep.gaia_g` and `prep.g_cut` into `process_one_image` exactly as the bandaid
-CLI does (bandaid raises `ValueError` without them). Centroid selection is
+real bandaid pipeline (`prepare_batch`, then bandaid's own per-frame step
+`process_frame`, then `write_starlist_set`) with bandaid's default
+`PhotometryConfig`; it is the one place this repo calls bandaid, since
+`watch_photometry.ipynb` builds its processor from it too (passing `on_prep`
+to fix its target star and restart its stage timer at the prep/frame
+boundary, `on_result` to receive each frame's tables, and its own pre-loaded
+`cnn`), so the pin in `pixi.toml` has one call to move with it. Since bandaid
+d6ba44a (PR #159) `process_frame` is the same function bandaid's
+`process_batch` loops over: it runs the consistency check, alignment,
+photometry and the no-usable-stars check, and returns a `FrameResult` whose
+`qa` is the frame's QA-manifest row (keyed by `QA_MANIFEST_COLUMNS`, plain
+Python values). The dashboard calls it with `fail_fast=False`, so an
+unexpected error inside bandaid becomes an `error` result with a QA record
+rather than an exception, and reports it with the same `Type: message` text
+`FrameProcessor` prints for a raised one. A `FrameError` the writer raises
+after photometry (`StarListValidationError`) is skipped like any other, with
+its row rebuilt by `qa_record_skipped` as `process_batch` does. The final
+row of every frame that reached the per-frame step goes to the `on_qa(name,
+qa)` hook; nothing consumes it yet (it is the payload the planned tester
+feedback report will send, after mapping non-finite floats to null). The
+threading of `prep.gaia_g` and `prep.g_cut` into `process_one_image` that
+the dashboard used to do itself now happens inside `process_frame`.
+Centroid selection is
 bandaid's measured-versus-modelled position policy
 (`CentroidConfig.model_faint_positions`, on by default since bandaid PR #147):
 the brightest ~30 catalog stars by Gaia G (the batch-fixed `g_cut`) and any
@@ -99,11 +114,13 @@ across the SNR cut (4–7 of 8k–15.5k on the 155-frame LS Psc subset, and a
 `fwhm` header difference in 143/155 frames; `docs/issue6-recheck-2026-10-07.md`).
 Swapping bandaid's numpy `Ballet` into the dashboard makes all 155 files
 byte-identical; whether to do that, or pin `SgemmBallet` to it, is issue #8.
-Those numbers are from bandaid 33bebf5. The pin has since moved to b7fb737,
-which carries bandaid PR #154: the FWHM fit that turned a 1e-6 px shift into a
-2.5 % `fwhm` change on one frame now runs to floating-point noise, so the
-residual at the current pin is expected to be only the rows on the SNR cut (a
-rerun is owed). The larger browser-versus-native position difference, about
+Those numbers are from bandaid 33bebf5. The pin then moved to b7fb737, which
+carries bandaid PR #154: the FWHM fit that turned a 1e-6 px shift into a
+2.5 % `fwhm` change on one frame now runs to floating-point noise, and the
+155-frame rerun at that pin confirmed it (the outlier is gone and `fwhm`
+agrees to 2e-5 relative; issue #8 was closed on that result). The pin is now
+d6ba44a (PR #159, the per-frame API above), which changes no photometry. The
+larger browser-versus-native position difference, about
 3e-5 px from float32 rounding under numpy 2, is bandaid #155 and is in no pin
 yet. This is the one place that difference is described; README, PROGRESS and
 the code comments point here. Everything in `photom_dashboard.py` above

@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mwcraig/browser-photom/feedback/report.schema.json",
+  "title": "browser-photom tester report chunk",
+  "description": "One POST from the dashboard's opt-in tester reporting. A run sends several chunks sharing report_id, numbered by seq; the last carries final=true. Strict on purpose: no field can carry a file, an image or markup, and every string is short and printable. The worker rejects anything that does not validate; the dashboard builds its chunks against this same file in its tests.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "report_id", "seq", "final", "build", "qa_schema",
+    "obscode", "site_lat", "site_lon", "comment", "run", "rows"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "report_id": {
+      "description": "Random per run (32 lowercase hex), generated in the browser.",
+      "type": "string", "pattern": "^[0-9a-f]{32}$"
+    },
+    "seq": { "type": "integer", "minimum": 0, "maximum": 999 },
+    "final": { "type": "boolean" },
+    "build": {
+      "description": "provenance_tag(): bandaid and browser-photom SHAs.",
+      "type": "string", "pattern": "^[A-Za-z0-9._+-]{1,120}$"
+    },
+    "qa_schema": {
+      "description": "bandaid FrameResult.schema_version the rows were built under.",
+      "type": "integer", "minimum": 0, "maximum": 1000
+    },
+    "user_agent": {
+      "type": "string", "maxLength": 300,
+      "pattern": "^[\\x20-\\x7e]*$"
+    },
+    "obscode": {
+      "description": "AAVSO observer code, uppercased.",
+      "type": "string", "pattern": "^[A-Z0-9]{1,10}$"
+    },
+    "site_lat": {
+      "description": "Resolved site latitude rounded to whole degrees.",
+      "type": ["integer", "null"], "minimum": -90, "maximum": 90
+    },
+    "site_lon": {
+      "description": "Resolved site longitude rounded to whole degrees.",
+      "type": ["integer", "null"], "minimum": -180, "maximum": 180
+    },
+    "comment": {
+      "description": "Tester's free text. Printable, no control characters except newline, no URLs.",
+      "type": "string", "maxLength": 2000,
+      "pattern": "^(?![\\s\\S]*(://|www\\.))[^\\x00-\\x09\\x0b-\\x1f\\x7f]*$"
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["n_total", "n_processed", "n_skipped"],
+      "properties": {
+        "n_total": { "type": "integer", "minimum": 0, "maximum": 100000 },
+        "n_processed": { "type": "integer", "minimum": 0, "maximum": 100000 },
+        "n_skipped": { "type": "integer", "minimum": 0, "maximum": 100000 },
+        "median_s": { "type": ["number", "null"], "minimum": 0, "maximum": 100000 },
+        "hidden_ms": { "type": ["integer", "null"], "minimum": 0, "maximum": 1000000000 },
+        "outcome": { "enum": ["running", "done", "cancelled", "page_closed", null] }
+      }
+    },
+    "rows": {
+      "type": "array", "maxItems": 50,
+      "items": { "$ref": "#/$defs/qa_row" }
+    }
+  },
+  "$defs": {
+    "num": { "type": ["number", "null"], "minimum": -1e12, "maximum": 1e12 },
+    "count": { "type": ["integer", "null"], "minimum": 0, "maximum": 10000000 },
+    "qa_row": {
+      "description": "bandaid's QA record (QA_MANIFEST_COLUMNS) plus the dashboard's skip text. Non-finite floats are sent as null.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "status"],
+      "properties": {
+        "file": {
+          "type": "string", "maxLength": 200,
+          "pattern": "^[^\\x00-\\x1f\\x7f/\\\\]*$"
+        },
+        "status": {
+          "type": "string",
+          "pattern": "^(ok|(skipped|error): [A-Za-z_][A-Za-z0-9_.]{0,79})$"
+        },
+        "reason": {
+          "type": ["string", "null"], "maxLength": 300,
+          "pattern": "^(?![\\s\\S]*(://|www\\.))[^\\x00-\\x1f\\x7f]*$"
+        },
+        "elapsed_s": { "$ref": "#/$defs/num" },
+        "n_detected": { "$ref": "#/$defs/count" },
+        "sky_median": { "$ref": "#/$defs/num" },
+        "fwhm": { "$ref": "#/$defs/num" },
+        "wcs_solved": { "type": ["boolean", "null"] },
+        "pointing_offset_deg": { "$ref": "#/$defs/num" },
+        "wcs_pixscale": { "$ref": "#/$defs/num" },
+        "solve_offset_deg": { "$ref": "#/$defs/num" },
+        "n_good_stars": { "$ref": "#/$defs/count" },
+        "n_snr20": { "$ref": "#/$defs/count" },
+        "dropped_filters": {
+          "type": ["string", "null"], "pattern": "^[A-Za-z0-9_;]{0,64}$"
+        },
+        "n_centroid_drift": { "$ref": "#/$defs/count" },
+        "n_drift_rejected": { "$ref": "#/$defs/count" },
+        "n_forced_measured": { "$ref": "#/$defs/count" },
+        "n_edge_dropped": { "$ref": "#/$defs/count" },
+        "g_cut": { "$ref": "#/$defs/num" },
+        "n_cnn_class": { "$ref": "#/$defs/count" },
+        "plane_fallback": { "type": ["boolean", "string", "null"], "maxLength": 40, "pattern": "^[A-Za-z0-9_ -]*$" },
+        "plane_n_used": { "$ref": "#/$defs/count" },
+        "plane_n_clipped": { "$ref": "#/$defs/count" },
+        "plane_rms": { "$ref": "#/$defs/num" },
+        "plane_dx_center": { "$ref": "#/$defs/num" },
+        "plane_dy_center": { "$ref": "#/$defs/num" },
+        "plane_dx_slope_x": { "$ref": "#/$defs/num" },
+        "plane_dx_slope_y": { "$ref": "#/$defs/num" },
+        "plane_dy_slope_x": { "$ref": "#/$defs/num" },
+        "plane_dy_slope_y": { "$ref": "#/$defs/num" }
+      }
+    }
+  }
+}

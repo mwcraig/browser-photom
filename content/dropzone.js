@@ -393,6 +393,280 @@ export function makeTabWatch() {
   };
 }
 
+// ---------------------------------------------------------------------
+// Opt-in tester reports (docs/dashboard.md §11, docs/feedback-deploy.md)
+//
+// The kernel builds the rows and the header (content/feedback_report.py)
+// and pushes them here as report_start / report_row / report_end, each
+// carrying the whole current header. This side owns the buffer and does
+// all the sending, because only the page can: the kernel is a web worker
+// (no sendBeacon), and a report has to outlive a crashed kernel or a
+// closed tab, which the kernel cannot see. Rows go out every
+// REPORT_ROWS_PER_CHUNK as a fetch(keepalive); the run's end sends a
+// `final` chunk; `pagehide` mid-run sends one with sendBeacon and outcome
+// "page_closed". Every failure is swallowed and counted: reporting must
+// never break or slow a run. DOM-free, with fetch/sendBeacon injected, so
+// node can test it.
+// ---------------------------------------------------------------------
+
+// Rows per POST. feedback_report.ROWS_PER_CHUNK is the Python copy (the
+// preview uses it); the schema allows 50.
+export const REPORT_ROWS_PER_CHUNK = 25;
+
+// Per-body byte cap: under the 64 KB that keepalive fetches and sendBeacon
+// may carry (and the worker accepts). A body over it is split by rows.
+export const REPORT_MAX_BYTES = 60_000;
+
+// The schema's seq maximum. A run long enough to reach it (~25,000 frames)
+// simply stops reporting rather than sending chunks the worker rejects.
+const REPORT_MAX_SEQ = 999;
+
+/**
+ * One POST body, assembled exactly as feedback_report.build_chunk does it:
+ * the header the kernel sent, then seq/final/rows, with run.outcome and
+ * run.hidden_ms overridden when given. The Python tests validate that
+ * shape against the schema; the JS tests pin that this matches it.
+ */
+export function buildReportChunk(header, rows, seq, final, outcome, hiddenMs) {
+  const run = { ...header.run };
+  if (outcome != null) run.outcome = outcome;
+  if (hiddenMs != null) run.hidden_ms = hiddenMs;
+  return { ...header, run, seq, final: Boolean(final), rows: [...rows] };
+}
+
+function byteLength(text) {
+  return new TextEncoder().encode(text).length;
+}
+
+/**
+ * Serialised bodies for `rows`, starting at sequence number `seq`, each at
+ * most `maxBytes`. Normally one body; a body over the cap is split in half
+ * by rows (recursively), every part but the last non-final. A single row
+ * that alone is over the cap is dropped (the schema's limits make one
+ * impossible in practice). Returns [{ seq, body }].
+ */
+export function reportBodies(header, rows, seq, final, outcome, hiddenMs, maxBytes = REPORT_MAX_BYTES) {
+  const out = [];
+  function emit(part, isFinal) {
+    const body = JSON.stringify(
+      buildReportChunk(header, part, seq + out.length, isFinal, isFinal ? outcome : null, hiddenMs)
+    );
+    if (byteLength(body) <= maxBytes) {
+      out.push({ seq: seq + out.length, body });
+      return;
+    }
+    if (part.length > 1) {
+      const mid = Math.ceil(part.length / 2);
+      emit(part.slice(0, mid), false);
+      emit(part.slice(mid), isFinal);
+      return;
+    }
+    if (part.length === 1) {
+      emit([], isFinal);
+    }
+    // An empty chunk over the cap: nothing smaller to send.
+  }
+  emit(rows, final);
+  return out;
+}
+
+/**
+ * Run-scoped report buffer and sender.
+ *
+ * - start(url, header, nowMs, hiddenNow): the kernel accepted a run it is
+ *   reporting. A previous report still open is finished as "cancelled".
+ * - row(row, header): buffer one row; send a chunk every rowsPerChunk.
+ * - end(outcome, header): send the final chunk ("done"/"cancelled").
+ * - pageClosed(nowMs): the page is going away mid-run; send the final chunk
+ *   by beacon with outcome "page_closed".
+ * - hide(nowMs) / show(nowMs): tab visibility, for run.hidden_ms.
+ * - counts(): { sent, failed } POSTs so far, over the reporter's lifetime.
+ *
+ * `fetchFn(url, init)` and `beaconFn(url, body)` are injected; `onStatus`
+ * gets the counts after every settled POST. Nothing here throws.
+ */
+export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPORT_ROWS_PER_CHUNK, maxBytes = REPORT_MAX_BYTES } = {}) {
+  let url = '';
+  let header = null;
+  let active = false;
+  let rows = [];
+  let seq = 0;
+  let hiddenTotal = 0;
+  let hiddenAt = null;
+  let sent = 0;
+  let failed = 0;
+
+  function status() {
+    try {
+      if (onStatus) onStatus({ sent, failed });
+    } catch (err) {
+      // A status line is not worth an exception.
+    }
+  }
+
+  function hiddenMs(nowMs) {
+    const open = hiddenAt === null ? 0 : Math.max(0, nowMs - hiddenAt);
+    const total = Math.round(hiddenTotal + open);
+    return total > 0 ? total : null;
+  }
+
+  function settle(ok) {
+    if (ok) sent += 1;
+    else failed += 1;
+    status();
+  }
+
+  function post(body) {
+    const init = { method: 'POST', body, keepalive: true, credentials: 'omit' };
+    const attempt = (opts) => Promise.resolve().then(() => fetchFn(url, opts));
+    // keepalive requests share one 64 KB in-flight quota per page, so two
+    // chunks in flight at once can make the second one reject; one retry
+    // without keepalive covers that (and a transient network blip).
+    attempt(init)
+      .catch(() => attempt({ ...init, keepalive: false }))
+      .then((resp) => settle(Boolean(resp && resp.ok)), () => settle(false));
+  }
+
+  function beacon(body) {
+    let ok = false;
+    try {
+      ok = Boolean(beaconFn && beaconFn(url, body));
+    } catch (err) {
+      ok = false;
+    }
+    settle(ok);
+  }
+
+  function flush(final, outcome, nowMs, viaBeacon) {
+    const batch = rows;
+    rows = [];
+    if (!url || !header || seq > REPORT_MAX_SEQ) return;
+    const bodies = reportBodies(header, batch, seq, final, outcome, hiddenMs(nowMs), maxBytes);
+    for (const { seq: s, body } of bodies) {
+      if (s > REPORT_MAX_SEQ) break;
+      if (viaBeacon) beacon(body);
+      else post(body);
+    }
+    seq += bodies.length;
+  }
+
+  function finish(outcome, nowMs, viaBeacon) {
+    if (!active) return;
+    active = false;
+    try {
+      flush(true, outcome, nowMs, viaBeacon);
+    } catch (err) {
+      // Swallowed: see the section comment.
+    }
+  }
+
+  return {
+    start(newUrl, newHeader, nowMs, hiddenNow) {
+      if (active) finish('cancelled', nowMs, false);
+      url = typeof newUrl === 'string' ? newUrl : '';
+      header = newHeader || null;
+      active = Boolean(url && header);
+      rows = [];
+      seq = 0;
+      hiddenTotal = 0;
+      hiddenAt = hiddenNow ? nowMs : null;
+    },
+    row(row, newHeader, nowMs) {
+      if (!active) return;
+      if (newHeader) header = newHeader;
+      rows.push(row);
+      if (rows.length >= rowsPerChunk) {
+        try {
+          flush(false, null, nowMs, false);
+        } catch (err) {
+          // Swallowed.
+        }
+      }
+    },
+    end(outcome, newHeader, nowMs) {
+      if (newHeader && active) header = newHeader;
+      finish(outcome === 'cancelled' ? 'cancelled' : 'done', nowMs, false);
+    },
+    pageClosed(nowMs) {
+      finish('page_closed', nowMs, true);
+    },
+    hide(nowMs) {
+      if (active && hiddenAt === null) hiddenAt = nowMs;
+    },
+    show(nowMs) {
+      if (hiddenAt === null) return;
+      hiddenTotal += Math.max(0, nowMs - hiddenAt);
+      hiddenAt = null;
+    },
+    isActive() {
+      return active;
+    },
+    counts() {
+      return { sent, failed };
+    },
+  };
+}
+
+/**
+ * Route one kernel message to the reporter. Returns true when it was a
+ * report message (handled or deliberately ignored), false otherwise.
+ */
+export function handleReportMessage(reporter, url, msg, nowMs, hiddenNow) {
+  if (!msg || typeof msg.type !== 'string' || !msg.type.startsWith('report_')) return false;
+  if (msg.type === 'report_start') reporter.start(url, msg.header, nowMs, hiddenNow);
+  else if (msg.type === 'report_row') reporter.row(msg.row, msg.header, nowMs);
+  else if (msg.type === 'report_end') reporter.end(msg.outcome, msg.header, nowMs);
+  return true;
+}
+
+// One reporter per drop-zone *model*, not per view: anywidget calls
+// initialize() once per model, and a model rendered twice must not send
+// every row twice. The view's upload loop lets report_* messages fall
+// through (no waiter predicate matches them), and the report_status
+// messages sent back only feed the view's status line.
+function initializeDropZone({ model }) {
+  const ac = new AbortController();
+  const listen = { signal: ac.signal };
+  const reporter = makeReporter({
+    fetchFn: (url, init) => globalThis.fetch(url, init),
+    beaconFn: (url, body) => navigator.sendBeacon(url, body),
+    onStatus: ({ sent, failed }) => {
+      try {
+        model.send({ type: 'report_status', sent, failed });
+      } catch (err) {
+        // The comm is gone (a crashed kernel); the page still reported.
+      }
+    },
+  });
+  function onMessage(msg) {
+    try {
+      handleReportMessage(
+        reporter,
+        model.get('feedback_url') || '',
+        msg,
+        Date.now(),
+        document.visibilityState === 'hidden'
+      );
+    } catch (err) {
+      // Never let reporting disturb the comm.
+    }
+  }
+  model.on('msg:custom', onMessage);
+  window.addEventListener('pagehide', () => reporter.pageClosed(Date.now()), listen);
+  document.addEventListener(
+    'visibilitychange',
+    () => {
+      if (document.visibilityState === 'hidden') reporter.hide(Date.now());
+      else reporter.show(Date.now());
+    },
+    listen
+  );
+  return () => {
+    ac.abort();
+    model.off('msg:custom', onMessage);
+  };
+}
+
 /**
  * Drop-zone widget: drag a folder of FITS frames in, stream them to the
  * kernel over the comm in chunk_bytes-sized pieces.
@@ -1289,4 +1563,9 @@ function render({ model, el, signal }) {
     : renderDropZone({ model, el, signal });
 }
 
-export default { render };
+function initialize({ model }) {
+  if (model.get('_role') === 'zip') return undefined;
+  return initializeDropZone({ model });
+}
+
+export default { initialize, render };

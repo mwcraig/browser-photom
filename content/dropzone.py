@@ -43,6 +43,12 @@ class DropZone(anywidget.AnyWidget):
     # JS and the Python notice/banner quote one number.
     slowdown_factor = traitlets.Int(SLOWDOWN_FACTOR).tag(sync=True)
     hint = traitlets.Unicode("Drag a folder of FITS images here").tag(sync=True)
+    # Where the page POSTs opt-in tester reports (`makeReporter` in
+    # dropzone.js); "" = reporting disabled in this build. Set by the view
+    # from `photom_dashboard.feedback_url()`. The page owns the sending --
+    # the kernel is a web worker, with no sendBeacon and no way to report
+    # its own death -- so the URL has to live on this side of the comm.
+    feedback_url = traitlets.Unicode("").tag(sync=True)
 
 
 class ZipDownload(anywidget.AnyWidget):

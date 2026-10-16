@@ -1246,3 +1246,49 @@ max `tot_count` 4.8e-7 relative -- the SgemmBallet-versus-numpy round-off
 of issue #8, nothing from the refactor. Docs, README, `pixi.toml` and the
 watch notebook's comments updated. Still owed: a browser run at the new
 pin (the smoke run exercised the processor natively, not under Pyodide).
+
+# Opt-in tester reports (2026-10-16)
+
+Testers recruited at the November talk can opt in to sending diagnostic
+reports from their dashboard runs. Design: `docs/dashboard.md` §11;
+standing up the backend: `docs/feedback-deploy.md`.
+
+- Contract: `feedback/report.schema.json`. It is strict on purpose: no blob
+  fields, short printable strings only, no URLs in free text, and a 64 KB
+  body cap. The dashboard tests build chunks against it, and the worker
+  imports the same file.
+- Kernel (`content/feedback_report.py`, `dashboard_view.py`): an opt-in
+  checkbox (off by default) with consent text naming the observer code and
+  the 1-degree position. A comment box: a comment with a link is blanked
+  with a warning, and the rows are still sent. "Preview report" shows the
+  exact JSON. Rows are bandaid's own QA record via `on_qa`, cleaned (NaN/inf
+  to null, whitelist, caps). The site position comes from the resolved
+  frame metadata, falling back to the form.
+- Page (`dropzone.js`): owns the buffer and does all the sending. A
+  keepalive POST goes every 25 rows, a final chunk at done or cancel, and a
+  `sendBeacon` on `pagehide` mid-run. A crashed kernel still reports.
+  Reporting failures never touch the run.
+- `feedback-worker/`: a Cloudflare Worker. It validates with
+  `@cfworker/json-schema`, rate-limits each IP to 20/min, accepts only the
+  Pages origin, and stores `{received_at, country, report}` in R2. The IP
+  is never stored. A 30-day lifecycle rule handles expiry.
+- `scripts/pull_feedback.py`: local review. It mirrors R2, merges each
+  report's chunks into JSON + CSV, and re-validates. It never posts
+  anything.
+- The endpoint is a build-time setting: `BROWSER_PHOTOM_FEEDBACK_URL`, set
+  from the `FEEDBACK_URL` repository variable in `pages.yml`. Empty means
+  reporting is off.
+
+Checks: 307 pytest, 79 node, 44 worker (vitest). Python- and JS-built
+chunks from hostile input all validated with the worker's own validator,
+including size-split bodies. The worker is deployed at
+`browser-photom-feedback.mwcraig2.workers.dev`. The curl smoke tests gave
+204 / 400 for a link / 403 for a foreign origin / 405 for GET. Browser end
+to end: a local `build-dash` run of the 155-frame LS Psc set landed 7
+chunks (6 x 25 rows plus a final 5, outcome `done`), all schema-valid,
+with 155 `ok` rows and no gaps.
+
+Still owed: set the `FEEDBACK_URL` repository variable after merge.
+Untested: the `pagehide` beacon path in a real browser. Bump Wrangler past
+4.148 (npm audit, dev-only) once 4.149.0 is two weeks old (after
+2026-10-22).

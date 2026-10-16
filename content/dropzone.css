@@ -240,3 +240,15 @@
   border-color: var(--jp-border-color2, #ddd);
   cursor: not-allowed;
 }
+
+/* The opt-in tester-report box at the foot of the setup form
+   (DashboardView._build_report_form). Set apart from the metadata fields
+   above it, since it is optional and about something else. Like .bp-done,
+   it reaches a plain ipywidgets VBox because this stylesheet is injected
+   document-wide. */
+.bp-report {
+  margin-top: 1em;
+  padding-top: 0.75em;
+  border-top: 1px solid var(--jp-border-color2, #ddd);
+  gap: 0.4em;
+}

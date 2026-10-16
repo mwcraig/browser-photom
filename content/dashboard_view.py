@@ -8,8 +8,10 @@ on, wedging the run mid-folder.
 
 `tests/test_dashboard_view.py` builds this view headlessly and drives it
 through the drop zone's comm handler, covering the tab-visibility notice and
-banner; the rest of the layout is checked by hand in a browser. Most of the
-logic lives in `photom_dashboard`, which has the bulk of the tests.
+banner; `tests/test_feedback_view.py` does the same for the tester-report
+form and messages. The rest of the layout is checked by hand in a browser.
+Most of the logic lives in `photom_dashboard` and `feedback_report`, which
+have the bulk of the tests.
 """
 
 import html
@@ -20,11 +22,23 @@ import ipywidgets as W
 from IPython.display import display
 
 from dropzone import DropZone, ZipDownload
+from feedback_report import (
+    ROWS_PER_CHUNK,
+    build_chunk,
+    build_header,
+    chunk_json,
+    clean_comment,
+    clean_row,
+    endpoint_url,
+    new_report_id,
+    obscode_problem,
+)
 from photom_dashboard import (
     CHUNK_BYTES,
     LazyProcessor,
     SLOWDOWN_FACTOR,
     PhotometryDashboard,
+    feedback_url,
     make_bandaid_processor,
     running_notice,
     validate_metadata,
@@ -51,6 +65,30 @@ INSTRUCTIONS = f"""
 
 LOG_LINES = 12
 
+# The opt-in's consent text. The spec's fixed decision: say plainly that the
+# obscode and the site rounded to 1 degree go in every report, with the
+# per-frame numbers and file names, and how long they are kept. No per-field
+# toggles; "Preview report" shows the exact JSON instead.
+REPORT_CONSENT = """
+<div style="font-size:0.9em;line-height:1.5;max-width:46em">
+  Ticking this sends a report of each run to the browser-photom developer
+  while you are testing the dashboard. Every report includes your
+  <b>AAVSO observer code</b>, your <b>site position rounded to the nearest
+  whole degree</b>, the <b>names of your image files</b>, and
+  <b>per-frame diagnostic numbers</b> (star counts, FWHM, sky level,
+  plate-solve results, why a frame was skipped, how long each took), plus
+  your comment below. No images, starlists or FITS headers are sent.
+  Reports are deleted after <b>30 days</b>. Your run works the same either
+  way. Use <i>Preview report</i> to see exactly what would be sent.
+</div>
+"""
+
+REPORT_UNAVAILABLE = (
+    '<div style="font-size:0.9em;color:var(--jp-ui-font-color2,#666)">'
+    "Diagnostic reporting isn&rsquo;t set up in this build of the dashboard, "
+    "so nothing is sent.</div>"
+)
+
 
 class DashboardView:
     def __init__(
@@ -60,11 +98,37 @@ class DashboardView:
         results_dir="results",
         tmpdir="/tmp",
         chunk_bytes=CHUNK_BYTES,
+        report_url=None,
     ):
         self.results_dir = results_dir
         self._meta = {}
         self._log = deque(maxlen=LOG_LINES)
         self._seen_skips = 0
+        # Tester reports (feedback_report). `report_url` overrides the
+        # build's endpoint, for tests; "" disables reporting.
+        self._report_url = (
+            feedback_url() if report_url is None else endpoint_url(report_url)
+        )
+        # The current run's report id while it is being reported, else None;
+        # and the id of the most recent reported run, kept after it ends so
+        # the preview of a finished run shows the id it was sent under.
+        self._report_id = None
+        self._run_report_id = None
+        # The id the *next* reported run will use, drawn early so that a
+        # preview shown before the run carries the id it will really have.
+        self._next_report_id = None
+        # Rows of the current (or last) run, reported or not: the preview
+        # shows the first chunk's worth.
+        self._report_rows = []
+        # QA records from bandaid's on_qa hook, waiting for the frame's
+        # outcome (on_frame) to be merged into a row.
+        self._pending_qa = {}
+        # FrameResult.schema_version of the last record seen; 0 = none yet.
+        self._qa_schema = 0
+        # Site position bandaid resolved for this run (header SITELAT/
+        # SITELONG, overridden by the form), from on_result.
+        self._resolved_site = (None, None)
+        self._report_error_logged = False
         # LazyProcessor defers `make_bandaid_processor` to the first dropped
         # frame -- it downloads 39 MB of CNN weights, and the form has to be
         # usable before that happens -- and latches a setup failure so a run
@@ -86,7 +150,14 @@ class DashboardView:
             chunk_bytes=chunk_bytes,
             on_change=self._on_change,
             on_manifest=self._on_new_run,
+            on_frame=self._report_frame,
+            on_end=self._report_end,
         ).attach()
+        self.drop_zone.feedback_url = self._report_url
+        # A second listener on the drop zone's comm, beside the dashboard's
+        # own: the page's report_status messages are the view's business
+        # (the dashboard ignores message types it has no handler for).
+        self.drop_zone.on_msg(self._on_drop_zone_msg)
 
         self._build()
         self._validate()
@@ -109,10 +180,12 @@ class DashboardView:
             field.observe(lambda _change: self._validate(), names="value")
 
         self.errors = W.HTML()
+        self._build_report_form()
         self.setup_panel = W.VBox([
             W.HTML(INSTRUCTIONS),
             W.VBox([self.observer, self.elevation, self.latitude, self.longitude]),
             self.errors,
+            self.report_box,
         ])
 
         self.progress = W.IntProgress(min=0, max=1, value=0, bar_style="info",
@@ -135,11 +208,15 @@ class DashboardView:
         self.dismiss_hidden.on_click(lambda _button: self.dashboard.dismiss_hidden_notice())
         self.hidden_banner = W.HBox([self.hidden_text, self.dismiss_hidden])
         self.hidden_banner.add_class("bp-tab-banner")
+        # "3 reports sent" / a failure note, from the page's report_status
+        # messages. In the run panel, which is shown during and after a run.
+        self.report_status = W.HTML()
         self.run_panel = W.VBox([
             self.tab_notice,
             self.hidden_banner,
             self.progress,
             self.counts,
+            self.report_status,
             self.log_view,
         ])
 
@@ -159,6 +236,45 @@ class DashboardView:
             self.done_panel,
             self.drop_zone,
         ])
+
+    def _build_report_form(self):
+        self.report_opt_in = W.Checkbox(
+            value=False,
+            description="Send diagnostic reports to the browser-photom developer",
+            indent=False,
+            layout=W.Layout(width="auto"),
+        )
+        self.report_consent = W.HTML(REPORT_CONSENT)
+        self.report_comment = W.Textarea(
+            placeholder="Optional comment for the developer (plain text, no links)",
+            layout=W.Layout(width="380px", height="5em"),
+        )
+        # Why reporting is off although ticked (an obscode the schema will
+        # not take), or why the comment will be left out.
+        self.report_notes = W.HTML()
+        self.report_preview_button = W.Button(description="Preview report")
+        self.report_preview_button.on_click(lambda _button: self._toggle_preview())
+        self.report_preview = W.HTML()
+        self._preview_open = False
+        self.report_opt_in.observe(lambda _c: self._refresh_report_form(), names="value")
+        self.report_comment.observe(lambda _c: self._refresh_report_form(), names="value")
+        self.report_box = W.VBox([
+            self.report_opt_in,
+            self.report_consent,
+            self.report_comment,
+            self.report_notes,
+            self.report_preview_button,
+            self.report_preview,
+        ])
+        self.report_box.add_class("bp-report")
+        if not self._report_url:
+            # No endpoint in this build: the box stays, greyed, so a tester
+            # who was told to tick it can see why they cannot.
+            self.report_opt_in.disabled = True
+            self.report_consent.value = REPORT_UNAVAILABLE
+            for widget in (self.report_comment, self.report_notes,
+                           self.report_preview_button, self.report_preview):
+                _show(widget, False)
 
     def display(self):
         display(self.box)
@@ -192,6 +308,211 @@ class DashboardView:
             )
         else:
             self.errors.value = ""
+        # The observer code is also the report's obscode.
+        if hasattr(self, "report_box"):
+            self._refresh_report_form()
+
+    # -- tester reports: form ----------------------------------------------
+    #
+    # Opt-in, comment and obscode are all read live, like `_meta`: whether a
+    # run is reported is decided when its manifest is accepted, and every
+    # report message carries the comment as it stands when it is sent.
+
+    def _report_obscode_problem(self):
+        return obscode_problem(self._meta.get("observer"))
+
+    def _reporting_wanted(self):
+        return bool(self._report_url) and self.report_opt_in.value
+
+    def _refresh_report_form(self):
+        if not self._report_url:
+            return
+        notes = []
+        problem = self._report_obscode_problem()
+        if self.report_opt_in.value and problem and self.observer.value.strip():
+            notes.append(problem + " Nothing will be sent until it is fixed.")
+        _comment, comment_problem = clean_comment(self.report_comment.value)
+        if comment_problem:
+            notes.append(comment_problem)
+        self.report_notes.value = "".join(
+            f'<div style="color:var(--jp-warn-color1,#b26a00);font-size:0.9em">'
+            f"{_escape(n)}</div>"
+            for n in notes
+        )
+        if self._preview_open:
+            self._paint_preview()
+
+    def _toggle_preview(self):
+        self._preview_open = not self._preview_open
+        self.report_preview_button.description = (
+            "Hide preview" if self._preview_open else "Preview report"
+        )
+        self._paint_preview()
+
+    def preview_chunk(self):
+        """The first chunk of this run's report, exactly as the page would
+        POST it (bar ``run.hidden_ms``, which only the page knows), or None
+        when no report could be built (no or invalid observer code).
+
+        Before any run: the next run's header, no rows. During or after a
+        run: that run's first ``ROWS_PER_CHUNK`` rows with the current
+        header -- final, with the run's outcome, when that is how the run's
+        first chunk goes out (a run of at most that many frames, finished).
+        """
+        if self._report_obscode_problem() is not None:
+            return None
+        report_id = self._run_report_id or self._last_report_id()
+        header = self._report_header(report_id)
+        rows = self._report_rows[:ROWS_PER_CHUNK]
+        phase = self.dashboard.phase
+        final = phase in ("done", "cancelled") and len(self._report_rows) <= ROWS_PER_CHUNK
+        return build_chunk(header, rows, seq=0, final=final,
+                           outcome=phase if final else None)
+
+    def _last_report_id(self):
+        if self._next_report_id is None:
+            self._next_report_id = new_report_id()
+        return self._next_report_id
+
+    def _paint_preview(self):
+        if not self._preview_open:
+            self.report_preview.value = ""
+            return
+        try:
+            chunk = self.preview_chunk()
+        except Exception as exc:  # noqa: BLE001 - a preview must not break the form
+            self.report_preview.value = f"<i>No preview: {_escape(exc)}</i>"
+            return
+        if chunk is None:
+            self.report_preview.value = (
+                "<i>Fill in a valid observer code to see the report.</i>"
+            )
+            return
+        caption = (
+            "The first report of the next run, before any frame has run:"
+            if not chunk["rows"]
+            else "The first report of this run:"
+        )
+        self.report_preview.value = (
+            f'<div style="font-size:0.9em;margin-top:0.5em">{caption}</div>'
+            '<pre style="font-size:0.8em;max-height:24em;overflow:auto;'
+            'padding:0.5em;background:var(--jp-layout-color2,#f5f5f5);'
+            f'border-radius:4px;white-space:pre-wrap">{_escape(chunk_json(chunk, indent=2))}</pre>'
+        )
+
+    # -- tester reports: messages ------------------------------------------
+    #
+    # Everything below runs inside the dashboard's message handler, so every
+    # entry point goes through `_report_guard`: a reporting bug is logged
+    # once and turns reporting off for the rest of the run, and never
+    # reaches the frame it happened during.
+
+    def _report_guard(self, fn, *args):
+        try:
+            fn(*args)
+        except Exception as exc:  # noqa: BLE001 - reporting must never break a run
+            self._report_id = None
+            if not self._report_error_logged:
+                self._report_error_logged = True
+                self.log(f"Tester report stopped ({type(exc).__name__}: {exc}); "
+                         "the run is unaffected.")
+
+    def _report_header(self, report_id):
+        state = self.dashboard.state
+        lat, lon = self._resolved_site
+        return build_header(
+            report_id=report_id,
+            obscode=self._meta.get("observer", ""),
+            # The site bandaid resolved (header, overridden by the form);
+            # before the first measured frame, the form's own fields.
+            site_lat=lat if lat is not None else self._meta.get("site_lat"),
+            site_lon=lon if lon is not None else self._meta.get("site_lon"),
+            build=self.dashboard.provenance,
+            qa_schema=self._qa_schema,
+            comment=self.report_comment.value,
+            n_total=state.total,
+            n_processed=state.processed,
+            n_skipped=state.skipped,
+            median_s=state.median_seconds,
+        )
+
+    def _report_send(self, content):
+        self.drop_zone.send(content)
+
+    def _report_start(self):
+        self._report_id = None
+        self._run_report_id = None
+        self._report_rows = []
+        self._pending_qa = {}
+        self._resolved_site = (None, None)
+        if not self._reporting_wanted() or self._report_obscode_problem() is not None:
+            return
+        report_id = self._last_report_id()
+        self._next_report_id = None
+        header = self._report_header(report_id)
+        self._report_send({"type": "report_start", "header": header})
+        self._report_id = self._run_report_id = report_id
+        self.report_status.value = ""
+
+    def _report_frame(self, _dashboard, name, ok, reason, elapsed):
+        self._report_guard(self._report_frame_unguarded, name, ok, reason, elapsed)
+
+    def _report_frame_unguarded(self, name, ok, reason, elapsed):
+        qa = self._pending_qa.pop(name, None)
+        row = clean_row(qa, name=name, reason=None if ok else reason, elapsed_s=elapsed)
+        self._report_rows.append(row)
+        if self._report_id is not None:
+            self._report_send({
+                "type": "report_row",
+                "row": row,
+                "header": self._report_header(self._report_id),
+            })
+
+    def _report_end(self, _dashboard, outcome):
+        self._report_guard(self._report_end_unguarded, outcome)
+
+    def _report_end_unguarded(self, outcome):
+        if self._report_id is None:
+            return
+        header = self._report_header(self._report_id)
+        self._report_id = None
+        self._report_send({"type": "report_end", "outcome": outcome, "header": header})
+
+    def _on_qa(self, name, qa, schema_version=0):
+        # bandaid's hook: must not raise (a raise would count the frame as
+        # failed after its starlist is already on disk).
+        try:
+            self._pending_qa[name] = qa
+            if isinstance(schema_version, int):
+                self._qa_schema = schema_version
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_result(self, _name, by_filter, _prep):
+        # The site bandaid resolved for the frame, from its tables' meta.
+        # Read every frame (cheap) rather than once, so a run whose first
+        # frame lacked SITELAT still picks the position up later.
+        try:
+            for table in by_filter.values():
+                full = (table.meta or {}).get("full_image_meta") or {}
+                lat, lon = full.get("site_lat"), full.get("site_lon")
+                if lat is not None or lon is not None:
+                    self._resolved_site = (lat, lon)
+                    return
+        except Exception:  # noqa: BLE001 - see _on_qa
+            pass
+
+    def _on_drop_zone_msg(self, _widget, content, _buffers):
+        try:
+            if not isinstance(content, dict) or content.get("type") != "report_status":
+                return
+            sent, failed = content.get("sent"), content.get("failed")
+            if not all(isinstance(n, int) and not isinstance(n, bool) and n >= 0
+                       for n in (sent, failed)):
+                return
+            self.report_status.value = _escape(report_status_text(sent, failed))
+        except Exception:  # noqa: BLE001 - a status line is not worth a raise
+            pass
 
     # -- photometry --------------------------------------------------------
 
@@ -211,6 +532,7 @@ class DashboardView:
         # swallowing the new run's first skip lines.
         self._seen_skips = 0
         self._processor.reset()
+        self._report_guard(self._report_start)
 
     def _build_processor(self):
         # LazyProcessor's factory: called at most once, on the first dropped
@@ -225,6 +547,8 @@ class DashboardView:
                 self._meta,
                 lambda: self.dashboard.current_run_dir,
                 log=self.log,
+                on_qa=self._on_qa,
+                on_result=self._on_result,
             )
         except Exception as exc:  # noqa: BLE001 - any setup failure latches
             self.log(f"Pipeline setup failed: {type(exc).__name__}: {exc}")
@@ -313,6 +637,19 @@ class DashboardView:
         # The drop zone is only ever hidden, never detached: detaching would
         # tear down the front end mid-upload.
         _show(self.drop_zone, phase != "running")
+
+
+def report_status_text(sent, failed):
+    """The run panel's one-line report status."""
+    parts = []
+    if sent:
+        parts.append(f"{sent} report{'' if sent == 1 else 's'} sent")
+    if failed:
+        parts.append(
+            f"{failed} report{'' if failed == 1 else 's'} failed to send — "
+            "your run is unaffected"
+        )
+    return ("Diagnostic reports: " + "; ".join(parts) + ".") if parts else ""
 
 
 def _show(widget, visible):

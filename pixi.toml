@@ -55,6 +55,8 @@ jupyterlite-xeus = ">=5"
 # the widget if that build differs from the one the kernel imports.
 anywidget = "==0.11.0"
 pytest = "*"
+# tests/test_feedback_*.py validate report chunks against feedback/report.schema.json
+jsonschema = "*"
 nodejs = "*"
 
 # Voici lives in its own environment on purpose: voici 0.10 -> voici-core pins

@@ -477,8 +477,10 @@ export function reportBodies(header, rows, seq, final, outcome, hiddenMs, maxByt
  *   reporting. A previous report still open is finished as "cancelled".
  * - row(row, header): buffer one row; send a chunk every rowsPerChunk.
  * - end(outcome, header): send the final chunk ("done"/"cancelled").
- * - pageClosed(nowMs): the page is going away mid-run; send the final chunk
- *   by beacon with outcome "page_closed".
+ * - pageClosed(nowMs, persisted): the page is going away mid-run; send the
+ *   final chunk by beacon with outcome "page_closed". With `persisted` (the
+ *   page is entering the back/forward cache, not closing) beacon the
+ *   buffered rows as a non-final chunk and stay open.
  * - hide(nowMs) / show(nowMs): tab visibility, for run.hidden_ms.
  * - counts(): { sent, failed } POSTs so far, over the reporter's lifetime.
  *
@@ -570,6 +572,12 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
       seq = 0;
       hiddenTotal = 0;
       hiddenAt = hiddenNow ? nowMs : null;
+      // The status line reads "N reports sent" for *this* run (the view
+      // clears it at each start), so the counts start over too. A POST of
+      // the previous run still in flight lands in the new run's count; it
+      // is one chunk, and a line, not accounting.
+      sent = 0;
+      failed = 0;
     },
     row(row, newHeader, nowMs) {
       if (!active) return;
@@ -587,7 +595,21 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
       if (newHeader && active) header = newHeader;
       finish(outcome === 'cancelled' ? 'cancelled' : 'done', nowMs, false);
     },
-    pageClosed(nowMs) {
+    pageClosed(nowMs, persisted) {
+      // pagehide with `persisted` is the page going into the back/forward
+      // cache, from which it may come back with the run still going: beacon
+      // what is buffered as an ordinary chunk and keep the report open. If
+      // the page is evicted instead, the report simply has no final chunk,
+      // which the pull script flags as "no-final".
+      if (persisted) {
+        if (!active) return;
+        try {
+          flush(false, null, nowMs, true);
+        } catch (err) {
+          // Swallowed: see the section comment.
+        }
+        return;
+      }
       finish('page_closed', nowMs, true);
     },
     hide(nowMs) {
@@ -652,7 +674,7 @@ function initializeDropZone({ model }) {
     }
   }
   model.on('msg:custom', onMessage);
-  window.addEventListener('pagehide', () => reporter.pageClosed(Date.now()), listen);
+  window.addEventListener('pagehide', (ev) => reporter.pageClosed(Date.now(), ev.persisted), listen);
   document.addEventListener(
     'visibilitychange',
     () => {

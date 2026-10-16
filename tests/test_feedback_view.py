@@ -348,3 +348,85 @@ def test_report_status_text():
     assert report_status_text(0, 2) == (
         "Diagnostic reports: 2 reports failed to send — your run is unaffected."
     )
+
+
+# -- review fixes (PR #16) ---------------------------------------------------
+
+
+def test_the_preview_of_an_exactly_full_first_chunk_is_not_final(view):
+    # The page flushes at ROWS_PER_CHUNK rows non-final, then sends an empty
+    # final chunk; the preview says the same.
+    from feedback_report import ROWS_PER_CHUNK
+    fill(view)
+    view.report_opt_in.value = True
+    names = [f"f{i}.fit" for i in range(ROWS_PER_CHUNK)]
+    manifest(view, *names)
+    for name in names:
+        upload(view, name)
+    assert view.dashboard.phase == "done"
+    chunk = assert_valid(view.preview_chunk())
+    assert len(chunk["rows"]) == ROWS_PER_CHUNK
+    assert chunk["final"] is False and chunk["run"]["outcome"] == "running"
+
+
+def test_run_scoped_report_state_starts_over_each_run(view):
+    fill(view)
+    view.report_opt_in.value = True
+    manifest(view, "a.fit")
+    view._on_qa("a.fit", {"status": "ok"}, 3)
+    upload(view, "a.fit")
+    assert reports(view)[-1]["header"]["qa_schema"] == 3
+    view._report_error_logged = True          # as if run 1's reporting had failed
+    view.sent.clear()
+    manifest(view, "b.fit")                   # run 2: no frame reaches bandaid
+    upload(view, "b.fit")
+    assert reports(view)[0]["header"]["qa_schema"] == 0
+    assert view._report_error_logged is False
+
+
+def test_an_open_preview_is_repainted_when_the_run_finishes(view):
+    fill(view)
+    view.report_opt_in.value = True
+    view._toggle_preview()
+    assert "before any frame has run" in view.report_preview.value
+    manifest(view, "a.fit")
+    upload(view, "a.fit")
+    assert view.dashboard.phase == "done"
+    assert "The first report of this run" in view.report_preview.value
+    assert "a.fit" in view.report_preview.value and '"outcome": "done"' in view.report_preview.value
+
+
+def test_an_open_preview_is_repainted_after_an_unreported_run_too(view):
+    fill(view)
+    view._toggle_preview()
+    manifest(view, "a.fit")
+    upload(view, "a.fit")
+    assert reports(view) == []
+    assert "a.fit" in view.report_preview.value
+
+
+def test_a_mid_run_reporting_failure_closes_the_pages_report(view):
+    fill(view)
+    view.report_opt_in.value = True
+    real_send = view.drop_zone.send
+
+    def send(content, buffers=None):
+        if content["type"] == "report_row":
+            raise RuntimeError("comm closed")
+        real_send(content, buffers)
+
+    view.drop_zone.send = send
+    manifest(view, "a.fit", "b.fit")
+    upload(view, "a.fit")
+    upload(view, "b.fit")
+    assert view.dashboard.phase == "done"
+    kinds = [(c["type"], c.get("outcome")) for c in reports(view)]
+    # start, then the end the guard sent when the first row failed; nothing after.
+    assert kinds == [("report_start", None), ("report_end", "cancelled")]
+    assert "header" not in reports(view)[-1]
+
+
+def test_the_consent_text_names_the_country_and_the_server_side_30_days(view):
+    text = view.report_consent.value
+    assert "country" in text and "IP address" in text
+    assert "30 days" in text and "copies downloaded" in text

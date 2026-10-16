@@ -1269,7 +1269,7 @@ standing up the backend: `docs/feedback-deploy.md`.
   `sendBeacon` on `pagehide` mid-run. A crashed kernel still reports.
   Reporting failures never touch the run.
 - `feedback-worker/`: a Cloudflare Worker. It validates with
-  `@cfworker/json-schema`, rate-limits each IP to 20/min, accepts only the
+  `@cfworker/json-schema`, rate-limits each IP to 60/min, accepts only the
   Pages origin, and stores `{received_at, country, report}` in R2. The IP
   is never stored. A 30-day lifecycle rule handles expiry.
 - `scripts/pull_feedback.py`: local review. It mirrors R2, merges each
@@ -1279,7 +1279,7 @@ standing up the backend: `docs/feedback-deploy.md`.
   from the `FEEDBACK_URL` repository variable in `pages.yml`. Empty means
   reporting is off.
 
-Checks: 307 pytest, 79 node, 44 worker (vitest). Python- and JS-built
+Checks: 317 pytest, 81 node, 46 worker (vitest). Python- and JS-built
 chunks from hostile input all validated with the worker's own validator,
 including size-split bodies. The worker is deployed at
 `browser-photom-feedback.mwcraig2.workers.dev`. The curl smoke tests gave
@@ -1288,7 +1288,24 @@ to end: a local `build-dash` run of the 155-frame LS Psc set landed 7
 chunks (6 x 25 rows plus a final 5, outcome `done`), all schema-valid,
 with 155 `ok` rows and no gaps.
 
-Still owed: set the `FEEDBACK_URL` repository variable after merge.
+Review fixes on PR #16 (Copilot plus a `/code-review` pass): the CSV export
+neutralises formula-leading cells; the pull script survives a flagged chunk
+whose `rows` or `run` has the wrong type, does not call unknown-then-known
+header fields a conflict, and `--since` selects whole reports (a run that
+crossed UTC midnight is no longer cut in two); the schema's no-links
+patterns are case-insensitive like the Python cleaners; the view resets the
+QA schema version and the once-per-run failure log at each run, repaints an
+open preview when a run finishes, closes the page's report (as `cancelled`)
+when its own reporting fails mid-run, and the preview's `final` matches the
+page at exactly 25 frames; the page restarts its sent/failed counts per run
+and treats a `pagehide` with `persisted` (back/forward cache) as a flush,
+not a close; the rate limit is 60/min (a setup-failed run drains in
+seconds). Consent and docs now say the server adds the inferred country,
+that the 30 days is server-side with downloaded copies kept for the testing
+period, and that the free-text fields are bounded but not markup-free.
+
+Still owed: set the `FEEDBACK_URL` repository variable after merge, and
+redeploy the worker for the new rate limit.
 Untested: the `pagehide` beacon path in a real browser. Bump Wrangler past
 4.148 (npm audit, dev-only) once 4.149.0 is two weeks old (after
 2026-10-22).

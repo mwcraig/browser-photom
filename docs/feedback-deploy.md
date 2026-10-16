@@ -26,14 +26,18 @@ The worry this design answers is a stranger using the endpoint to put
 something illegal or abusive into storage you own.
 
 - **Schema strictness.** Every field is a number, a boolean, null, or a short
-  string with a fixed pattern. There is no field that can hold a file, an
-  image, base64, or markup. Free text is limited to the tester's comment
-  (2000 characters) and the per-row skip reason (300). Both refuse control
-  characters and anything containing `://` or `www.`. Unknown fields are
-  refused at every level, including inside each row. The body is capped at
-  64 KB and a chunk at 50 rows. The worker stores the parsed and validated
-  object. It does not store the raw text, so a duplicated JSON key cannot
-  slip an unvalidated value through.
+  string with a fixed pattern. There is no field that can hold a file or an
+  image. Free text is limited to the tester's comment (2000 characters) and
+  the per-row skip reason (300). Both refuse control characters and anything
+  containing `://` or `www.` (in any case). Within those bounds they are
+  untrusted text: a short string of markup or base64 fits the pattern and is
+  stored as typed. Nothing renders it. The dashboard preview escapes it, the
+  pull script writes it to JSON and CSV (CSV cells that a spreadsheet would
+  read as a formula are prefixed with `'`), and you read it in an editor.
+  Unknown fields are refused at every level, including inside each row. The
+  body is capped at 64 KB and a chunk at 50 rows. The worker stores the
+  parsed and validated object. It does not store the raw text, so a
+  duplicated JSON key cannot slip an unvalidated value through.
 - **No IP address.** The worker reads the client IP only as the rate-limit
   key, and only in memory. The stored object is
   `{"received_at", "country", "report"}`. `country` is Cloudflare's
@@ -43,10 +47,15 @@ something illegal or abusive into storage you own.
   outside what this repo stores.
 - **What a report contains.** The tester agreed to send these: the AAVSO
   observer code, the site position rounded to whole degrees, file names,
-  per-frame QA numbers, the build tag, the browser user-agent string, and
-  their comment.
-- **30-day expiry.** An R2 lifecycle rule (step 3) deletes every report 30
-  days after it was written, whether you looked at it or not.
+  per-frame QA numbers, the build tag, and their comment. The consent text
+  also says the server adds the country it infers from the connection. The
+  schema has a `user_agent` field, but the dashboard does not fill it.
+- **30-day expiry on the server.** An R2 lifecycle rule (step 3) deletes
+  every report 30 days after it was written, whether you looked at it or
+  not. The consent text says exactly that: the *server* deletes reports
+  after 30 days, and the developer keeps the copies downloaded for review
+  while the dashboard is being tested. `pull_feedback.py` does not prune
+  `feedback-reports/`; delete it yourself when the testing period ends.
 - **No auto-publishing.** Nothing reads the bucket except you, with a
   read-only token, on your own machine. Nothing is committed to git and
   nothing is posted anywhere. The worker has no GitHub token.
@@ -126,15 +135,19 @@ The limit is configured in `wrangler.toml`, not in the dashboard:
 name = "RATE_LIMITER"
 namespace_id = "4201"
   [ratelimits.simple]
-  limit = 20
+  limit = 60
   period = 60
 ```
 
-Each IP may make 20 POSTs per 60 seconds. Over that, it gets `429`. A
-350-frame run sends about 15 chunks in total over many minutes, so 20 a
-minute leaves room for several testers behind one shared address (a club
-observatory, say). `period` can only be 10 or 60. `namespace_id` can be any
-integer string not used by another limiter in your account.
+Each IP may make 60 POSTs per 60 seconds. Over that, it gets `429`. A
+350-frame run sends about 15 chunks in total, normally over many minutes,
+but a run whose pipeline setup failed sends all 15 within seconds, and a
+tester who drops the folder again right away makes about 30 in a minute. 60
+covers that and several testers behind one shared address (a club
+observatory, say). The page does not retry a `429`, so a limit that bites
+loses those rows for good; err high. `period` can only be 10 or 60.
+`namespace_id` can be any integer string not used by another limiter in
+your account. Changing the limit needs a redeploy (`npx wrangler deploy`).
 
 Cloudflare's counters are per data centre and approximate by design. They
 are a brake on a runaway or hostile client, not an exact quota. Rate Limiting

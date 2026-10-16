@@ -7,7 +7,10 @@ lists and downloads those objects through R2's S3-compatible API into
 ``<out>/raw/`` (mirroring the keys; files already there are not fetched
 again), then writes, per report_id, ``<out>/<report_id>.json`` (header
 fields, run counters and every row, chunks sorted by seq) and
-``<out>/<report_id>.csv`` (the rows), and prints one line per report.
+``<out>/<report_id>.csv`` (the rows; a string cell that a spreadsheet would
+take for a formula is prefixed with ``'``), and prints one line per report.
+``--since`` selects reports with any chunk stored on or after that UTC day,
+and then all of each one's chunks.
 
 Every chunk is re-validated against feedback/report.schema.json. The worker
 already refused anything invalid, so a failure here means the schema or the
@@ -40,6 +43,7 @@ import os
 import re
 import sys
 from collections import Counter
+from datetime import date, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -104,6 +108,19 @@ def chunk_problems(record, validator):
     return problems
 
 
+def _header_values(reports, field):
+    """How many distinct *known* values ``field`` takes across the chunks.
+
+    A header legitimately starts out not knowing things: ``qa_schema`` is 0
+    until a frame reaches bandaid, and the site is null until a frame's
+    header (or the form) supplies it. Unknown-then-known is not a conflict;
+    two different known values are.
+    """
+    unknown = {None, 0} if field == "qa_schema" else {None}
+    return len({json.dumps(r.get(field), sort_keys=True)
+                for r in reports if r.get(field) not in unknown})
+
+
 def merge_report(report_id, stored, validator=None):
     """Merge one report_id's stored objects into a single review document.
 
@@ -150,14 +167,13 @@ def merge_report(report_id, stored, validator=None):
 
     rows = []
     for seq, report in zip(seqs, reports):
-        for row in report.get("rows") or []:
+        # A flagged chunk can have anything under "rows"; only a list is rows.
+        chunk_rows = report.get("rows")
+        for row in chunk_rows if isinstance(chunk_rows, list) else []:
             rows.append({"seq": seq, **row} if isinstance(row, dict) else {"seq": seq})
 
     latest = reports[-1] if reports else {}
-    conflicts = [
-        f for f in STABLE_FIELDS
-        if len({json.dumps(r.get(f), sort_keys=True) for r in reports}) > 1
-    ]
+    conflicts = [f for f in STABLE_FIELDS if _header_values(reports, f) > 1]
     received = sorted(str(rec.get("received_at")) for _, rec in chunks
                       if rec.get("received_at"))
     countries = sorted({rec.get("country") for _, rec in chunks if rec.get("country")})
@@ -193,13 +209,27 @@ def csv_columns(rows, schema=None):
     return known + extra
 
 
+def csv_cell(value):
+    """A value as it goes in the CSV: None blank, numbers as they are, and a
+    string that a spreadsheet would read as a formula (leading ``=``, ``+``,
+    ``-``, ``@``, tab or CR, after any whitespace) prefixed with ``'`` so it
+    stays text. The strings come from an open endpoint; the schema bounds
+    them but does not stop ``=HYPERLINK(...)`` as a file name or reason. The
+    merged JSON keeps the original."""
+    if value is None:
+        return ""
+    if isinstance(value, str) and value.lstrip()[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
+
+
 def write_csv(rows, path, schema=None):
     columns = csv_columns(rows, schema)
     with open(path, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=columns, restval="")
         writer.writeheader()
         for row in rows:
-            writer.writerow({k: ("" if v is None else v) for k, v in row.items()})
+            writer.writerow({k: csv_cell(v) for k, v in row.items()})
 
 
 def status_tally(rows):
@@ -220,7 +250,8 @@ def summary_line(merged):
         flags.append(f"conflict {','.join(merged['header_conflicts'])}")
     if merged["duplicate_keys"] or merged["unreadable_keys"]:
         flags.append("dup/unreadable")
-    outcome = (merged.get("run") or {}).get("outcome")
+    run = merged.get("run")
+    outcome = run.get("outcome") if isinstance(run, dict) else None
     comment = " ".join(str(merged.get("comment") or "").split())[:80]
     parts = [
         merged["report_id"][:8],
@@ -234,8 +265,18 @@ def summary_line(merged):
     return " ".join(parts) + f" | {comment!r}"
 
 
+def day_before(day):
+    """``YYYY-MM-DD`` of the day before ``day``."""
+    return (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+
+
 def load_raw(raw_dir, since=None):
     """``{report_id: [(key, record), ...]}`` from a mirrored ``raw/`` tree.
+
+    ``since`` selects whole reports, not chunks: a report is in if any of
+    its chunks arrived on or after that day, and then all of its chunks
+    are, so a run that crossed UTC midnight is not cut in two (`download`
+    mirrors from the day before for the same reason).
 
     A file that is not JSON is kept as ``{"unparseable": <error>}`` so the
     merge flags it instead of the script stopping.
@@ -244,7 +285,7 @@ def load_raw(raw_dir, since=None):
     grouped = {}
     for path in sorted(raw_dir.glob("reports/*/*/*.json")):
         key = path.relative_to(raw_dir).as_posix()
-        if not keys_since([key], since):
+        if parse_key(key) is None:
             continue
         try:
             record = json.loads(path.read_text())
@@ -253,6 +294,9 @@ def load_raw(raw_dir, since=None):
         if not isinstance(record, dict):
             record = {"unparseable": f"top level is {type(record).__name__}"}
         grouped.setdefault(parse_key(key)[1], []).append((key, record))
+    if since is not None:
+        grouped = {rid: items for rid, items in grouped.items()
+                   if keys_since([k for k, _ in items], since)}
     return grouped
 
 
@@ -298,16 +342,22 @@ def r2_client(environ=None):
 
 
 def download(client, bucket, raw_dir, since=None):
-    """Mirror report objects into ``raw_dir``; return (n listed, n fetched)."""
+    """Mirror report objects into ``raw_dir``; return (n listed, n fetched).
+
+    With ``since``, objects from the day before are mirrored too: a run that
+    crossed UTC midnight has its first chunks under the earlier day, and
+    `load_raw` decides by report, not by chunk.
+    """
     raw_dir = Path(raw_dir)
     listed = []
     kwargs = {"Bucket": bucket, "Prefix": PREFIX}
-    if since:
+    first_day = day_before(since) if since else None
+    if first_day:
         # Keys sort by day, so start listing just before that day's prefix.
-        kwargs["StartAfter"] = f"{PREFIX}{since}"
+        kwargs["StartAfter"] = f"{PREFIX}{first_day}"
     for page in client.get_paginator("list_objects_v2").paginate(**kwargs):
         listed.extend(obj["Key"] for obj in page.get("Contents", []))
-    keys = keys_since(listed, since)
+    keys = keys_since(listed, first_day)
     fetched = 0
     for key in keys:
         dest = raw_dir / key
@@ -324,7 +374,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("bucket", help="R2 bucket name, e.g. browser-photom-feedback")
     parser.add_argument("--since", metavar="YYYY-MM-DD",
-                        help="only reports stored on or after this UTC day")
+                        help="only reports with a chunk stored on or after this UTC day")
     parser.add_argument("--out", type=Path, default=Path("feedback-reports"),
                         help="local directory (default: ./feedback-reports)")
     parser.add_argument("--offline", action="store_true",

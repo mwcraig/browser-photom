@@ -750,7 +750,7 @@ module docstring; `FrameProcessor`).
 | `tests/test_dashboard_view.py` | `DashboardView` built headlessly, with messages injected through the drop zone's own `_handle_custom_msg`: `slowdown_factor` is a synced trait, the running notice shows only while running, a `hidden_episode` shows the banner, Dismiss hides it, it survives into the done panel (without the "keep this tab visible" instruction) and is cleared by the next drop, its text is escaped, and `INSTRUCTIONS` quotes the factor. Needs ipywidgets and anywidget (both in the default pixi env) |
 | `tests/test_feedback_report.py` | the tester-report rows, headers and chunks (§11), every built chunk validated against `feedback/report.schema.json` with `jsonschema`: non-finite floats nulled, unknown keys dropped and wrong types nulled, status coercion, hostile file names and reasons (URLs redacted, control characters, length), site rounding and longitude folding, obscode and comment rules (a link or over-long comment blanked, never the rows), a worst-case full chunk under 60 KB; `QA_COLUMNS` against the schema and the pinned bandaid-src; `feedback_url()` and `write_build_info.py`'s `FEEDBACK_URL` |
 | `tests/test_feedback_view.py` | the view's report form and messages, headless: off by default, greyed without an endpoint, an unusable obscode explained and nothing sent, a link in the comment warned about and sent blank (preview too), the preview's chunk before and after a run, start/row/end ordering against `file_done`/`run_done`, QA records and the resolved site reaching rows and headers, cancel, fresh ids per run, a raising reporting path logged once with the run unaffected, and the status line |
-| `tests/js/reporter.test.mjs` | the page's reporter (`buildReportChunk`, `reportBodies`, `makeReporter`, `handleReportMessage`) with injected fetch/sendBeacon: a POST every 25 rows and a final chunk, the newest header winning, `pagehide` beaconing a `page_closed` chunk once, nothing without a URL, failures counted and swallowed (with one non-keepalive retry), a report left open finished as `cancelled`, hidden time, splitting oversize bodies, and the `seq` ceiling |
+| `tests/js/reporter.test.mjs` | the page's reporter (`buildReportChunk`, `reportBodies`, `makeReporter`, `handleReportMessage`) with injected fetch/sendBeacon: a POST every 25 rows and a final chunk, the newest header winning, `pagehide` beaconing a `page_closed` chunk once, nothing without a URL, failures counted and swallowed (with one non-keepalive retry), a report left open finished as `cancelled`, hidden time, splitting oversize bodies, the `seq` ceiling, sent/failed counts restarting per run, and a `persisted` `pagehide` flushing without closing |
 | `tests/js/dropzone.test.mjs` | the pure functions extracted from `dropzone.js`: `isFitsName`, `collectEntries`, `sliceChunks`, `validateFound`, `byPath`, `pickRun`, `makeErrorLatch` (first error only, re-arming, and keeping that error), and `makeRunFailure` (the upload loop's first-failure slot: a guarded rejection or a latched kernel error nobody was waiting for, first one wins, cleared by re-arming); and the tab-visibility helpers `makeTabWatch` (episode timing, capping at run end, frame counting only while hidden mid-run, the once-per-run pointer nudge, no negative durations, discarding a refused run), `hiddenTitle`, `tabWarningText`, `dialogChoseStart`, `isViewportExit`, and `readSkipTabWarning`/`writeSkipTabWarning` against missing and throwing storage |
 
 The JS tests exist specifically to pin down two front-end rules that would
@@ -786,13 +786,20 @@ form — "Send diagnostic reports to the browser-photom developer", **off by
 default** — to have each run send the developer a short diagnostic report.
 The contract is `feedback/report.schema.json`; the receiving Cloudflare
 Worker (`feedback-worker/`) validates every chunk against it and refuses
-anything that does not fit, so a report can carry no file, no image and no
-markup, only short printable strings and numbers.
+anything that does not fit, so a report can carry no file and no image,
+only short printable strings and numbers. The two free-text fields (the
+comment and a row's skip reason) refuse control characters and links and
+are otherwise bounded, untrusted text: nothing renders them (the preview
+escapes, the pull script writes JSON and formula-safe CSV).
 
 **What is sent.** The consent text under the box says it plainly: the
 AAVSO observer code, the site position **rounded to whole degrees**, the
-image file names, and per-frame diagnostic numbers, kept 30 days; plus the
-tester's optional comment. Per frame, the row is bandaid's own QA record
+image file names, and per-frame diagnostic numbers; plus the tester's
+optional comment. It also says what the server adds (the country it infers
+from the connection, never the IP) and how long things are kept: the
+server deletes reports after 30 days, and the developer keeps the copies
+downloaded for review while the dashboard is being tested. Per frame, the
+row is bandaid's own QA record
 (the `on_qa(name, qa, schema_version)` hook of `make_bandaid_processor`; the
 `QA_MANIFEST_COLUMNS` of the pinned bandaid, copied as
 `feedback_report.QA_COLUMNS`), plus the dashboard's skip `reason` and the
@@ -839,7 +846,11 @@ widget does not send twice) buffers the rows and POSTs a chunk with
 final chunk at the run's end (`outcome` `done` or `cancelled`). On `pagehide`
 mid-run it sends the final chunk with `navigator.sendBeacon` and outcome
 `page_closed`, so a crashed kernel's rows still arrive when the tester
-reloads. Bodies are plain strings (`text/plain`, so no CORS preflight),
+reloads; a `pagehide` with `persisted` (the page entering the back/forward
+cache, from which it may return with the run still going) instead beacons
+the buffered rows as an ordinary chunk and keeps the report open. The
+sent/failed counts behind the status line restart with each run. Bodies
+are plain strings (`text/plain`, so no CORS preflight),
 each capped at 60,000 bytes (split by rows if ever over). Every failure is
 swallowed and counted; the run panel shows "3 reports sent" or "1 report
 failed to send — your run is unaffected" from the page's `report_status`

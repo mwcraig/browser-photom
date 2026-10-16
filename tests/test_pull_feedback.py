@@ -242,9 +242,79 @@ def test_download_mirrors_new_keys_only(pf, tmp_path):
     client = FakeS3(objects)
     (tmp_path / key(1)).parent.mkdir(parents=True)
     (tmp_path / key(1)).write_bytes(b"already here")
-    assert pf.download(client, "bkt", tmp_path, "2026-11-01") == (2, 1)
+    # --since 2026-11-01 lists from the day before (a run can straddle UTC
+    # midnight); load_raw is what then decides by whole report.
+    assert pf.download(client, "bkt", tmp_path, "2026-11-01") == (3, 2)
     assert client.list_kwargs == {"Bucket": "bkt", "Prefix": "reports/",
-                                  "StartAfter": "reports/2026-11-01"}
-    assert client.gets == [key(0)]
+                                  "StartAfter": "reports/2026-10-31"}
+    assert client.gets == [key(0, "2026-10-31"), key(0)]
     assert (tmp_path / key(1)).read_bytes() == b"already here"
-    assert not (tmp_path / key(0, "2026-10-31")).exists()
+    assert (tmp_path / key(0, "2026-10-31")).read_bytes() == b"{}"
+
+
+# -- review fixes (PR #16) ---------------------------------------------------
+
+
+def test_csv_cells_that_look_like_formulas_are_neutralised(pf, tmp_path):
+    hostile = {"seq": 0, "file": "=HYPERLINK(\"http://x\")", "status": "ok",
+               "reason": "  +cmd|' /C calc'!A0", "fwhm": -3.4}
+    plain = {"seq": 1, "file": "-dash.fits", "status": "ok", "reason": "@home", "fwhm": None}
+    path = tmp_path / "r.csv"
+    pf.write_csv([hostile, plain], path)
+    with open(path, newline="") as fh:
+        got = list(csv.DictReader(fh))
+    assert got[0]["file"] == "'=HYPERLINK(\"http://x\")"
+    assert got[0]["reason"] == "'  +cmd|' /C calc'!A0"   # leading whitespace too
+    assert got[0]["fwhm"] == "-3.4"                       # numbers are not strings
+    assert got[1]["file"] == "'-dash.fits" and got[1]["reason"] == "'@home"
+    assert got[1]["fwhm"] == ""
+    assert pf.csv_cell("plain text") == "plain text" and pf.csv_cell("") == ""
+
+
+def test_wrong_type_rows_and_run_are_flagged_not_fatal(pf, validator):
+    items = [
+        (key(0), stored(chunk(0, [ROW_OK]))),
+        (key(1), stored(chunk(1, 1, run="done", final=True))),
+    ]
+    merged = pf.merge_report(RID, items, validator)
+    assert [c["seq"] for c in merged["invalid_chunks"]] == [1]
+    assert merged["n_rows"] == 1
+    assert merged["run"] == "done"
+    assert "outcome=None" in pf.summary_line(merged)
+
+
+def test_unknown_then_known_header_fields_are_not_conflicts(pf, validator):
+    items = [
+        (key(0), stored(chunk(0, [ROW_OK], qa_schema=0, site_lat=None, site_lon=None))),
+        (key(1), stored(chunk(1, [ROW_OK], qa_schema=3, site_lat=47, site_lon=-96))),
+        (key(2), stored(chunk(2, [ROW_OK], qa_schema=3, site_lat=47, site_lon=-96, final=True))),
+    ]
+    assert pf.merge_report(RID, items, validator)["header_conflicts"] == []
+    items.append((key(3), stored(chunk(3, [], qa_schema=4, site_lat=46))))
+    assert pf.merge_report(RID, items, validator)["header_conflicts"] == ["qa_schema", "site_lat"]
+
+
+def test_since_selects_whole_reports_across_utc_midnight(pf, tmp_path):
+    raw = tmp_path / "raw"
+    straddler = "a" * 32
+    files = {
+        key(0, "2026-11-04", straddler): stored(chunk(0, [ROW_OK], report_id=straddler)),
+        key(1, "2026-11-05", straddler): stored(chunk(1, [ROW_SKIP], report_id=straddler, final=True)),
+        key(0, "2026-11-04"): stored(chunk(0, [ROW_OK], final=True)),   # wholly before
+    }
+    for k, rec in files.items():
+        (raw / k).parent.mkdir(parents=True, exist_ok=True)
+        (raw / k).write_text(json.dumps(rec))
+    grouped = pf.load_raw(raw, "2026-11-05")
+    assert list(grouped) == [straddler]
+    assert [pf.parse_key(k)[2] for k, _ in grouped[straddler]] == [0, 1]
+    assert set(pf.load_raw(raw)) == {straddler, RID}
+
+    # download mirrors from the day before so those earlier chunks exist locally.
+    assert pf.day_before("2026-11-01") == "2026-10-31"
+    objects = {k: json.dumps(v).encode() for k, v in files.items()}
+    objects[key(0, "2026-11-03")] = b"{}"
+    client = FakeS3(objects)
+    assert pf.download(client, "bkt", tmp_path / "mirror", "2026-11-05") == (3, 3)
+    assert client.list_kwargs["StartAfter"] == "reports/2026-11-04"
+    assert not (tmp_path / "mirror" / key(0, "2026-11-03")).exists()

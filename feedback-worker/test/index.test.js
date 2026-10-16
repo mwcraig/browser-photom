@@ -127,6 +127,8 @@ describe("schema rejections", () => {
     "__proto__ key": JSON.parse('{"__proto__": {"x": 1}}'),
     "URL in comment (scheme)": chunk({ comment: "look at https://example.com" }),
     "URL in comment (www)": chunk({ comment: "see www.example.com please" }),
+    "URL in comment (WWW, mixed case)": chunk({ comment: "see WwW.Example.com please" }),
+    "URL in row reason (WWW)": chunk({ rows: [{ file: "a.fits", status: "ok", reason: "WWW.EXAMPLE.COM" }] }),
     "URL on a later line of comment": chunk({ comment: "fine\nfine\nftp://x" }),
     "control character in comment": chunk({ comment: "tab\there" }),
     "comment too long": chunk({ comment: "a".repeat(2001) }),

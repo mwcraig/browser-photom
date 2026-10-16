@@ -302,3 +302,47 @@ test('handleReportMessage routes report_* and leaves everything else alone', asy
   assert.equal(fetchFn.calls[0].chunk.rows.length, 1);
   assert.equal(fetchFn.calls[0].chunk.run.outcome, 'done');
 });
+
+// -- review fixes (PR #16) -------------------------------------------------
+
+test('sent/failed counts start over with each run', async () => {
+  const fetchFn = fakeFetch([true, false, true]);
+  const statuses = [];
+  const r = makeReporter({ fetchFn, beaconFn: fakeBeacon(), onStatus: (s) => statuses.push(s) });
+  r.start(URL, header(), 0, false);
+  r.end('done', null, 0);               // 1 sent
+  await settle();
+  assert.deepEqual(r.counts(), { sent: 1, failed: 0 });
+  r.start(URL, header(), 0, false);
+  r.end('done', null, 0);               // 1 failed
+  await settle();
+  assert.deepEqual(statuses.at(-1), { sent: 0, failed: 1 });
+  r.start(URL, header({ report_id: 'f'.repeat(32) }), 0, false);
+  r.row(row(0), null, 0);
+  r.end('done', null, 0);
+  await settle();
+  assert.deepEqual(r.counts(), { sent: 1, failed: 0 });
+});
+
+test('pagehide into the back/forward cache flushes the buffer and keeps the report open', async () => {
+  const fetchFn = fakeFetch();
+  const beaconFn = fakeBeacon();
+  const r = makeReporter({ fetchFn, beaconFn });
+  r.start(URL, header(), 0, false);
+  r.row(row(0), header(), 0);
+  r.pageClosed(10, true);               // persisted: bfcache, not a close
+  assert.equal(r.isActive(), true);
+  assert.equal(beaconFn.calls.length, 1);
+  assert.equal(beaconFn.calls[0].chunk.final, false);
+  assert.equal(beaconFn.calls[0].chunk.run.outcome, 'running');
+  assert.equal(beaconFn.calls[0].chunk.rows.length, 1);
+  r.row(row(1), header(), 20);          // the page came back; the run goes on
+  r.end('done', null, 30);
+  await settle();
+  assert.equal(fetchFn.calls.length, 1);
+  assert.deepEqual(fetchFn.calls[0].chunk.rows.map((x) => x.file), ['f1.fit']);
+  assert.equal(fetchFn.calls[0].chunk.seq, 1);
+  assert.equal(fetchFn.calls[0].chunk.final, true);
+  r.pageClosed(40, true);               // nothing open: nothing sent
+  assert.equal(beaconFn.calls.length, 1);
+});

@@ -77,9 +77,12 @@ REPORT_CONSENT = """
   whole degree</b>, the <b>names of your image files</b>, and
   <b>per-frame diagnostic numbers</b> (star counts, FWHM, sky level,
   plate-solve results, why a frame was skipped, how long each took), plus
-  your comment below. No images, starlists or FITS headers are sent.
-  Reports are deleted after <b>30 days</b>. Your run works the same either
-  way. Use <i>Preview report</i> to see exactly what would be sent.
+  your comment below. The receiving server adds the <b>country</b> it
+  infers from your connection; it does not keep your IP address. No
+  images, starlists or FITS headers are sent. The server deletes reports
+  after <b>30 days</b>; the developer keeps the copies downloaded for
+  review while the dashboard is being tested. Your run works the same
+  either way. Use <i>Preview report</i> to see exactly what would be sent.
 </div>
 """
 
@@ -355,9 +358,14 @@ class DashboardView:
         when no report could be built (no or invalid observer code).
 
         Before any run: the next run's header, no rows. During or after a
-        run: that run's first ``ROWS_PER_CHUNK`` rows with the current
-        header -- final, with the run's outcome, when that is how the run's
-        first chunk goes out (a run of at most that many frames, finished).
+        run: that run's first ``ROWS_PER_CHUNK`` rows with the header as it
+        stands now (the counters and comment are the run's latest, not the
+        ones that rode with those rows; the page spreads the newest header
+        into every chunk, so this is what every later chunk of the run
+        carries). It is final, with the run's outcome, only when that is how
+        the first chunk goes out: a finished run of *fewer* frames than a
+        chunk holds -- at exactly ``ROWS_PER_CHUNK`` the page flushes those
+        rows non-final and sends an empty final chunk after them.
         """
         if self._report_obscode_problem() is not None:
             return None
@@ -365,7 +373,7 @@ class DashboardView:
         header = self._report_header(report_id)
         rows = self._report_rows[:ROWS_PER_CHUNK]
         phase = self.dashboard.phase
-        final = phase in ("done", "cancelled") and len(self._report_rows) <= ROWS_PER_CHUNK
+        final = phase in ("done", "cancelled") and len(self._report_rows) < ROWS_PER_CHUNK
         return build_chunk(header, rows, seq=0, final=final,
                            outcome=phase if final else None)
 
@@ -411,11 +419,21 @@ class DashboardView:
         try:
             fn(*args)
         except Exception as exc:  # noqa: BLE001 - reporting must never break a run
+            was_open = self._report_id is not None
             self._report_id = None
             if not self._report_error_logged:
                 self._report_error_logged = True
                 self.log(f"Tester report stopped ({type(exc).__name__}: {exc}); "
                          "the run is unaffected.")
+            # Close the page's side too, or its buffered rows wait for the
+            # next run (sent as "cancelled" then) or for the tab to close
+            # ("page_closed"). No header: building one may be what failed,
+            # and the page keeps the last one it was given.
+            if was_open:
+                try:
+                    self._report_send({"type": "report_end", "outcome": "cancelled"})
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _report_header(self, report_id):
         state = self.dashboard.state
@@ -440,11 +458,16 @@ class DashboardView:
         self.drop_zone.send(content)
 
     def _report_start(self):
+        # Everything run-scoped starts over, reported or not: the QA schema
+        # version (0 until this run's first frame reaches bandaid), the
+        # resolved site, and the once-per-run failure log.
         self._report_id = None
         self._run_report_id = None
         self._report_rows = []
         self._pending_qa = {}
+        self._qa_schema = 0
         self._resolved_site = (None, None)
+        self._report_error_logged = False
         if not self._reporting_wanted() or self._report_obscode_problem() is not None:
             return
         report_id = self._last_report_id()
@@ -625,6 +648,12 @@ class DashboardView:
                 f"drop another folder to add a new night.</p>"
             )
             self.zip_widget.enabled = True
+            # A preview left open through the run comes back with the setup
+            # panel; repaint it with this run's rows and outcome rather than
+            # the pre-run JSON (painting otherwise happens only on a click
+            # or a form edit).
+            if self._preview_open:
+                self._paint_preview()
 
         # Shown whenever a run is not active, not just before the first one:
         # the meta dict is read live on every frame, so the form must stay

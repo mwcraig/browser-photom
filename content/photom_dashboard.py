@@ -1035,18 +1035,23 @@ class PhotometryDashboard:
 
 def make_bandaid_processor(
     user_meta, results_dir="results", *, log=print, cnn=None, on_prep=None,
-    on_result=None, provenance=None,
+    on_result=None, on_qa=None, provenance=None,
 ):
     """Build the real `process_frame(path, name)` used in the browser.
 
     This is the one place the repo calls bandaid's pipeline (`prepare_batch`,
-    `check_frame_consistency`, `process_one_image`, `write_starlist_set`);
-    the watch notebook goes through it too, so a bandaid signature change
-    (the pin in `pixi.toml`) has exactly one call to update.
+    `process_frame`, `write_starlist_set`); the watch notebook goes through
+    it too, so a bandaid signature change (the pin in `pixi.toml`) has
+    exactly one call to update.
 
     `process_frame(path, name)` returns None when the frame was measured and
-    its `.star` file written, or a string saying why it was skipped (batch
-    prep failure, or a per-frame `FrameError`); anything else propagates.
+    its `.star` file written, or a string saying why it was skipped: a batch
+    prep failure, a per-frame `FrameError` (bandaid's ``skipped`` outcome, or
+    one the writer raises), or an unexpected error inside bandaid (its
+    ``error`` outcome, reported as ``<ExceptionType>: <message>``, the same
+    text `FrameProcessor` would have produced had it propagated). Only an
+    exception outside bandaid's per-frame step -- a failed write that is not
+    a `FrameError`, a hook that raises -- propagates.
     The `.star` is named `starlist_name(<stem of name>, tag)`, where the tag
     is this build's `provenance_tag` (bandaid and browser-photom SHAs) unless
     ``provenance`` overrides it.
@@ -1065,14 +1070,25 @@ def make_bandaid_processor(
     fixed. `on_result(name, by_filter, prep)` is called
     after each measured frame's `.star` file is written, with the per-filter
     tables and the batch prep, for callers that want the tables themselves
-    (the notebook's light curve). Neither hook should raise: an exception
+    (the notebook's light curve). `on_qa(name, qa)` is called once for every
+    frame that reached bandaid's per-frame step, measured or not, with the
+    frame's final QA record: bandaid's own `FrameResult.qa` (a dict keyed by
+    `bandaid.QA_MANIFEST_COLUMNS`, every value a plain str/int/float/bool/
+    None), or the ``skipped`` record rebuilt with `qa_record_skipped` when
+    the writer raised a `FrameError` after photometry -- the same row
+    bandaid's own `process_batch` would have put in its QA manifest. A frame
+    that never got past batch prep has no record. Floats may be non-finite
+    (``g_cut`` is ``inf`` on a sparse frame, ``fwhm`` and
+    ``solve_offset_deg`` can be NaN): a sender that needs strict JSON maps
+    them to None itself. None of the hooks should raise: an exception
     from `on_prep` would count a frame as failed after prep is already
-    stored, and one from `on_result` would do so after the frame is already
-    on disk. bandaid, astropy, numpy and scipy are imported here rather than
-    at module scope, so the host test environment never needs them. The
-    environment knobs themselves (warnings filter, keyring backend,
-    negative-import cache, pyodide_http, IERS settings) live in `env_setup.py`
-    -- the one home shared with `watch_photometry.ipynb`'s cell 2.
+    stored, and one from `on_result` or `on_qa` would do so after the frame
+    is already on disk. bandaid, astropy, numpy and scipy are imported here
+    rather than at module scope, so the host test environment never needs
+    them. The environment knobs themselves (warnings filter, keyring
+    backend, negative-import cache, pyodide_http, IERS settings) live in
+    `env_setup.py` -- the one home shared with `watch_photometry.ipynb`'s
+    cell 2.
     """
     from pathlib import Path as _Path
 
@@ -1080,17 +1096,14 @@ def make_bandaid_processor(
 
     env_setup.configure()
 
-    from astropy.io import fits
-
+    import bandaid
     from bandaid import (
         BatchPrepError,
         FrameError,
         PhotometryConfig,
         prepare_batch,
-        write_starlist_set,
+        qa_record_skipped,
     )
-    from bandaid.photometry import process_one_image
-    from bandaid.scripts import check_frame_consistency
 
     if cnn is None:
         from ballet_sgemm import load_cnn
@@ -1111,6 +1124,10 @@ def make_bandaid_processor(
     # does with the first file of a batch.
     batch = {"prep": None, "n": 0}
 
+    def emit_qa(name, qa):
+        if on_qa is not None:
+            on_qa(name, qa)
+
     def process_frame(path, name):
         # `path` is already the MEMFS copy -- unlike the watch loop there is
         # nothing to copy off the contents drive first.
@@ -1126,36 +1143,49 @@ def make_bandaid_processor(
             if on_prep is not None:
                 on_prep(batch["prep"])
         prep = batch["prep"]
+        # bandaid's own per-frame step (consistency check, alignment,
+        # photometry, the no-usable-stars check, and the QA record), the
+        # same function its `process_batch` loops over. `label=name` (not
+        # `path`) so the error messages, log lines and QA row carry the
+        # dropped name, the one the user recognises. `fail_fast=False` turns
+        # an unexpected error into an ``error`` result with a QA record
+        # instead of an exception, so the row still reaches `on_qa`; the
+        # skip text below matches what `FrameProcessor` prints for a raised
+        # exception, so the dashboard reads the same either way.
+        result = bandaid.process_frame(
+            path, prep, user_specific_metadata=dict(user_meta), label=name,
+            fail_fast=False,
+        )
+        qa = result.qa
+        if not result.ok:
+            emit_qa(name, qa)
+            if isinstance(result.error, FrameError):
+                return str(result.error)
+            return f"{result.reason_type}: {result.error}"
+        by_filter = result.by_filter
+        dest = _Path(results_dir() if callable(results_dir) else results_dir)
         try:
-            # `name` (not `path`) into the check: it is only attached to error
-            # messages, and the dropped name is the one the user recognises.
-            check_frame_consistency(name, fits.getheader(path), prep)
-            by_filter = process_one_image(
-                path,
-                dict(user_meta),
-                prep.radecs,
-                prep.cnn,
-                prep.bayer_masks,
-                config=prep.config,
-                input_photometry_coords=prep.photometry_coords,
-                # Required by the position policy: per-row Gaia G and the
-                # batch's CNN-class magnitude cut, exactly as the CLI passes
-                # them (bandaid `process_batch`). Without them bandaid raises
-                # ValueError before any work.
-                input_gaia_g=prep.gaia_g,
-                g_cut=prep.g_cut,
-            )
-            dest = _Path(results_dir() if callable(results_dir) else results_dir)
-            write_starlist_set(by_filter, dest / starlist_name(_Path(name).stem, tag))
+            # Looked up on `bandaid` at call time, not bound at build time,
+            # so the notebook's stage timer can wrap it after this runs.
+            bandaid.write_starlist_set(by_filter, dest / starlist_name(_Path(name).stem, tag))
         except FrameError as exc:
+            # A frame-quality error at write time (`StarListValidationError`)
+            # is this frame's problem, skipped like any other; its QA row is
+            # rebuilt as `process_batch` rebuilds it. Anything else is a
+            # systemic write failure and propagates.
+            qa = qa_record_skipped(name, exc, pointing_offset=result.pointing_offset)
+            emit_qa(name, qa)
             return str(exc)
         # One line per frame, the same shape the watch notebook printed. The
         # dashboard's counters alone cannot answer "is this actually faster
-        # than 3.4 s/frame?", which is the whole reason for this design.
+        # than 3.4 s/frame?", which is the whole reason for this design. The
+        # time is the whole call (prep on the first frame, write included);
+        # bandaid's own step is `result.elapsed_s`.
         batch["n"] += 1
         l4 = by_filter["L4"]
         log(f"[{batch['n']:>3d}] {time.monotonic() - started:5.1f}s  {name}  "
             f"{len(l4)} stars  fwhm={l4.meta['fwhm']:.2f}px")
+        emit_qa(name, qa)
         if on_result is not None:
             on_result(name, by_filter, prep)
         return None

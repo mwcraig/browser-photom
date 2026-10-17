@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  KEEPALIVE_QUOTA_BYTES,
   REPORT_MAX_BYTES,
   REPORT_ROWS_PER_CHUNK,
   buildReportChunk,
@@ -109,8 +110,9 @@ test('reportBodies drops a single row too big to send but keeps the final chunk'
   assert.equal(chunk.final, true);
 });
 
-test('the default cap is under the 64 KB keepalive/beacon limit', () => {
-  assert.ok(REPORT_MAX_BYTES < 64 * 1024);
+test('the default cap leaves room for a POST in flight and the pagehide beacon together', () => {
+  assert.equal(KEEPALIVE_QUOTA_BYTES, 64 * 1024);
+  assert.ok(2 * REPORT_MAX_BYTES < KEEPALIVE_QUOTA_BYTES);
 });
 
 test('the reporter posts a chunk every REPORT_ROWS_PER_CHUNK rows, then a final one', async () => {
@@ -222,10 +224,13 @@ test('a fetch that throws synchronously, or a beacon that throws, is swallowed',
   });
   r.start(URL, header(), 0, false);
   r.end('done', null, 0);
+  await settle();
+  assert.deepEqual(r.counts(), { sent: 0, failed: 1 });
   r.start(URL, header(), 0, false);
   assert.doesNotThrow(() => r.pageClosed(0));
   await settle();
-  assert.deepEqual(r.counts(), { sent: 0, failed: 2 });
+  // Counts are per run: the second run has only its beacon.
+  assert.deepEqual(r.counts(), { sent: 0, failed: 1 });
 });
 
 test('a refused beacon counts as failed', () => {
@@ -399,4 +404,112 @@ test('the kernel can close a report as report_error; other unknown outcomes are 
   r.end('exploded', null, 0);
   await settle();
   assert.deepEqual(fetchFn.calls.map((c) => c.chunk.run.outcome), ['report_error', 'done']);
+});
+
+// -- fourth review round ---------------------------------------------------
+
+test('a POST that would eat into the beacon reserve goes out without keepalive', async () => {
+  // Quota 1000, cap 400: the reserve is 400, so keepalive is allowed while
+  // in-flight + body <= 600. Bodies here are ~350 bytes.
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  const calls = [];
+  const fetchFn = (url, init) => {
+    calls.push(init);
+    return calls.length === 1 ? held.then(() => ({ ok: true })) : Promise.resolve({ ok: true });
+  };
+  const r = makeReporter({ fetchFn, beaconFn: fakeBeacon(), rowsPerChunk: 1, maxBytes: 400, quotaBytes: 1000 });
+  r.start(URL, header(), 0, false);
+  r.row(row(0), null, 0);                // first POST: keepalive, stays in flight
+  r.row(row(1), null, 0);                // ~350 + ~350 > 600: no keepalive
+  await settle();
+  assert.deepEqual(calls.map((c) => c.keepalive), [true, false]);
+  release();
+  await settle();
+  r.row(row(2), null, 0);                // the first one settled: keepalive again
+  await settle();
+  assert.deepEqual(calls.map((c) => c.keepalive), [true, false, true]);
+  // And the pagehide beacon always has its reserve: nothing else is in flight
+  // with keepalive beyond one body.
+  r.pageClosed(10, false);
+  await settle();
+  assert.deepEqual(r.counts(), { sent: 4, failed: 0 });
+});
+
+test('a POST of the previous run settling late does not count in the new run', async () => {
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  const fetchFn = (url, init) => {
+    fetchFn.calls.push(init);
+    return fetchFn.calls.length === 1 ? held.then(() => ({ ok: false })) : Promise.resolve({ ok: true });
+  };
+  fetchFn.calls = [];
+  const statuses = [];
+  const r = makeReporter({ fetchFn, beaconFn: fakeBeacon(), onStatus: (s) => statuses.push(s) });
+  r.start(URL, header(), 0, false);
+  r.end('done', null, 0);                // run A's final POST, still in flight
+  r.start(URL, header({ report_id: 'b'.repeat(32) }), 0, false);
+  release();                             // A's POST fails now, during run B
+  await settle();
+  assert.deepEqual(statuses, []);        // nothing reported for B
+  assert.deepEqual(r.counts(), { sent: 0, failed: 0 });
+  r.end('done', null, 0);
+  await settle();
+  assert.deepEqual(r.counts(), { sent: 1, failed: 0 });
+});
+
+test('hiding the tab POSTs the buffered rows and keeps the report open', async () => {
+  const fetchFn = fakeFetch();
+  const r = makeReporter({ fetchFn, beaconFn: fakeBeacon() });
+  r.start(URL, header(), 0, false);
+  r.hide(5);                             // nothing buffered: nothing sent
+  r.show(10);
+  r.row(row(0), header(), 20);
+  r.row(row(1), header(), 30);
+  r.hide(100);
+  await settle();
+  assert.equal(fetchFn.calls.length, 1);
+  assert.deepEqual(fetchFn.calls[0].chunk.rows.map((x) => x.file), ['f0.fit', 'f1.fit']);
+  assert.equal(fetchFn.calls[0].chunk.final, false);
+  assert.equal(fetchFn.calls[0].init.keepalive, true);
+  assert.equal(r.isActive(), true);
+  r.show(600);
+  r.row(row(2), header(), 700);
+  r.end('done', null, 800);
+  await settle();
+  assert.equal(fetchFn.calls.length, 2);
+  assert.equal(fetchFn.calls[1].chunk.seq, 1);
+  assert.deepEqual(fetchFn.calls[1].chunk.rows.map((x) => x.file), ['f2.fit']);
+  assert.equal(fetchFn.calls[1].chunk.run.hidden_ms, 5 + 500);
+  r.hide(900);                           // after the end: nothing
+  await settle();
+  assert.equal(fetchFn.calls.length, 2);
+});
+
+test('the kernel can close a report as failed (the run died on an error)', async () => {
+  const fetchFn = fakeFetch();
+  const r = makeReporter({ fetchFn, beaconFn: fakeBeacon() });
+  r.start(URL, header(), 0, false);
+  r.end('failed', null, 0);
+  await settle();
+  assert.equal(fetchFn.calls[0].chunk.run.outcome, 'failed');
+});
+
+test('a new start resets hidden time, and rows and hide() are ignored while inactive', async () => {
+  const fetchFn = fakeFetch();
+  const r = makeReporter({ fetchFn, beaconFn: fakeBeacon() });
+  r.row(row(0), header(), 0);            // before any start
+  r.start(URL, header(), 0, true);
+  r.end('done', null, 1000);             // 1000 ms hidden in run A
+  r.row(row(1), header(), 1000);         // after the end
+  r.hide(1000);
+  r.start(URL, header(), 2000, false);
+  r.end('done', null, 3000);
+  await settle();
+  assert.equal(fetchFn.calls.length, 2);
+  assert.equal(fetchFn.calls[0].chunk.run.hidden_ms, 1000);
+  assert.deepEqual(fetchFn.calls[0].chunk.rows, []);
+  assert.equal(fetchFn.calls[1].chunk.run.hidden_ms, null);
+  assert.deepEqual(fetchFn.calls[1].chunk.rows, []);
+  assert.equal(fetchFn.calls[0].init.credentials, 'omit');
 });

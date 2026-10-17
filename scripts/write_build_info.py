@@ -73,16 +73,26 @@ def feedback_url_from_env(environ=None):
     """``BROWSER_PHOTOM_FEEDBACK_URL``, stripped; ``""`` when unset or blank.
 
     Raises ``ValueError`` for a value that is set but is not an https URL
-    without whitespace or userinfo. (The kernel re-checks with
-    `feedback_report.endpoint_url` and disables reporting on anything odd;
-    this is the loud half of that, at build time.)
+    without whitespace, control characters or userinfo -- or, in a GitHub
+    Actions build (``GITHUB_ACTIONS`` set), that is not https at all: the
+    localhost exception is for a developer's own machine, and a published
+    page must never post to its visitors' localhost. The kernel re-checks
+    with `feedback_report.endpoint_url` and disables reporting on anything
+    odd; this is the loud half of that, at build time, and refuses
+    everything the kernel would.
     """
     environ = os.environ if environ is None else environ
     value = environ.get(FEEDBACK_URL_ENV, "").strip()
-    if value and not re.fullmatch(LOCAL_OR_HTTPS_URL, value):
+    if not value:
+        return ""
+    if not re.fullmatch(LOCAL_OR_HTTPS_URL, value) or re.search(r"[\x00-\x1f\x7f]", value):
         raise ValueError(
             f"{FEEDBACK_URL_ENV}={value!r} is not an https URL (without "
             "credentials); unset it to build without tester reporting"
+        )
+    if environ.get("GITHUB_ACTIONS") and not value.startswith("https://"):
+        raise ValueError(
+            f"{FEEDBACK_URL_ENV}={value!r}: a published build must use https"
         )
     return value
 

@@ -1338,9 +1338,42 @@ changed: the free-text budget (~25-35 KB of arbitrary characters per chunk)
 and the per-IP limit's limits (one address can use most of the free daily
 request cap). Tests: 336 pytest, 84 node, 56 worker (vitest).
 
+Fourth round (three more fresh reviewers -- a single-value end-to-end trace,
+the worker and deploy path, the run lifecycle and consent -- plus Copilot's
+third pass). Page: each body is capped at 32,000 bytes (half the 64 KiB
+keepalive budget) and a POST that would leave less than one body's worth of
+that budget goes out without keepalive, so a POST in flight at `pagehide`
+can no longer starve the beacon (Copilot's point; the earlier "no fix
+page-side" answer was wrong); hiding the tab POSTs the buffered rows (a
+background tab can be frozen or discarded with no `pagehide`); the
+sent/failed counts are per run, so a late settle of the previous run counts
+for nobody; the byte-aware check sizes for the longest outcome. Kernel: the
+obscode and form site are snapshotted at the reported run's start and the
+preview of a finished run shows the header the final chunk carried; the
+front end's error-path cancels carry a `reason` and the report ends as
+`failed` (new enum value) rather than reading as the tester pressing Stop;
+the pre-run preview explains a null site; the consent text now names the
+run counters/outcome/hidden time/build and the server timestamp, and says
+a skip reason can quote the header value that caused it (bandaid's
+`FrameMetadataError` messages carry `obs_time`/`ra`/`dec` with `!r`).
+Worker: the rate limit keys an IPv6 client by its /64 (a host with a /64
+could otherwise rotate past the limit); limiter and R2 failures are caught
+and answered 503 with CORS headers; the head-then-put race is described
+honestly (not atomic; only a client's own report is affected). Pull script:
+the whole bucket is listed and `--since` selects whole reports by id (the
+day-before lookback is gone; a run spanning three UTC days is not a real
+case, the selection just no longer depends on a window); the header comes
+from the last *readable* chunk; objects older than 31 days produce a
+lifecycle WARNING. Build: `write_build_info` refuses control characters
+and, under `GITHUB_ACTIONS`, anything but https. Tests: 355 pytest
+(incl. new `tests/test_write_build_info.py`), 89 node, 61 worker (vitest).
+Not changed: the preview cannot show the counters as they stood when the
+first chunk really went out (documented).
+
 Still owed: set the `FEEDBACK_URL` repository variable after merge, and
-redeploy the worker for the new rate limit and the explicit observability
-setting.
+redeploy the worker for the new rate limit, the schema (`failed` outcome,
+no `user_agent`), the IPv6 keying, the 503 path and the explicit
+observability setting.
 Untested: the `pagehide` beacon path in a real browser. Bump Wrangler past
 4.148 (npm audit, dev-only) once 4.149.0 is two weeks old (after
 2026-10-22).

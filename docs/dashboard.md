@@ -173,13 +173,13 @@ everything happens inside `PhotometryDashboard.handle_message`.
 | `ack` | kernel → JS | `{type, name, index}` | none | wedge detection — pacing is per-file, see below |
 | `file_done` | kernel → JS | `{type, name, ok, reason}` | none | gates the start of the *next file*'s upload |
 | `run_done` | kernel → JS | `{type}` | none | sent once `RunState.finished`; `phase` → `"done"` |
-| `cancel` | JS → kernel | `{type}` | none | front end sends this when its own upload loop unwinds after an `error`, or when an `ack`/`file_done` wait times out (`waitFor` in `dropzone.js`); ends the run cleanly instead of leaving it stuck at `"running"` |
+| `cancel` | JS → kernel | `{type, reason?}` | none | the Stop button sends a bare one; the front end's own error paths send one with `reason` (`error`: a kernel `error` reply; `upload`: the upload loop died reading a file or on a dead comm; `timeout`: an `ack`/`file_done` wait timed out in `waitFor`). Either ends the run cleanly instead of leaving it stuck at `"running"`; the reason only decides whether a tester report says `cancelled` or `failed` |
 | `error` | kernel → JS | `{type, reason}` | none | a malformed `chunk` message or a `ProtocolError` from `ChunkAssembler`, reported without raising into the kernel |
 | `zip_request` | JS → kernel | `{type, run?}` | none | the download button asking for a fresh zip of one run's `.star` files; omitting `run` means the most recent run |
 | `zip` | kernel → JS | `{type, filename}` | 1 (zip bytes) | the built archive, named `<run>-starlists.<tag>.zip` with the build's provenance tag (§7), turned into a `Blob` + object-URL download in `renderZip` (`dropzone.js`) |
 | `zip_error` | kernel → JS | `{type, reason}` | none | `results/` is missing or has no `.star` files yet, or `run` names an unknown run |
 | `hidden_episode` | JS → kernel | `{type, hidden_ms, frames}` | none | the tab has become visible again after being hidden during a run: how long it was hidden and how many `file_done`s arrived meanwhile. Accepted in **any** phase, because the run usually finishes while the user is away; feeds the run panel's banner only (`PhotometryDashboard._on_hidden_episode`; §4) |
-| `report_start` / `report_row` / `report_end` | kernel → JS | `{type, header}`, plus `row` / `outcome` | none | opt-in tester reports (§11): a reported run's start, one row per frame (sent before that frame's `file_done`), and its end (`outcome` `done`, before `run_done`, or `cancelled`). Handled by the drop zone model's `initialize`-level reporter, never by the upload loop |
+| `report_start` / `report_row` / `report_end` | kernel → JS | `{type, header}`, plus `row` / `outcome` | none | opt-in tester reports (§11): a reported run's start, one row per frame (sent before that frame's `file_done`), and its end (`outcome` `done`, before `run_done`; `cancelled` on the Stop button; `failed` when the front end's cancel carried a `reason`). Handled by the drop zone model's `initialize`-level reporter, never by the upload loop |
 | `report_status` | JS → kernel | `{type, sent, failed}` | none | the page's POST counts, for the run panel's status line; handled by the view's own `on_msg` listener, ignored by `PhotometryDashboard` |
 | `hidden_episode_error` | kernel → JS | `{type, reason}` | none | the `hidden_episode` handler raised. Deliberately **not** `error`: the front end treats `error` as fatal and cancels the run, and a banner is not worth a run. The front end ignores this type like any other it isn't waiting for |
 
@@ -750,7 +750,7 @@ module docstring; `FrameProcessor`).
 | `tests/test_dashboard_view.py` | `DashboardView` built headlessly, with messages injected through the drop zone's own `_handle_custom_msg`: `slowdown_factor` is a synced trait, the running notice shows only while running, a `hidden_episode` shows the banner, Dismiss hides it, it survives into the done panel (without the "keep this tab visible" instruction) and is cleared by the next drop, its text is escaped, and `INSTRUCTIONS` quotes the factor. Needs ipywidgets and anywidget (both in the default pixi env) |
 | `tests/test_feedback_report.py` | the tester-report rows, headers and chunks (§11), every built chunk validated against `feedback/report.schema.json` with `jsonschema`: non-finite floats nulled, unknown keys dropped and wrong types nulled, status coercion, hostile file names and reasons (URLs redacted, control characters, length), site rounding and longitude folding, obscode and comment rules (a link or over-long comment blanked, never the rows), a worst-case full chunk under 60 KB; `QA_COLUMNS` against the schema and the pinned bandaid-src; `feedback_url()` and `write_build_info.py`'s `FEEDBACK_URL` |
 | `tests/test_feedback_view.py` | the view's report form and messages, headless: off by default, greyed without an endpoint, an unusable obscode explained and nothing sent, a link in the comment warned about and sent blank (preview too), the preview's chunk before and after a run, start/row/end ordering against `file_done`/`run_done`, QA records and the resolved site reaching rows and headers, cancel, fresh ids per run, a raising reporting path logged once with the run unaffected, and the status line |
-| `tests/js/reporter.test.mjs` | the page's reporter (`buildReportChunk`, `reportBodies`, `makeReporter`, `handleReportMessage`) with injected fetch/sendBeacon: a POST every 25 rows and a final chunk, the newest header winning, `pagehide` beaconing a `page_closed` chunk once, nothing without a URL, failures counted and swallowed (with one non-keepalive retry), a report left open finished as `cancelled`, hidden time, splitting oversize bodies, the `seq` ceiling, sent/failed counts restarting per run, a `persisted` `pagehide` flushing without closing, bodies past the `seq` ceiling counted as failed, `hidden_ms` clamped to the schema maximum, and the byte-aware flush sized for the beacon |
+| `tests/js/reporter.test.mjs` | the page's reporter (`buildReportChunk`, `reportBodies`, `makeReporter`, `handleReportMessage`) with injected fetch/sendBeacon: a POST every 25 rows and a final chunk, the newest header winning, `pagehide` beaconing a `page_closed` chunk once, nothing without a URL, failures counted and swallowed (with one non-keepalive retry), a report left open finished as `cancelled`, hidden time, splitting oversize bodies, the `seq` ceiling, sent/failed counts restarting per run, a `persisted` `pagehide` flushing without closing, bodies past the `seq` ceiling counted as failed, `hidden_ms` clamped to the schema maximum, the byte-aware flush sized for the beacon, the keepalive reserve for the beacon, late settles of the previous run not counted, hiding the tab flushing the buffer, and the `failed` outcome |
 | `tests/js/dropzone.test.mjs` | the pure functions extracted from `dropzone.js`: `isFitsName`, `collectEntries`, `sliceChunks`, `validateFound`, `byPath`, `pickRun`, `makeErrorLatch` (first error only, re-arming, and keeping that error), and `makeRunFailure` (the upload loop's first-failure slot: a guarded rejection or a latched kernel error nobody was waiting for, first one wins, cleared by re-arming); and the tab-visibility helpers `makeTabWatch` (episode timing, capping at run end, frame counting only while hidden mid-run, the once-per-run pointer nudge, no negative durations, discarding a refused run), `hiddenTitle`, `tabWarningText`, `dialogChoseStart`, `isViewportExit`, and `readSkipTabWarning`/`writeSkipTabWarning` against missing and throwing storage |
 
 The JS tests exist specifically to pin down two front-end rules that would
@@ -814,8 +814,11 @@ from the Gaia query quotes its URL). The site is what bandaid resolved for
 the run — `site_lat`/`site_lon` from a measured frame's
 `meta["full_image_meta"]` (the SITELAT/SITELONG header, overridden by the
 form) via `on_result` — falling back to the form's fields, else null. Raw
-FITS headers are never forwarded. The browser's user agent, which the
-schema allows, is **not** sent: the consent text does not mention it.
+FITS headers themselves are never forwarded, but a skip reason can quote
+the header value that caused the skip (bandaid's `FrameMetadataError`
+messages carry the unparseable `obs_time` or the `ra`/`dec` strings with
+`!r`), and the consent text says so. The browser's user agent is not sent
+and not in the schema.
 
 **Who decides what.** Whether a run is reported is decided when its
 manifest is accepted (the box, the observer code and the comment are read
@@ -829,10 +832,15 @@ next to the box ("Links aren't accepted in comments — the frame
 diagnostics will still be sent…") and sent as `""`. The rows are never
 held back because of the comment. (The no-links rule is not confirmed yet;
 changing it is that function plus the schema.) **Preview report** shows the
-exact JSON of the run's first chunk: before a run, the next run's header
-with the report id it will really use and no rows; after one, its first 25
-rows. The only field it cannot show is `run.hidden_ms`, which only the page
-knows.
+JSON of the run's first chunk: before a run, the next run's header with
+the report id it will really use and no rows (with a note under it when the
+form's latitude/longitude are empty, because the run will fill `site_lat`/
+`site_lon` from the images' SITELAT/SITELONG and the preview cannot know
+them yet); after one, its first 25 rows under the header as the final chunk
+carried it (counters, outcome and comment frozen at the run's end; the
+obscode and form site were fixed when the run started). The fields it cannot
+show are `run.hidden_ms`, which only the page knows, and the counters as
+they stood when the first chunk really went out.
 
 **Who sends.** The kernel is a Pyodide web worker, with no `sendBeacon`, and
 cannot report its own death, so the page sends. The view
@@ -844,18 +852,25 @@ once per drop-zone *model* (anywidget's `initialize`, so a twice-rendered
 widget does not send twice) buffers the rows and POSTs a chunk with
 `fetch(url, {method: "POST", keepalive: true, body})` every 25 rows (sooner
 if the buffered rows would no longer fit one body, so that a `pagehide`
-flush is always a single beacon: beacons and keepalive fetches share one
-64 KB in-flight budget per page; the check sizes the buffer as the largest
-body those rows could become, the `pagehide` beacon), and the final chunk
-at the run's end (`outcome` `done` or `cancelled`). On `pagehide`
+flush is always a single beacon; the check sizes the buffer as the largest
+body those rows could become, a final chunk with the longest outcome), when
+the tab is hidden with rows buffered (a background tab can be frozen or
+discarded with no `pagehide` at all), and the final chunk at the run's end
+(`outcome` `done`, `cancelled` or `failed`). Beacons and keepalive fetches
+share one 64 KiB in-flight budget per page, so each body is capped at
+32,000 bytes and a POST that would leave less than one body's worth of that
+budget goes out *without* keepalive: a POST still in flight when the tab
+closes then cannot starve the `pagehide` beacon, which carries the chunk
+that says how the run ended. On `pagehide`
 mid-run it sends the final chunk with `navigator.sendBeacon` and outcome
 `page_closed`, so a crashed kernel's rows still arrive when the tester
 reloads; a `pagehide` with `persisted` (the page entering the back/forward
 cache, from which it may return with the run still going) instead beacons
 the buffered rows as an ordinary chunk and keeps the report open. The
-sent/failed counts behind the status line restart with each run. Bodies
-are plain strings (`text/plain`, so no CORS preflight),
-each capped at 60,000 bytes (split by rows if ever over). Every failure is
+sent/failed counts behind the status line are per run: a POST of the
+previous run settling late counts for nobody. Bodies are plain strings
+(`text/plain`, so no CORS preflight), split by rows if ever over the cap.
+Every failure is
 swallowed and counted; the run panel shows "3 reports sent" or "1 report
 failed to send — your run is unaffected" from the page's `report_status`
 messages. A run long enough to pass the schema's `seq` ceiling (999 chunks)
@@ -867,7 +882,9 @@ entry point is guarded: an exception is logged once ("Tester report stopped
 and closes the page's report with outcome `report_error` (not `cancelled`:
 the run goes on, and the stored report must not read as if the tester
 stopped it). A `report_status` that arrives while no run is being reported
-(a POST from the last run settling late) is ignored. The kernel's pattern
+is ignored. The obscode and the form's site are snapshotted when a reported
+run starts, so every chunk of the run is attributed the same way (the form
+is hidden during a run anyway; the comment stays live). The kernel's pattern
 guards use `fullmatch`, because Python's `$` matches before a trailing
 newline and the worker's JavaScript `$` does not; `tests/test_feedback_cross_validate.py`
 runs real producer output through the worker's own validator under node.

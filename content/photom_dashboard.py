@@ -711,8 +711,10 @@ class PhotometryDashboard:
         # Tester-report hooks (feedback_report, the view's `_report_*`).
         # `on_frame(dashboard, name, ok, reason, elapsed_s)` once per frame
         # the run counts, after the counters move and before its file_done
-        # goes out; `on_end(dashboard, outcome)` once when the run ends,
-        # "done" before run_done goes out, "cancelled" on a cancel. Both are
+        # goes out; `on_end(dashboard, outcome)` once when the run ends:
+        # "done" before run_done goes out, "cancelled" on the Stop button's
+        # cancel, "failed" on a cancel the front end sent with a reason (its
+        # upload loop died: an `error` reply, a read error, a timeout). Both are
         # called through `_call_hook`, so a hook that raises cannot touch
         # the run: reporting must never cost a frame.
         self.on_frame = on_frame
@@ -766,7 +768,7 @@ class PhotometryDashboard:
                   "drop_zone", "error"),
         "zip_request": (lambda self, content, buffers: self._on_zip_request(content),
                          "zip_widget", "zip_error"),
-        "cancel": (lambda self, content, buffers: self._on_cancel(),
+        "cancel": (lambda self, content, buffers: self._on_cancel(content),
                    "drop_zone", "error"),
         # Deliberately NOT "error": this message only feeds a banner, often
         # arrives after the run ended, and an `error` would cancel a run
@@ -992,7 +994,7 @@ class PhotometryDashboard:
                    {"type": "zip", "filename": zip_name(run, self.provenance)},
                    [data])
 
-    def _on_cancel(self):
+    def _on_cancel(self, content=None):
         if self.phase != "running":
             # The JS error path and its watchdog timers send cancels freely,
             # and the kernel dispatches queued messages in order -- so a
@@ -1005,7 +1007,13 @@ class PhotometryDashboard:
         self.assembler.reset()
         self.phase = "cancelled"
         self._push_runs()
-        self._call_hook(self.on_end, "cancelled")
+        # The Stop button's cancel is bare; the front end's own error paths
+        # (a kernel `error` reply, a file that would not read, a watchdog
+        # timeout) send one with a `reason`. The run panel reads the same
+        # either way, but a tester report must tell the two apart: a run
+        # that died is "failed", not something the tester stopped.
+        reason = content.get("reason") if isinstance(content, dict) else None
+        self._call_hook(self.on_end, "failed" if reason else "cancelled")
         self._changed()
 
     def _on_hidden_episode(self, content):

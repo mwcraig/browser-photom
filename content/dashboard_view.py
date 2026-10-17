@@ -76,13 +76,18 @@ REPORT_CONSENT = """
   <b>AAVSO observer code</b>, your <b>site position rounded to the nearest
   whole degree</b>, the <b>names of your image files</b>, and
   <b>per-frame diagnostic numbers</b> (star counts, FWHM, sky level,
-  plate-solve results, why a frame was skipped, how long each took), plus
-  your comment below. The receiving server adds the <b>country</b> it
-  infers from your connection; it does not keep your IP address. No
-  images, starlists or FITS headers are sent. The server deletes reports
-  after <b>30 days</b>; the developer keeps the copies downloaded for
-  review while the dashboard is being tested. Your run works the same
-  either way. Use <i>Preview report</i> to see exactly what would be sent.
+  plate-solve results, how long each took) and, for a skipped frame, the
+  <b>reason</b>, which can quote the header value that caused it (an
+  observation time or pointing, say). Each report also carries the run's
+  counts and timing, whether it finished, was stopped, failed or the tab
+  was closed, how long the tab spent in the background, and the dashboard
+  version, plus your comment below. The receiving server adds the
+  <b>country</b> it infers from your connection and when the report
+  arrived; it does not keep your IP address. No images, starlists or
+  FITS headers themselves are sent. The server deletes reports after
+  <b>30 days</b>; the developer keeps the copies downloaded for review
+  while the dashboard is being tested. Your run works the same either
+  way. Use <i>Preview report</i> to see what would be sent.
 </div>
 """
 
@@ -117,6 +122,13 @@ class DashboardView:
         # the preview of a finished run shows the id it was sent under.
         self._report_id = None
         self._run_report_id = None
+        # The obscode and form site as they stood when the reported run
+        # started, and the comment as it stood when the run ended: every
+        # chunk of a run is attributed the same way, whatever the form says
+        # later, and the preview of a finished run shows what it carried.
+        self._run_identity = None
+        self._run_comment = None
+        self._run_outcome = None
         # The id the *next* reported run will use, drawn early so that a
         # preview shown before the run carries the id it will really have.
         self._next_report_id = None
@@ -317,9 +329,11 @@ class DashboardView:
 
     # -- tester reports: form ----------------------------------------------
     #
-    # Opt-in, comment and obscode are all read live, like `_meta`: whether a
-    # run is reported is decided when its manifest is accepted, and every
-    # report message carries the comment as it stands when it is sent.
+    # Whether a run is reported, and under which obscode and form site, is
+    # decided when its manifest is accepted (`_report_start` snapshots
+    # them). The comment is read live: every report message carries it as
+    # it stands when the message is sent. The form is hidden while a run is
+    # going, so in practice none of this changes mid-run anyway.
 
     def _report_obscode_problem(self):
         return obscode_problem(self._meta.get("observer"))
@@ -367,15 +381,15 @@ class DashboardView:
         chunk holds -- at exactly ``ROWS_PER_CHUNK`` the page flushes those
         rows non-final and sends an empty final chunk after them.
         """
-        if self._report_obscode_problem() is not None:
+        if self._run_report_id is None and self._report_obscode_problem() is not None:
             return None
         report_id = self._run_report_id or self._last_report_id()
         header = self._report_header(report_id)
         rows = self._report_rows[:ROWS_PER_CHUNK]
-        phase = self.dashboard.phase
-        final = phase in ("done", "cancelled") and len(self._report_rows) < ROWS_PER_CHUNK
+        finished = self._run_outcome is not None
+        final = finished and len(self._report_rows) < ROWS_PER_CHUNK
         return build_chunk(header, rows, seq=0, final=final,
-                           outcome=phase if final else None)
+                           outcome=self._run_outcome if final else None)
 
     def _last_report_id(self):
         if self._next_report_id is None:
@@ -396,8 +410,14 @@ class DashboardView:
                 "<i>Fill in a valid observer code to see the report.</i>"
             )
             return
+        note = ""
         if not chunk["rows"]:
             caption = "The first report of the next run, before any frame has run:"
+            if chunk["site_lat"] is None and chunk["site_lon"] is None:
+                note = ("site_lat and site_lon are null here because the form's "
+                        "latitude and longitude are empty; once a frame has been "
+                        "measured they are filled from your images' SITELAT/"
+                        "SITELONG headers, rounded to whole degrees.")
         elif self._run_report_id is None:
             # The last run was not reported (box unticked, or no usable
             # observer code): these rows never went anywhere, and the id
@@ -408,7 +428,9 @@ class DashboardView:
             caption = "The first report of this run:"
         self.report_preview.value = (
             f'<div style="font-size:0.9em;margin-top:0.5em">{caption}</div>'
-            '<pre style="font-size:0.8em;max-height:24em;overflow:auto;'
+            + (f'<div style="font-size:0.85em;color:var(--jp-warn-color1,#b26a00)">'
+               f"{_escape(note)}</div>" if note else "")
+            + '<pre style="font-size:0.8em;max-height:24em;overflow:auto;'
             'padding:0.5em;background:var(--jp-layout-color2,#f5f5f5);'
             f'border-radius:4px;white-space:pre-wrap">{_escape(chunk_json(chunk, indent=2))}</pre>'
         )
@@ -443,19 +465,34 @@ class DashboardView:
                 except Exception:  # noqa: BLE001
                     pass
 
+    def _form_identity(self):
+        return {
+            "obscode": self._meta.get("observer", ""),
+            "site_lat": self._meta.get("site_lat"),
+            "site_lon": self._meta.get("site_lon"),
+        }
+
     def _report_header(self, report_id):
         state = self.dashboard.state
+        # A reported run's obscode and form site are the ones snapshotted at
+        # its start; the preview before a run reads the form live.
+        identity = (self._run_identity if report_id == self._run_report_id
+                    and self._run_identity else self._form_identity())
+        # The comment is live during the run; once the run has ended, the
+        # preview shows what the final chunk carried.
+        comment = (self._run_comment if self._run_comment is not None
+                   and report_id == self._run_report_id else self.report_comment.value)
         lat, lon = self._resolved_site
         return build_header(
             report_id=report_id,
-            obscode=self._meta.get("observer", ""),
+            obscode=identity["obscode"],
             # The site bandaid resolved (header, overridden by the form);
             # before the first measured frame, the form's own fields.
-            site_lat=lat if lat is not None else self._meta.get("site_lat"),
-            site_lon=lon if lon is not None else self._meta.get("site_lon"),
+            site_lat=lat if lat is not None else identity["site_lat"],
+            site_lon=lon if lon is not None else identity["site_lon"],
             build=self.dashboard.provenance,
             qa_schema=self._qa_schema,
-            comment=self.report_comment.value,
+            comment=comment,
             n_total=state.total,
             n_processed=state.processed,
             n_skipped=state.skipped,
@@ -471,6 +508,9 @@ class DashboardView:
         # resolved site, and the once-per-run failure log.
         self._report_id = None
         self._run_report_id = None
+        self._run_identity = None
+        self._run_comment = None
+        self._run_outcome = None
         self._report_rows = []
         self._pending_qa = {}
         self._qa_schema = 0
@@ -483,9 +523,14 @@ class DashboardView:
             return
         report_id = self._last_report_id()
         self._next_report_id = None
-        header = self._report_header(report_id)
-        self._report_send({"type": "report_start", "header": header})
+        self._run_identity = self._form_identity()
         self._report_id = self._run_report_id = report_id
+        try:
+            header = self._report_header(report_id)
+            self._report_send({"type": "report_start", "header": header})
+        except Exception:
+            self._report_id = self._run_report_id = None
+            raise
 
     def _report_frame(self, _dashboard, name, ok, reason, elapsed):
         self._report_guard(self._report_frame_unguarded, name, ok, reason, elapsed)
@@ -502,11 +547,13 @@ class DashboardView:
             })
 
     def _report_end(self, _dashboard, outcome):
+        self._run_outcome = outcome
         self._report_guard(self._report_end_unguarded, outcome)
 
     def _report_end_unguarded(self, outcome):
         if self._report_id is None:
             return
+        self._run_comment = self.report_comment.value
         header = self._report_header(self._report_id)
         # Cleared only once the send is through: if it raises, the guard
         # still sees the report as open and sends its bare report_end.

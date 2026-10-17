@@ -1,6 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
-import { handleReport, MAX_BODY_BYTES } from "../src/index.js";
+import { handleReport, MAX_BODY_BYTES, rateLimitKey } from "../src/index.js";
 
 const ORIGIN = "https://mwcraig.github.io";
 const URL_ = "https://feedback.example.workers.dev/report";
@@ -265,6 +265,14 @@ describe("routing, content type and CORS", () => {
     expect(res.headers.get("Access-Control-Allow-Headers")).toBe("Content-Type");
   });
 
+  it("refuses a preflight with no Origin at all", async () => {
+    const res = await exports.default.fetch(URL_, {
+      method: "OPTIONS", headers: { "Access-Control-Request-Method": "POST" },
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(null);
+  });
+
   it("refuses a preflight from another origin, with no CORS headers", async () => {
     const res = await exports.default.fetch(URL_, {
       method: "OPTIONS", headers: { Origin: "https://evil.example", "Access-Control-Request-Method": "POST" },
@@ -319,8 +327,63 @@ describe("rate limit", () => {
     expect(await listKeys()).toHaveLength(0);
   });
 
-  it("the wrangler.toml limiter binding is wired up", async () => {
+  it("keys IPv6 clients by their /64, IPv4 by address, and no header as unknown", () => {
+    const key = (ip) => rateLimitKey(new Request(URL_, { headers: ip === null ? {} : { "CF-Connecting-IP": ip } }));
+    // Two addresses one host can pick from the same /64 share a key ...
+    expect(key("2001:db8:85a3:8d3:1319:8a2e:370:7348")).toBe("2001:db8:85a3:8d3::/64");
+    expect(key("2001:0db8:85a3:08d3::1")).toBe("2001:db8:85a3:8d3::/64");
+    expect(key("2001:DB8:85A3:8D3:FFFF:FFFF:FFFF:FFFF")).toBe("2001:db8:85a3:8d3::/64");
+    // ... and a neighbouring /64 does not.
+    expect(key("2001:db8:85a3:8d4::1")).toBe("2001:db8:85a3:8d4::/64");
+    // "::" expansion puts the zero groups in the right place.
+    expect(key("2001:db8::1")).toBe("2001:db8:0:0::/64");
+    expect(key("::1")).toBe("0:0:0:0::/64");
+    // IPv4 is one address, in either spelling.
+    expect(key("198.51.100.4")).toBe("198.51.100.4");
+    expect(key("::ffff:198.51.100.4")).toBe("::ffff:198.51.100.4");
+    expect(key(null)).toBe("unknown");
+  });
+
+  it("503 without storing when the limiter itself fails", async () => {
+    const broken = { ...env, RATE_LIMITER: { limit: async () => { throw new Error("limiter down"); } } };
+    const req = new Request(URL_, {
+      method: "POST", headers: { "Content-Type": "text/plain", Origin: ORIGIN }, body: JSON.stringify(chunk()),
+    });
+    const res = await handleReport(req, broken);
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ORIGIN);
+    expect(await listKeys()).toHaveLength(0);
+  });
+
+  // The vitest config raises the limit to 100000 so the suite's shared key
+  // never trips it (vitest.config.js); this only checks the binding exists.
+  // wrangler.toml's 60/min is not exercised here.
+  it("the RATE_LIMITER binding exists and answers", async () => {
     expect(typeof env.RATE_LIMITER.limit).toBe("function");
     expect((await env.RATE_LIMITER.limit({ key: "probe" })).success).toBe(true);
+  });
+});
+
+describe("storage failure", () => {
+  function failing(method) {
+    return { ...env, REPORTS: { ...env.REPORTS, head: (k) => env.REPORTS.head(k), put: () => Promise.resolve(), [method]: async () => { throw new Error("r2 down"); } } };
+  }
+
+  it("503 with CORS headers when the put throws, and the client body is not echoed", async () => {
+    const req = new Request(URL_, {
+      method: "POST", headers: { "Content-Type": "text/plain", Origin: ORIGIN }, body: JSON.stringify(chunk()),
+    });
+    const res = await handleReport(req, failing("put"));
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ORIGIN);
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(await res.text()).not.toContain("CMW");
+  });
+
+  it("503 when the head throws", async () => {
+    const req = new Request(URL_, {
+      method: "POST", headers: { "Content-Type": "text/plain", Origin: ORIGIN }, body: JSON.stringify(chunk()),
+    });
+    expect((await handleReport(req, failing("head"))).status).toBe(503);
   });
 });

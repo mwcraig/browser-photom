@@ -116,6 +116,12 @@ lifecycle rules → Add rule**. Name it `expire-30d`, set the prefix to
 R2 applies lifecycle rules in the background, so an object can outlive 30
 days by up to about a day.
 
+**This step is what makes the consent text's "deletes reports after 30
+days" true.** Nothing in the code enforces it. `lifecycle list` must show
+the rule before you deploy, and the pull script (step 9) warns on stderr
+whenever it lists an object more than 31 days old, which means the rule is
+missing or broken.
+
 ## 4. Allowed origin
 
 `ALLOWED_ORIGIN` in `wrangler.toml` is already `https://mwcraig.github.io`.
@@ -149,7 +155,9 @@ namespace_id = "4201"
   period = 60
 ```
 
-Each IP may make 60 POSTs per 60 seconds. Over that, it gets `429`. A
+Each IPv4 address, or each IPv6 /64 (an IPv6 host usually has a whole /64
+to pick addresses from, so keying on the full address would make the limit
+void for it), may make 60 POSTs per 60 seconds. Over that, it gets `429`. A
 350-frame run sends about 15 chunks in total, normally over many minutes,
 but a run whose pipeline setup failed sends all 15 within seconds, and a
 tester who drops the folder again right away makes about 30 in a minute. 60
@@ -243,8 +251,13 @@ pixi exec -s python -s boto3 -s jsonschema -- \
 ```
 
 boto3 is deliberately not in the pixi environment, so `pixi exec` builds a
-throwaway one. The script mirrors objects into `feedback-reports/raw/`.
-Already-downloaded objects are skipped. It writes
+throwaway one. The script lists the whole bucket (never more than 30 days
+of small objects), then mirrors the selected objects into
+`feedback-reports/raw/`: with `--since`, every chunk of every report that
+has a chunk on or after that day, so a run that straddled UTC midnight
+comes whole. Already-downloaded objects are skipped. A `WARNING` on stderr
+about objects older than 30 days means the lifecycle rule from step 3 is
+not doing its job. It writes
 `feedback-reports/<report_id>.json` and `.csv` and prints one line per
 report:
 
@@ -296,14 +309,16 @@ allowances as of October 2026. Check them, because they change:
   each doing several 350-frame runs a day is a few thousand requests. The
   docs do not say clearly what happens past the daily cap, but the likely
   outcome is that requests fail, which the dashboard ignores. It is not a
-  bill. Note what the per-IP limit does *not* do, though: one address
-  sending 60 accepted chunks a minute all day is 86,400 requests, most of
-  the daily cap, and 64 KB objects at that rate kept for 30 days would be
-  well past the 10 GB storage tier. The limit is a brake on a runaway or
-  careless client, not protection against someone deliberately filling the
-  bucket. If that happens, the remedies are on the Cloudflare side: pause
-  the worker, tighten the limit, or add a daily budget (a KV counter, or a
-  second rate-limit binding keyed on a constant).
+  bill. Note what the per-IP limit does *not* do, though: one address (or
+  one IPv6 /64) sending 60 accepted chunks a minute all day is 86,400
+  requests, most of the daily cap, and 64 KB objects at that rate kept for
+  30 days would be well past the 10 GB storage tier. The limit is a brake
+  on a runaway or careless client, not protection against someone
+  deliberately filling the bucket. If that happens, the remedies are on the
+  Cloudflare side: pause the worker, tighten the limit, or add a daily
+  budget (a KV counter, or a second rate-limit binding keyed on a constant;
+  not added up front because one hostile client would then lock every
+  tester out).
 - **R2 free tier, per month:**
   - 10 GB-month of storage. A 350-frame run is about 15 objects of roughly
     15 KB, so about 250 KB. With 30-day expiry, thousands of runs would fit.
@@ -336,10 +351,26 @@ allowances as of October 2026. Check them, because they change:
   through the worker's validator under node (when `npm install` has been
   run here) to catch any other drift between the two engines.
 - Duplicate `(report_id, seq)` within one UTC day are not overwritten. The
-  worker checks with `head` before `put`. Two identical retries racing can
-  both write, which is harmless because their bodies are identical. A retry
-  that lands after UTC midnight goes under the next day's prefix, and the
-  pull script keeps the earlier copy and lists the duplicate.
+  worker checks with `head` before `put`, which is not atomic: two POSTs to
+  the same key racing both write and the last lands. The dashboard's
+  retries carry identical bodies, so for it that is harmless; a client
+  racing *different* bodies can only choose which of its own versions is
+  kept (report_id is 128 random bits, and an existing object is never
+  replaced after the fact). R2's conditional put
+  (`onlyIf: { etagDoesNotMatch: "*" }`) would close the window and save the
+  `head`; Miniflare honours it, but check it against the real service
+  before switching. A retry that lands after UTC midnight goes under the
+  next day's prefix, and the pull script keeps the earlier copy and lists
+  the duplicate.
+- A limiter or R2 failure inside the worker is caught and answered with a
+  `503` carrying the CORS headers (the page counts one failure); nothing is
+  logged. Without the catch the runtime's own error page would go out
+  without CORS headers, which the page also counts as a failure, so the
+  difference is a controlled status, not safety.
+- `run.outcome` values: `running` until the final chunk, then `done`,
+  `cancelled` (Stop button), `failed` (the run died: the front end's cancel
+  carried a reason), `page_closed` (tab closed mid-run) or `report_error`
+  (the dashboard's own reporting failed; the run went on).
 - Pinned versions (exact, all released at least two weeks before
   2026-10-16): `@cfworker/json-schema` 4.1.1, `wrangler` 4.146.0, `vitest`
   4.1.11, `@cloudflare/vitest-pool-workers` 0.22.0.

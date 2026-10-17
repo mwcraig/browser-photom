@@ -56,14 +56,14 @@ __all__ = [
 REPORT_SCHEMA_VERSION = 1
 
 # Rows per POST. `dropzone.js` has its own copy (REPORT_ROWS_PER_CHUNK); the
-# preview uses this one to show the first chunk. The schema allows 50; 25
-# keeps a chunk of worst-case rows (a 300-character reason, a 200-character
-# name, every number present) under the 64 KB keepalive/beacon cap when the
-# text is ASCII or Latin (~53 KB with 2-byte characters throughout). Wider
-# characters can push 25 such rows over it (~82 KB with 4-byte emoji
-# everywhere), which is why the page also flushes by bytes before it reaches
-# this count; the preview may then show one more row than the first chunk
-# really carried.
+# preview uses this one to show the first chunk. The schema allows 50. A
+# chunk of 25 ordinary rows (every number present, short names, no reason)
+# is ~20 KB, under the page's 32,000-byte body cap (half the browser's
+# 64 KiB keepalive budget, so a POST in flight and the pagehide beacon both
+# fit). Worst-case rows (a 300-character reason, a 200-character name) can
+# push 25 of them well over it, which is why the page also flushes by
+# bytes before it reaches this count; the preview may then show more rows
+# than the first chunk really carried.
 ROWS_PER_CHUNK = 25
 
 # bandaid's QA_MANIFEST_COLUMNS at the pinned commit (scripts.py), the key set
@@ -349,11 +349,16 @@ def build_header(
 
 def _num(value, *, lower=-_NUM_LIMIT, upper=_NUM_LIMIT):
     """A finite float in [lower, upper], rounded to 6 significant figures,
-    or None. Six figures, like bandaid's own manifest: enough for any QA
-    signal, and it keeps a row's JSON short."""
+    or None. Six figures is enough for any QA signal and keeps a row's JSON
+    short; note that bandaid's own manifest rounds only its offset and
+    plane columns, so a report row's fwhm or sky_median is not byte-for-
+    byte the native qa_manifest.csv value (it agrees to 1 part in 1e5)."""
     if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:  # an int too large for a float
+        return None
     if not math.isfinite(number) or not lower <= number <= upper:
         return None
     return float(f"{number:.6g}")

@@ -65,8 +65,9 @@ async function readCapped(request, limit) {
   return out;
 }
 
-// A short reason for a 400: which field and which keyword failed, never an
-// echo of the submitted value.
+// A short reason for a 400: which field (its JSON path, so an unknown
+// property's *name* can appear here) and which keyword failed, never the
+// submitted value itself.
 function schemaReason(errors) {
   const leaf = errors[errors.length - 1] || errors[0];
   if (!leaf) return "schema validation failed";
@@ -108,8 +109,13 @@ export async function handleReport(request, env) {
     return reply(405, "method not allowed", { ...cors, Allow: "POST, OPTIONS" });
   }
 
-  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-  const { success } = await env.RATE_LIMITER.limit({ key: ip });
+  let success;
+  try {
+    ({ success } = await env.RATE_LIMITER.limit({ key: rateLimitKey(request) }));
+  } catch {
+    // A limiter outage: refuse rather than write without a brake.
+    return reply(503, "temporarily unavailable", { ...cors, "Retry-After": "60" });
+  }
   if (!success) return reply(429, "rate limited", { ...cors, "Retry-After": "60" });
 
   const mediaType = (request.headers.get("Content-Type") || "")
@@ -140,23 +146,59 @@ export async function handleReport(request, env) {
   const day = received.toISOString().slice(0, 10);
   const key = `reports/${day}/${report.report_id}/${report.seq}.json`;
 
-  // A retried chunk must not replace the first copy. head-then-put leaves a
-  // window in which two simultaneous identical retries both write; both
-  // carry the same body, so that race is harmless.
-  if ((await env.REPORTS.head(key)) === null) {
-    // Re-serialised from the parsed object, not spliced from the raw text:
-    // with duplicate keys JSON.parse keeps the last value, so the raw text
-    // could carry an earlier value the validator never saw.
-    const record = {
-      received_at: received.toISOString(),
-      country: (request.cf && request.cf.country) || null,
-      report,
-    };
-    await env.REPORTS.put(key, JSON.stringify(record), {
-      httpMetadata: { contentType: "application/json" },
-    });
+  // A retried chunk must not replace the first copy. head-then-put is not
+  // atomic: two simultaneous POSTs to the same key both write and the last
+  // one lands. The dashboard's retries carry identical bodies, so for it
+  // the race is harmless; a client racing *different* bodies can only
+  // decide which of its own versions is kept, since report_id is 128
+  // random bits and an existing object is never replaced after the fact.
+  // (R2's conditional put, onlyIf: { etagDoesNotMatch: "*" }, would close
+  // the window; it is not used until its behaviour on the real service,
+  // not just Miniflare, has been checked.)
+  try {
+    if ((await env.REPORTS.head(key)) === null) {
+      // Re-serialised from the parsed object, not spliced from the raw
+      // text: with duplicate keys JSON.parse keeps the last value, so the
+      // raw text could carry an earlier value the validator never saw.
+      const record = {
+        received_at: received.toISOString(),
+        country: (request.cf && request.cf.country) || null,
+        report,
+      };
+      await env.REPORTS.put(key, JSON.stringify(record), {
+        httpMetadata: { contentType: "application/json" },
+      });
+    }
+  } catch {
+    // Storage trouble. A controlled 503 with CORS headers, so the page
+    // counts one failure instead of seeing an opaque runtime error page.
+    // Nothing is logged: the body is the tester's and the IP is nobody's
+    // business.
+    return reply(503, "storage unavailable", { ...cors, "Retry-After": "60" });
   }
   return new Response(null, { status: 204, headers: cors });
+}
+
+// The rate-limit key. IPv6 clients usually hold a whole /64 and can pick any
+// address in it, so keying on the full address would make the limit void
+// for them: key on the first four hextets instead. IPv4 is used as is.
+export function rateLimitKey(request) {
+  const ip = request.headers.get("CF-Connecting-IP");
+  if (!ip) return "unknown";
+  // IPv4, including the IPv4-mapped form "::ffff:a.b.c.d": one address.
+  if (!ip.includes(":") || ip.includes(".")) return ip;
+  // Expand "::" so the first four groups are the first four hextets.
+  const [head, tail = ""] = ip.split("::");
+  const headParts = head ? head.split(":") : [];
+  const tailParts = tail ? tail.split(":") : [];
+  const missing = 8 - headParts.length - tailParts.length;
+  const groups = ip.includes("::")
+    ? [...headParts, ...Array(Math.max(0, missing)).fill("0"), ...tailParts]
+    : headParts;
+  return groups
+    .slice(0, 4)
+    .map((g) => g.toLowerCase().replace(/^0+(?=\w)/, ""))
+    .join(":") + "::/64";
 }
 
 export default {

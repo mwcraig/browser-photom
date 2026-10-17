@@ -12,7 +12,7 @@
   "properties": {
     "schema_version": { "const": 1 },
     "report_id": {
-      "description": "Random per run (32 lowercase hex), generated in the browser.",
+      "description": "Random per run (32 lowercase hex), drawn by the dashboard kernel when the run starts.",
       "type": "string", "pattern": "^[0-9a-f]{32}$"
     },
     "seq": { "type": "integer", "minimum": 0, "maximum": 999 },
@@ -52,7 +52,10 @@
         "n_skipped": { "type": "integer", "minimum": 0, "maximum": 100000 },
         "median_s": { "type": ["number", "null"], "minimum": 0, "maximum": 100000 },
         "hidden_ms": { "type": ["integer", "null"], "minimum": 0, "maximum": 1000000000 },
-        "outcome": { "enum": ["running", "done", "cancelled", "page_closed", "report_error", null] }
+        "outcome": {
+          "description": "running until the final chunk; then done, cancelled (the Stop button), failed (the run died: an error reply, a file that would not read, an upload timeout), page_closed (the tab closed mid-run) or report_error (the dashboard's own reporting failed mid-run; the run itself went on).",
+          "enum": ["running", "done", "cancelled", "failed", "page_closed", "report_error", null]
+        }
       }
     },
     "rows": {

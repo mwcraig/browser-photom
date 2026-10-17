@@ -237,21 +237,22 @@ class FakeS3:
 
 def test_download_mirrors_new_keys_only(pf, tmp_path):
     objects = {
-        key(0, "2026-10-31"): b"{}",
-        key(0): json.dumps(stored(chunk(0, [ROW_OK]))).encode(),
-        key(1): b"{}",
+        key(0, "2026-10-31", "b" * 32): b"{}",          # another report, wholly before
+        key(0, "2026-10-31"): b"{}",                    # this report's first chunk
+        key(1): json.dumps(stored(chunk(1, [ROW_OK]))).encode(),
+        key(2): b"{}",
     }
     client = FakeS3(objects)
-    (tmp_path / key(1)).parent.mkdir(parents=True)
-    (tmp_path / key(1)).write_bytes(b"already here")
-    # --since 2026-11-01 lists from the day before (a run can straddle UTC
-    # midnight); load_raw is what then decides by whole report.
+    (tmp_path / key(2)).parent.mkdir(parents=True)
+    (tmp_path / key(2)).write_bytes(b"already here")
+    # --since selects whole reports: RID has a chunk on 2026-11-05, so its
+    # 2026-10-31 chunk comes too; the other report does not.
     assert pf.download(client, "bkt", tmp_path, "2026-11-01") == (3, 2, 0)
-    assert client.list_kwargs == {"Bucket": "bkt", "Prefix": "reports/",
-                                  "StartAfter": "reports/2026-10-31"}
-    assert client.gets == [key(0, "2026-10-31"), key(0)]
-    assert (tmp_path / key(1)).read_bytes() == b"already here"
+    assert client.list_kwargs == {"Bucket": "bkt", "Prefix": "reports/"}
+    assert client.gets == [key(0, "2026-10-31"), key(1)]
+    assert (tmp_path / key(2)).read_bytes() == b"already here"
     assert (tmp_path / key(0, "2026-10-31")).read_bytes() == b"{}"
+    assert not (tmp_path / key(0, "2026-10-31", "b" * 32)).exists()
 
 
 # -- review fixes (PR #16) ---------------------------------------------------
@@ -312,14 +313,22 @@ def test_since_selects_whole_reports_across_utc_midnight(pf, tmp_path):
     assert [pf.parse_key(k)[2] for k, _ in grouped[straddler]] == [0, 1]
     assert set(pf.load_raw(raw)) == {straddler, RID}
 
-    # download mirrors from the day before so those earlier chunks exist locally.
-    assert pf.day_before("2026-11-01") == "2026-10-31"
+    # download selects by the same rule, so those earlier chunks exist locally
+    # -- however far back they are (not expected in practice; the selection
+    # simply does not depend on a lookback window).
     objects = {k: json.dumps(v).encode() for k, v in files.items()}
     objects[key(0, "2026-11-03")] = b"{}"
+    far_back = "c" * 32
+    objects[key(0, "2026-11-01", far_back)] = b"{}"
+    objects[key(1, "2026-11-06", far_back)] = b"{}"
     client = FakeS3(objects)
-    assert pf.download(client, "bkt", tmp_path / "mirror", "2026-11-05") == (3, 3, 0)
-    assert client.list_kwargs["StartAfter"] == "reports/2026-11-04"
+    assert pf.download(client, "bkt", tmp_path / "mirror", "2026-11-05") == (4, 4, 0)
     assert not (tmp_path / "mirror" / key(0, "2026-11-03")).exists()
+    assert (tmp_path / "mirror" / key(0, "2026-11-01", far_back)).exists()
+    assert pf.select_keys(list(objects), "2026-11-05") == sorted(
+        [key(0, "2026-11-04", straddler), key(1, "2026-11-05", straddler),
+         key(0, "2026-11-01", far_back), key(1, "2026-11-06", far_back)])
+    assert pf.select_keys(list(objects)) == sorted(objects)
 
 
 def test_unhashable_header_values_in_a_flagged_chunk_do_not_abort_the_merge(pf, validator):
@@ -427,3 +436,43 @@ def test_since_must_be_a_real_date(pf, tmp_path):
     with pytest.raises(SystemExit):
         pf.main(["bucket", "--offline", "--out", str(tmp_path), "--since", "2026-02-30"])
     assert pf.main(["bucket", "--offline", "--out", str(tmp_path), "--since", "2026-02-28"]) == 0
+
+
+# -- fourth review round -------------------------------------------------------
+
+
+def test_the_header_comes_from_the_last_readable_chunk(pf, validator):
+    items = [
+        (key(0), stored(chunk(0, [ROW_OK], comment="kept"))),
+        (key(1), {"unparseable": "Expecting value: line 1 column 1 (char 0)"}),
+    ]
+    merged = pf.merge_report(RID, items, validator)
+    assert merged["obscode"] == "CMW" and merged["comment"] == "kept"
+    assert merged["run"]["n_total"] == 3
+    assert merged["unreadable_keys"] == [] and merged["invalid_chunks"]  # flagged, not blanked
+    assert "INVALID" in pf.summary_line(merged)
+
+
+def test_objects_the_lifecycle_rule_should_have_removed_are_reported(pf, tmp_path, capsys, monkeypatch):
+    from datetime import date
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 12, 15)
+
+    monkeypatch.setattr(pf, "date", FixedDate)
+    keys = [key(0, "2026-11-13"), key(0, "2026-11-14"), key(0, "2026-12-14", "b" * 32)]
+    # 31 days back is allowed (the rule runs daily); 32 is not.
+    assert pf.stale_keys(keys) == [key(0, "2026-11-13")]
+    pf.download(FakeS3({k: b"{}" for k in keys}), "bkt", tmp_path)
+    err = capsys.readouterr().err
+    assert "lifecycle rule" in err and "1 object(s)" in err and key(0, "2026-11-13") in err
+    pf.download(FakeS3({keys[1]: b"{}"}), "bkt", tmp_path / "fresh")
+    assert capsys.readouterr().err == ""
+
+
+def test_the_failed_outcome_is_in_the_schema(validator):
+    assert list(validator.iter_errors(
+        chunk(0, [], final=True, run={"n_total": 1, "n_processed": 0, "n_skipped": 0,
+                                       "outcome": "failed"}))) == []

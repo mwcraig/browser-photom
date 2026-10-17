@@ -413,9 +413,17 @@ export function makeTabWatch() {
 // preview uses it); the schema allows 50.
 export const REPORT_ROWS_PER_CHUNK = 25;
 
-// Per-body byte cap: under the 64 KB that keepalive fetches and sendBeacon
-// may carry (and the worker accepts). A body over it is split by rows.
-export const REPORT_MAX_BYTES = 60_000;
+// The browser's budget for keepalive requests: fetch(keepalive) bodies and
+// sendBeacon payloads in flight at once share 64 KiB per page, and one that
+// would go over is refused (fetch rejects, sendBeacon returns false).
+export const KEEPALIVE_QUOTA_BYTES = 64 * 1024;
+
+// Per-body byte cap: half the quota, less a margin, so that one keepalive
+// POST still in flight when the tab closes leaves room for the pagehide
+// beacon. `post` also stops using keepalive once the in-flight bytes plus
+// a body would eat into that reserve (see there). A body over the cap is
+// split by rows. The worker accepts up to the full 64 KiB.
+export const REPORT_MAX_BYTES = 32_000;
 
 // The schema's seq maximum. A run long enough to reach it (~25,000 frames)
 // stops reporting rather than sending chunks the worker rejects; each body
@@ -488,13 +496,16 @@ export function reportBodies(header, rows, seq, final, outcome, hiddenMs, maxByt
  *   final chunk by beacon with outcome "page_closed". With `persisted` (the
  *   page is entering the back/forward cache, not closing) beacon the
  *   buffered rows as a non-final chunk and stay open.
- * - hide(nowMs) / show(nowMs): tab visibility, for run.hidden_ms.
- * - counts(): { sent, failed } POSTs so far, over the reporter's lifetime.
+ * - hide(nowMs) / show(nowMs): tab visibility, for run.hidden_ms. hide()
+ *   also POSTs the buffered rows: a hidden tab can be frozen or discarded
+ *   by the browser without any pagehide, and rows still in the buffer
+ *   then would be gone.
+ * - counts(): { sent, failed } POSTs of the current run so far.
  *
  * `fetchFn(url, init)` and `beaconFn(url, body)` are injected; `onStatus`
  * gets the counts after every settled POST. Nothing here throws.
  */
-export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPORT_ROWS_PER_CHUNK, maxBytes = REPORT_MAX_BYTES } = {}) {
+export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPORT_ROWS_PER_CHUNK, maxBytes = REPORT_MAX_BYTES, quotaBytes = KEEPALIVE_QUOTA_BYTES } = {}) {
   let url = '';
   let header = null;
   let active = false;
@@ -504,6 +515,14 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
   let hiddenAt = null;
   let sent = 0;
   let failed = 0;
+  // Which run the counts belong to: a POST settles whenever the network
+  // lets it, and one from the previous run must not land in this run's
+  // "N reports sent" line.
+  let run = 0;
+  // Bytes of keepalive bodies this reporter has in flight, by its own
+  // accounting (settled when the response arrives, which for a 204 is when
+  // the browser lets the quota go too).
+  let inflight = 0;
 
   function status() {
     try {
@@ -519,21 +538,38 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
     return total > 0 ? total : null;
   }
 
-  function settle(ok) {
+  function settle(ok, ofRun = run) {
+    if (ofRun !== run) return;
     if (ok) sent += 1;
     else failed += 1;
     status();
   }
 
   function post(body) {
-    const init = { method: 'POST', body, keepalive: true, credentials: 'omit' };
+    const ofRun = run;
+    const bytes = byteLength(body);
+    // Reserve one body's worth of the keepalive quota for the pagehide
+    // beacon: when this POST would leave less than that, send it without
+    // keepalive instead. Such a POST dies with the page, but so would the
+    // beacon the alternative starves, and the final chunk is the one that
+    // says how the run ended.
+    const keepalive = inflight + bytes <= quotaBytes - maxBytes;
+    const init = { method: 'POST', body, keepalive, credentials: 'omit' };
     const attempt = (opts) => Promise.resolve().then(() => fetchFn(url, opts));
-    // keepalive requests share one 64 KB in-flight quota per page, so two
-    // chunks in flight at once can make the second one reject; one retry
-    // without keepalive covers that (and a transient network blip).
+    if (keepalive) inflight += bytes;
+    const release = () => {
+      if (keepalive) inflight = Math.max(0, inflight - bytes);
+    };
+    // The browser's own accounting may differ from ours (another keepalive
+    // sender on the page), so a keepalive fetch can still reject at once;
+    // one retry without keepalive covers that and a transient network blip.
     attempt(init)
-      .catch(() => attempt({ ...init, keepalive: false }))
-      .then((resp) => settle(Boolean(resp && resp.ok)), () => settle(false));
+      .catch(() => {
+        release();
+        return attempt({ ...init, keepalive: false });
+      })
+      .then((resp) => { release(); settle(Boolean(resp && resp.ok), ofRun); },
+            () => { release(); settle(false, ofRun); });
   }
 
   function beacon(body) {
@@ -561,12 +597,12 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
 
   // Would `candidate` go out as one body under the current header, however
   // it ends up being flushed? Sized as the largest body the same rows can
-  // become: the pagehide beacon, which is final, carries the longest
-  // outcome and a hidden_ms that may have grown to its 10-digit maximum.
+  // become: a final chunk with the longest outcome string the schema has
+  // and a hidden_ms grown to its 10-digit maximum.
   function fits(candidate, nowMs) {
     try {
       const body = JSON.stringify(
-        buildReportChunk(header, candidate, seq, true, 'page_closed', REPORT_MAX_HIDDEN_MS)
+        buildReportChunk(header, candidate, seq, true, 'report_error', REPORT_MAX_HIDDEN_MS)
       );
       return byteLength(body) <= maxBytes;
     } catch (err) {
@@ -595,9 +631,9 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
       hiddenTotal = 0;
       hiddenAt = hiddenNow ? nowMs : null;
       // The status line reads "N reports sent" for *this* run (the view
-      // clears it at each start), so the counts start over too. A POST of
-      // the previous run still in flight lands in the new run's count; it
-      // is one chunk, and a line, not accounting.
+      // clears it at each start), so the counts start over too, and a POST
+      // of the previous run still in flight settles into nothing.
+      run += 1;
       sent = 0;
       failed = 0;
     },
@@ -629,9 +665,11 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
     },
     end(outcome, newHeader, nowMs) {
       if (newHeader && active) header = newHeader;
-      // "report_error" is the kernel closing the report because its own
-      // reporting failed mid-run; anything else unknown is a finished run.
-      const known = outcome === 'cancelled' || outcome === 'report_error';
+      // "failed" is the run dying on an error (the upload loop's cancel
+      // carries a reason); "report_error" is the kernel closing the report
+      // because its own reporting failed mid-run; anything else unknown is
+      // a finished run.
+      const known = outcome === 'cancelled' || outcome === 'failed' || outcome === 'report_error';
       finish(known ? outcome : 'done', nowMs, false);
     },
     pageClosed(nowMs, persisted) {
@@ -652,7 +690,20 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
       finish('page_closed', nowMs, true);
     },
     hide(nowMs) {
-      if (active && hiddenAt === null) hiddenAt = nowMs;
+      if (!active) return;
+      if (hiddenAt === null) hiddenAt = nowMs;
+      // A background tab may be frozen or discarded with no pagehide at
+      // all (Chrome's memory saver, phones), taking the buffer with it: get
+      // the buffered rows out now, as an ordinary keepalive POST (which
+      // survives a discard; a beacon could be refused for quota and the
+      // rows would be gone with it).
+      if (rows.length > 0) {
+        try {
+          flush(false, null, nowMs, false);
+        } catch (err) {
+          // Swallowed.
+        }
+      }
     },
     show(nowMs) {
       if (hiddenAt === null) return;
@@ -1136,7 +1187,7 @@ function renderDropZone({ model, el, signal }) {
         // firing here must not cancel a healthy later upload.
         if (waiter.runId === runCounter) {
           try {
-            model.send({ type: 'cancel' });
+            model.send({ type: 'cancel', reason: 'timeout' });
           } catch (sendErr) {
             // Comm is gone; the reject below still unwinds the loop, and
             // the status line it produces says reload is the recovery.
@@ -1167,7 +1218,7 @@ function renderDropZone({ model, el, signal }) {
       // send, and the download button would never appear. With no waiter
       // pending the loop itself sends it, from its catch, once rethrow()
       // picks the error up from the latch.
-      if (pending.length > 0) model.send({ type: 'cancel' });
+      if (pending.length > 0) model.send({ type: 'cancel', reason: 'error' });
       setStatus(`Error: ${msg.reason || 'unknown error'}`);
       return;
     }
@@ -1317,7 +1368,7 @@ function renderDropZone({ model, el, signal }) {
       // `cancel` is idempotent, so the extra one sent when the kernel's own
       // error message is what unwound us is harmless.
       try {
-        model.send({ type: 'cancel' });
+        model.send({ type: 'cancel', reason: 'upload' });
       } catch (sendErr) {
         // Comm is gone; nothing left to tell it with. Reload is the only
         // recovery, and the status line above says so as well as it can.

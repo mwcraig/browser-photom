@@ -97,6 +97,8 @@ def _hostile_chunks():
                                hidden_ms=1_000_000_000)))
     chunks.append(("report_error outcome",
                    build_chunk(_header(), [], seq=1, final=True, outcome="report_error")))
+    chunks.append(("failed outcome",
+                   build_chunk(_header(), [], seq=1, final=True, outcome="failed")))
     return chunks
 
 

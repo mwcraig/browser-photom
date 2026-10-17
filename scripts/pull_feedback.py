@@ -10,7 +10,8 @@ fields, run counters and every row, chunks sorted by seq) and
 ``<out>/<report_id>.csv`` (the rows; a string cell that a spreadsheet would
 take for a formula is prefixed with ``'``), and prints one line per report.
 ``--since`` selects reports with any chunk stored on or after that UTC day,
-and then all of each one's chunks.
+and then all of each one's chunks, however many days back they go (the
+whole bucket is listed; only the selected reports' objects are fetched).
 
 Every chunk is re-validated against feedback/report.schema.json. The worker
 already refused anything invalid, so a failure here means the schema or the
@@ -187,7 +188,9 @@ def merge_report(report_id, stored, validator=None):
         for row in chunk_rows if isinstance(chunk_rows, list) else []:
             rows.append({"seq": seq, **row} if isinstance(row, dict) else {"seq": seq})
 
-    latest = reports[-1] if reports else {}
+    # Header fields from the highest-seq chunk that could be read: an
+    # unreadable final chunk must not blank out what the earlier ones say.
+    latest = next((r for r in reversed(reports) if r), {})
     conflicts = [f for f in STABLE_FIELDS if _header_values(reports, f) > 1]
     received = sorted(str(rec.get("received_at")) for _, rec in chunks
                       if rec.get("received_at"))
@@ -290,9 +293,32 @@ def summary_line(merged):
     return " ".join(parts) + f" | {comment!r}"
 
 
-def day_before(day):
-    """``YYYY-MM-DD`` of the day before ``day``."""
-    return (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+# The lifecycle rule docs/feedback-deploy.md has you create; the consent text
+# promises it. Nothing in code enforces it, so the pull warns when it sees an
+# object the rule should have removed.
+RETENTION_DAYS = 30
+
+
+def select_keys(keys, since=None):
+    """The worker-layout keys to mirror: every chunk of every report that
+    has at least one chunk on or after ``since`` (all of them without it).
+
+    Whole reports, not chunks: a run can straddle UTC midnight, or be
+    suspended for days between chunks, and its earlier chunks must come
+    along however far back they are.
+    """
+    if since is None:
+        return keys_since(keys)
+    wanted = {parse_key(k)[1] for k in keys_since(keys, since)}
+    return sorted(k for k in keys_since(keys) if parse_key(k)[1] in wanted)
+
+
+def stale_keys(keys, today=None, retention_days=RETENTION_DAYS):
+    """Keys whose day is more than ``retention_days`` + 1 days ago -- objects
+    the bucket's lifecycle rule should have deleted by now."""
+    today = date.today() if today is None else today
+    cutoff = (today - timedelta(days=retention_days + 1)).isoformat()
+    return [k for k in keys_since(keys) if parse_key(k)[0] < cutoff]
 
 
 def load_raw(raw_dir, since=None):
@@ -384,28 +410,34 @@ def r2_client(environ=None):
 
 
 def download(client, bucket, raw_dir, since=None):
-    """Mirror report objects into ``raw_dir``; return (n listed, n fetched,
+    """Mirror report objects into ``raw_dir``; return (n selected, n fetched,
     n failed).
 
-    With ``since``, objects from the day before are mirrored too: a run that
-    crossed UTC midnight has its first chunks under the earlier day, and
-    `load_raw` decides by report, not by chunk. Each file is written whole
-    or not at all (to a ``.part`` name, then renamed), so an interrupted
-    pull never leaves a truncated file that the next pull would skip as
-    "already here". A get that fails (an object the lifecycle rule deleted
-    between the list and the get, a 5xx boto gave up on) is reported on
-    stderr and skipped; the next pull fetches it if it is still there.
+    The whole bucket is listed (at most 30 days of small objects, one
+    request per thousand), then with ``since`` only the objects of reports
+    that have a chunk on or after that day are fetched -- all of their
+    objects, so a run that crossed UTC midnight or sat suspended for days
+    comes whole, and `load_raw` selects by the same rule. Each file is
+    written whole or not at all (to a ``.part`` name, then renamed), so an
+    interrupted pull never leaves a truncated file that the next pull would
+    skip as "already here". A get that fails (an object the lifecycle rule
+    deleted between the list and the get, a 5xx boto gave up on) is
+    reported on stderr and skipped; the next pull fetches it if it is still
+    there. Objects older than the retention the consent text promises are
+    reported on stderr too: that is the lifecycle rule missing.
     """
     raw_dir = Path(raw_dir)
     listed = []
-    kwargs = {"Bucket": bucket, "Prefix": PREFIX}
-    first_day = day_before(since) if since else None
-    if first_day:
-        # Keys sort by day, so start listing just before that day's prefix.
-        kwargs["StartAfter"] = f"{PREFIX}{first_day}"
-    for page in client.get_paginator("list_objects_v2").paginate(**kwargs):
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=PREFIX):
         listed.extend(obj["Key"] for obj in page.get("Contents", []))
-    keys = keys_since(listed, first_day)
+    stale = stale_keys(listed)
+    if stale:
+        print(f"WARNING: {len(stale)} object(s) older than {RETENTION_DAYS} days are "
+              f"still in {bucket} (oldest {stale[0]}); the bucket's lifecycle "
+              "rule is missing or not working (docs/feedback-deploy.md step 3)",
+              file=sys.stderr)
+    keys = select_keys(listed, since)
     fetched = failed = 0
     for key in keys:
         dest = raw_dir / key

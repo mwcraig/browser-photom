@@ -15,7 +15,7 @@ import jsonschema
 import pytest
 
 from dashboard_view import DashboardView, report_status_text
-from feedback_report import NO_QA_STATUS, build_chunk, chunk_json
+from feedback_report import NO_QA_STATUS, ROWS_PER_CHUNK, build_chunk, chunk_json
 
 URL = "https://bp.example.workers.dev/report"
 SCHEMA = json.loads(
@@ -508,3 +508,91 @@ def test_a_failing_report_end_still_closes_the_pages_report(view):
     ends = [c for c in reports(view) if c["type"] == "report_end"]
     assert ends == [{"type": "report_end", "outcome": "report_error"}]
     assert view._report_id is None
+
+
+# -- fourth review round -------------------------------------------------------
+
+
+def test_the_consent_names_everything_a_chunk_carries(view):
+    text = view.report_consent.value
+    for phrase in ("observer code", "rounded to the nearest", "names of your image files",
+                   "reason", "header value", "counts and timing", "whether it finished",
+                   "background", "dashboard\n  version", "country", "when the report\n  arrived",
+                   "IP address", "30 days"):
+        assert phrase in text, phrase
+
+
+def test_a_cancel_with_a_reason_ends_the_report_as_failed(view):
+    fill(view)
+    view.report_opt_in.value = True
+    manifest(view, "a.fit", "b.fit")
+    upload(view, "a.fit")
+    receive(view, {"type": "cancel", "reason": "timeout"})
+    end = reports(view)[-1]
+    assert end["type"] == "report_end" and end["outcome"] == "failed"
+    assert view.dashboard.phase == "cancelled"   # the run panel reads the same
+    chunk = assert_valid(view.preview_chunk())
+    assert chunk["final"] is True and chunk["run"]["outcome"] == "failed"
+
+
+def test_the_obscode_and_form_site_are_fixed_when_the_reported_run_starts(view):
+    fill(view, lat="39.7")
+    view.report_opt_in.value = True
+    manifest(view, "a.fit", "b.fit")
+    upload(view, "a.fit")
+    # The form is hidden while a run is going, but the meta dict is what the
+    # header read live; make it change anyway.
+    view._meta["observer"] = "XYZ"
+    view._meta.pop("site_lat")
+    upload(view, "b.fit")
+    headers = [m["header"] for m in reports(view)]
+    assert {h["obscode"] for h in headers} == {"LGEB"}
+    assert {h["site_lat"] for h in headers} == {40}
+    # After the run the preview still shows what was sent ...
+    assert view.preview_chunk()["obscode"] == "LGEB"
+    # ... and a now-invalid observer code does not hide it.
+    view.observer.value = ""
+    assert view.preview_chunk()["obscode"] == "LGEB"
+    # The next run reads the form afresh.
+    view.observer.value = "xyz"
+    manifest(view, "c.fit", folder="night2")
+    upload(view, "c.fit")
+    assert reports(view)[-1]["header"]["obscode"] == "XYZ"
+
+
+def test_the_preview_of_a_finished_run_keeps_the_comment_it_was_sent_with(view):
+    fill(view)
+    view.report_opt_in.value = True
+    view.report_comment.value = "as sent"
+    manifest(view, "a.fit")
+    upload(view, "a.fit")
+    assert reports(view)[-1]["header"]["comment"] == "as sent"
+    view.report_comment.value = "edited afterwards"
+    assert view.preview_chunk()["comment"] == "as sent"
+    # Before the next run, the preview is live again.
+    view._report_start()
+    assert view.preview_chunk()["comment"] == "edited afterwards"
+
+
+def test_the_preview_before_a_run_says_where_a_null_site_will_come_from(view):
+    fill(view)                                  # no latitude/longitude
+    view.report_opt_in.value = True
+    view._toggle_preview()
+    assert "SITELAT" in view.report_preview.value
+    assert '"site_lat": null' in view.report_preview.value
+    fill(view, lat="39.7", lon="-105.2")
+    assert "SITELAT" not in view.report_preview.value
+    assert '"site_lat": 40' in view.report_preview.value
+
+
+def test_the_preview_of_a_long_run_is_only_the_first_chunks_rows(view):
+    fill(view)
+    view.report_opt_in.value = True
+    names = [f"f{i:03d}.fit" for i in range(ROWS_PER_CHUNK + 1)]
+    manifest(view, *names)
+    for n in names:
+        upload(view, n)
+    chunk = assert_valid(view.preview_chunk())
+    assert len(chunk["rows"]) == ROWS_PER_CHUNK
+    assert chunk["final"] is False and chunk["run"]["outcome"] == "running"
+    assert chunk["run"]["n_processed"] == ROWS_PER_CHUNK + 1  # the run's latest counters

@@ -1009,3 +1009,30 @@ def test_a_hidden_episode_whose_view_update_raises_replies_non_fatally(tmp_path)
     assert drop.of_type("error") == []
     assert drop.of_type("hidden_episode_error")
     assert dash.phase == "running"
+
+
+# --- reporting hooks ------------------------------------------------------
+
+
+def test_a_raising_reporting_hook_cannot_touch_the_run(tmp_path):
+    # The view's own hooks catch everything; this is the dashboard's second
+    # fence (`_call_hook`), and it has to hold on its own: a hook that raises
+    # on every call must cost no frame, no `error` reply, and no outcome.
+    calls = []
+
+    def on_frame(dash, name, ok, reason, elapsed):
+        calls.append(("frame", name, ok))
+        raise RuntimeError("reporting bug")
+
+    def on_end(dash, outcome):
+        calls.append(("end", outcome))
+        raise RuntimeError("reporting bug")
+
+    dash, drop, _, processed = make_dashboard(tmp_path, on_frame=on_frame, on_end=on_end)
+    send_manifest(drop, [{"name": "a.fit", "size": 8}, {"name": "b.fit", "size": 0}])
+    send_file(drop, "a.fit", b"12345678")
+    assert dash.phase == "done"
+    assert [n for n, _ in processed] == ["a.fit"]
+    assert "error" not in drop.types()
+    assert drop.types().count("file_done") == 2
+    assert calls == [("frame", "b.fit", False), ("frame", "a.fit", True), ("end", "done")]

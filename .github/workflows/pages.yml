@@ -34,7 +34,14 @@ jobs:
 
       # Also runs the fetch-* tasks (full clones of bandaid, eloy, astrowidgets,
       # aavso-starlist-schema) that environment.yml's pip: block points at.
+      # FEEDBACK_URL is an optional repository variable (Settings -> Secrets
+      # and variables -> Actions -> Variables): the opt-in tester-report
+      # endpoint, e.g. https://<worker>.workers.dev/report. Unset, it expands
+      # to "" and the build ships with reporting disabled (the build-info task
+      # writes it into content/build_info.py; docs/dashboard.md §11).
       - name: Build with voici
+        env:
+          BROWSER_PHOTOM_FEEDBACK_URL: ${{ vars.FEEDBACK_URL }}
         run: pixi run -e dash build-dash
 
       - name: Land visitors on the dashboard, not Voici's notebook index

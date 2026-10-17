@@ -1246,3 +1246,101 @@ max `tot_count` 4.8e-7 relative -- the SgemmBallet-versus-numpy round-off
 of issue #8, nothing from the refactor. Docs, README, `pixi.toml` and the
 watch notebook's comments updated. Still owed: a browser run at the new
 pin (the smoke run exercised the processor natively, not under Pyodide).
+
+# Opt-in tester reports (2026-10-16)
+
+Testers recruited at the November talk can opt in to sending diagnostic
+reports from their dashboard runs. Design: `docs/dashboard.md` §11;
+standing up the backend: `docs/feedback-deploy.md`.
+
+- Contract: `feedback/report.schema.json`. It is strict on purpose: no blob
+  fields, short printable strings only, no URLs in free text, and a 64 KB
+  body cap. The dashboard tests build chunks against it, and the worker
+  imports the same file.
+- Kernel (`content/feedback_report.py`, `dashboard_view.py`): an opt-in
+  checkbox (off by default) with consent text naming the observer code and
+  the 1-degree position. A comment box: a comment with a link is blanked
+  with a warning, and the rows are still sent. "Preview report" shows the
+  exact JSON. Rows are bandaid's own QA record via `on_qa`, cleaned (NaN/inf
+  to null, whitelist, caps). The site position comes from the resolved
+  frame metadata, falling back to the form.
+- Page (`dropzone.js`): owns the buffer and does all the sending. A
+  keepalive POST goes every 25 rows, a final chunk at done or cancel, and a
+  `sendBeacon` on `pagehide` mid-run. A crashed kernel still reports.
+  Reporting failures never touch the run.
+- `feedback-worker/`: a Cloudflare Worker. It validates with
+  `@cfworker/json-schema`, rate-limits each IP to 60/min, accepts only the
+  Pages origin, and stores `{received_at, country, report}` in R2. The IP
+  is never stored. A 30-day lifecycle rule handles expiry.
+- `scripts/pull_feedback.py`: local review. It mirrors R2, merges each
+  report's chunks into JSON + CSV, and re-validates. It never posts
+  anything.
+- The endpoint is a build-time setting: `BROWSER_PHOTOM_FEEDBACK_URL`, set
+  from the `FEEDBACK_URL` repository variable in `pages.yml`. Empty means
+  reporting is off.
+
+Checks: 336 pytest, 84 node, 56 worker (vitest). Python- and JS-built
+chunks from hostile input all validated with the worker's own validator,
+including size-split bodies. The worker is deployed at
+`browser-photom-feedback.mwcraig2.workers.dev`. The curl smoke tests gave
+204 / 400 for a link / 403 for a foreign origin / 405 for GET. Browser end
+to end: a local `build-dash` run of the 155-frame LS Psc set landed 7
+chunks (6 x 25 rows plus a final 5, outcome `done`), all schema-valid,
+with 155 `ok` rows and no gaps.
+
+Review fixes on PR #16 (Copilot plus a `/code-review` pass): the CSV export
+neutralises formula-leading cells; the pull script survives a flagged chunk
+whose `rows` or `run` has the wrong type, does not call unknown-then-known
+header fields a conflict, and `--since` selects whole reports (a run that
+crossed UTC midnight is no longer cut in two); the schema's no-links
+patterns are case-insensitive like the Python cleaners; the view resets the
+QA schema version and the once-per-run failure log at each run, repaints an
+open preview when a run finishes, closes the page's report (as `cancelled`)
+when its own reporting fails mid-run, and the preview's `final` matches the
+page at exactly 25 frames; the page restarts its sent/failed counts per run
+and treats a `pagehide` with `persisted` (back/forward cache) as a flush,
+not a close; the rate limit is 60/min (a setup-failed run drains in
+seconds). Consent and docs now say the server adds the inferred country,
+that the 30 days is server-side with downloaded copies kept for the testing
+period, and that the free-text fields are bounded but not markup-free.
+
+Second Copilot round (4 findings, all taken): the header-conflict check no
+longer does a set lookup on a value a flagged chunk could make unhashable;
+the status line is cleared before `_report_start` decides whether to report
+(an unreported run no longer inherits "3 reports sent"); `_report_id` is
+cleared only after `report_end` is sent, so a raising send still gets the
+guard's fallback close; and the page flushes by bytes while buffering, so a
+pagehide flush is always a single beacon (beacons and keepalive fetches
+share one 64 KB in-flight budget, and a second queued body would be lost).
+
+Third round, five independent adversarial reviews (kernel, page, worker
+security, pull script/contract, mechanical sweep): the schema's text fields
+now refuse unpaired surrogates and zero-width/bidi format characters (a lone
+surrogate passed the worker's `u`-flag regexes, was stored escaped, and made
+the pull script's CSV write raise -- one such object, under a report_id that
+sorts first, blocked every later pull); `user_agent` is gone from the schema
+(nothing filled it, and it was the one string without a link rule); the
+kernel's pattern guards use `fullmatch` (Python's `$` matches before a
+trailing newline, JavaScript's does not, so a `match` guard passed values
+the worker refused), and a new cross-validation test runs real producer
+output through the worker's validator under node; the guard closes the
+page's report as `report_error`, not `cancelled`; a late `report_status`
+during an unreported run is ignored; the preview after an unreported run
+says nothing was sent; the page's byte-aware flush is sized for the beacon
+it protects (final, `page_closed`, 10-digit `hidden_ms`), bodies past the
+`seq` ceiling count as failed, `hidden_ms` is clamped, and model disposal
+closes an open report; the build requires an https endpoint (or localhost
+http); the pull script writes CSV as UTF-8 with escapes, isolates each
+report's merge, mirrors files atomically, survives a failing get, ranks an
+unreadable duplicate last, flags `final-not-last`, and validates `--since`
+as a date; `[observability] enabled = false` is explicit. Documented, not
+changed: the free-text budget (~25-35 KB of arbitrary characters per chunk)
+and the per-IP limit's limits (one address can use most of the free daily
+request cap). Tests: 336 pytest, 84 node, 56 worker (vitest).
+
+Still owed: set the `FEEDBACK_URL` repository variable after merge, and
+redeploy the worker for the new rate limit and the explicit observability
+setting.
+Untested: the `pagehide` beacon path in a real browser. Bump Wrangler past
+4.148 (npm audit, dev-only) once 4.149.0 is two weeks old (after
+2026-10-22).

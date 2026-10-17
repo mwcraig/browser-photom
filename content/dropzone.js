@@ -552,6 +552,18 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
     seq += bodies.length;
   }
 
+  // Would `candidate` go out as one body under the current header?
+  function fits(candidate, nowMs) {
+    try {
+      const body = JSON.stringify(
+        buildReportChunk(header, candidate, seq, false, null, hiddenMs(nowMs))
+      );
+      return byteLength(body) <= maxBytes;
+    } catch (err) {
+      return true;
+    }
+  }
+
   function finish(outcome, nowMs, viaBeacon) {
     if (!active) return;
     active = false;
@@ -582,6 +594,20 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
     row(row, newHeader, nowMs) {
       if (!active) return;
       if (newHeader) header = newHeader;
+      // The buffer is kept to what one body can carry, so a pagehide flush
+      // is a single beacon: beacons and keepalive fetches share one 64 KB
+      // in-flight budget per page, and two bodies queued back to back on
+      // pagehide would lose the second. Rows are at most ~2 KB (4-byte
+      // characters throughout) so this only ever triggers on hostile-size
+      // input; reportBodies' split stays as the fallback (a header that
+      // grew by a long comment between here and the flush).
+      if (rows.length > 0 && !fits([...rows, row], nowMs)) {
+        try {
+          flush(false, null, nowMs, false);
+        } catch (err) {
+          // Swallowed.
+        }
+      }
       rows.push(row);
       if (rows.length >= rowsPerChunk) {
         try {

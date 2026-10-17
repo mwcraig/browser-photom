@@ -116,9 +116,13 @@ def _header_values(reports, field):
     header (or the form) supplies it. Unknown-then-known is not a conflict;
     two different known values are.
     """
-    unknown = {None, 0} if field == "qa_schema" else {None}
+    def unknown(value):
+        # Not a set lookup: a flagged chunk can carry a list or dict here,
+        # which is unhashable, and that must stay reviewable, not fatal.
+        return value is None or (field == "qa_schema" and value == 0)
+
     return len({json.dumps(r.get(field), sort_keys=True)
-                for r in reports if r.get(field) not in unknown})
+                for r in reports if not unknown(r.get(field))})
 
 
 def merge_report(report_id, stored, validator=None):

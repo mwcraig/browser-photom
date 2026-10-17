@@ -842,8 +842,10 @@ cannot report its own death, so the page sends. The view
 header (`feedback_report.build_header`). In `dropzone.js` a reporter built
 once per drop-zone *model* (anywidget's `initialize`, so a twice-rendered
 widget does not send twice) buffers the rows and POSTs a chunk with
-`fetch(url, {method: "POST", keepalive: true, body})` every 25 rows, and the
-final chunk at the run's end (`outcome` `done` or `cancelled`). On `pagehide`
+`fetch(url, {method: "POST", keepalive: true, body})` every 25 rows (sooner
+if the buffered rows would no longer fit one body, so that a `pagehide`
+flush is always a single beacon: beacons and keepalive fetches share one
+64 KB in-flight budget per page), and the final chunk at the run's end (`outcome` `done` or `cancelled`). On `pagehide`
 mid-run it sends the final chunk with `navigator.sendBeacon` and outcome
 `page_closed`, so a crashed kernel's rows still arrive when the tester
 reloads; a `pagehide` with `persisted` (the page entering the back/forward

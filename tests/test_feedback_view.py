@@ -430,3 +430,37 @@ def test_the_consent_text_names_the_country_and_the_server_side_30_days(view):
     text = view.report_consent.value
     assert "country" in text and "IP address" in text
     assert "30 days" in text and "copies downloaded" in text
+
+
+def test_an_unreported_run_does_not_inherit_the_last_runs_status_line(view):
+    fill(view)
+    view.report_opt_in.value = True
+    manifest(view, "a.fit")
+    upload(view, "a.fit")
+    receive(view, {"type": "report_status", "sent": 2, "failed": 0})
+    assert "2 reports sent" in view.report_status.value
+    view.report_opt_in.value = False
+    manifest(view, "b.fit")
+    assert view.report_status.value == ""
+
+
+def test_a_failing_report_end_still_closes_the_pages_report(view):
+    fill(view)
+    view.report_opt_in.value = True
+    real_send = view.drop_zone.send
+    tries = []
+
+    def send(content, buffers=None):
+        if content["type"] == "report_end" and "header" in content:
+            tries.append(content)
+            raise RuntimeError("comm hiccup")
+        real_send(content, buffers)
+
+    view.drop_zone.send = send
+    manifest(view, "a.fit")
+    upload(view, "a.fit")
+    assert view.dashboard.phase == "done"
+    assert len(tries) == 1
+    ends = [c for c in reports(view) if c["type"] == "report_end"]
+    assert ends == [{"type": "report_end", "outcome": "cancelled"}]
+    assert view._report_id is None

@@ -346,3 +346,28 @@ test('pagehide into the back/forward cache flushes the buffer and keeps the repo
   r.pageClosed(40, true);               // nothing open: nothing sent
   assert.equal(beaconFn.calls.length, 1);
 });
+
+test('the buffer is flushed by bytes so a pagehide needs only one beacon', async () => {
+  const fetchFn = fakeFetch();
+  const beaconFn = fakeBeacon();
+  // One row plus the header is ~400 bytes; two rows would not fit.
+  const oneRow = JSON.stringify(buildReportChunk(header(), [row(0)], 0, false, null, null));
+  const maxBytes = new TextEncoder().encode(oneRow).length + 20;
+  const r = makeReporter({ fetchFn, beaconFn, maxBytes });
+  r.start(URL, header(), 0, false);
+  r.row(row(0), header(), 0);
+  await settle();
+  assert.equal(fetchFn.calls.length, 0);          // fits: nothing sent yet
+  r.row(row(1), header(), 0);                     // would not fit: row 0 goes first
+  r.row(row(2), header(), 0);
+  await settle();
+  assert.equal(fetchFn.calls.length, 2);
+  assert.deepEqual(fetchFn.calls.map((c) => c.chunk.rows.map((x) => x.file)), [['f0.fit'], ['f1.fit']]);
+  r.pageClosed(10, false);
+  assert.equal(beaconFn.calls.length, 1);
+  assert.deepEqual(beaconFn.calls[0].chunk.rows.map((x) => x.file), ['f2.fit']);
+  assert.equal(beaconFn.calls[0].chunk.seq, 2);
+  assert.ok(beaconFn.calls[0].bytes <= maxBytes);
+  await settle();
+  assert.deepEqual(r.counts(), { sent: 3, failed: 0 });
+});

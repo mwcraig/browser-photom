@@ -1279,7 +1279,7 @@ standing up the backend: `docs/feedback-deploy.md`.
   from the `FEEDBACK_URL` repository variable in `pages.yml`. Empty means
   reporting is off.
 
-Checks: 317 pytest, 81 node, 46 worker (vitest). Python- and JS-built
+Checks: 320 pytest, 82 node, 46 worker (vitest). Python- and JS-built
 chunks from hostile input all validated with the worker's own validator,
 including size-split bodies. The worker is deployed at
 `browser-photom-feedback.mwcraig2.workers.dev`. The curl smoke tests gave
@@ -1303,6 +1303,15 @@ not a close; the rate limit is 60/min (a setup-failed run drains in
 seconds). Consent and docs now say the server adds the inferred country,
 that the 30 days is server-side with downloaded copies kept for the testing
 period, and that the free-text fields are bounded but not markup-free.
+
+Second Copilot round (4 findings, all taken): the header-conflict check no
+longer does a set lookup on a value a flagged chunk could make unhashable;
+the status line is cleared before `_report_start` decides whether to report
+(an unreported run no longer inherits "3 reports sent"); `_report_id` is
+cleared only after `report_end` is sent, so a raising send still gets the
+guard's fallback close; and the page flushes by bytes while buffering, so a
+pagehide flush is always a single beacon (beacons and keepalive fetches
+share one 64 KB in-flight budget, and a second queued body would be lost).
 
 Still owed: set the `FEEDBACK_URL` repository variable after merge, and
 redeploy the worker for the new rate limit.

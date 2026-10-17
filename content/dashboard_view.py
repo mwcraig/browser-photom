@@ -468,6 +468,9 @@ class DashboardView:
         self._qa_schema = 0
         self._resolved_site = (None, None)
         self._report_error_logged = False
+        # The status line is the last run's; an unreported run must not
+        # inherit "3 reports sent".
+        self.report_status.value = ""
         if not self._reporting_wanted() or self._report_obscode_problem() is not None:
             return
         report_id = self._last_report_id()
@@ -475,7 +478,6 @@ class DashboardView:
         header = self._report_header(report_id)
         self._report_send({"type": "report_start", "header": header})
         self._report_id = self._run_report_id = report_id
-        self.report_status.value = ""
 
     def _report_frame(self, _dashboard, name, ok, reason, elapsed):
         self._report_guard(self._report_frame_unguarded, name, ok, reason, elapsed)
@@ -498,8 +500,10 @@ class DashboardView:
         if self._report_id is None:
             return
         header = self._report_header(self._report_id)
-        self._report_id = None
+        # Cleared only once the send is through: if it raises, the guard
+        # still sees the report as open and sends its bare report_end.
         self._report_send({"type": "report_end", "outcome": outcome, "header": header})
+        self._report_id = None
 
     def _on_qa(self, name, qa, schema_version=0):
         # bandaid's hook: must not raise (a raise would count the frame as

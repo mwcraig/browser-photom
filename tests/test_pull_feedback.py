@@ -318,3 +318,14 @@ def test_since_selects_whole_reports_across_utc_midnight(pf, tmp_path):
     assert pf.download(client, "bkt", tmp_path / "mirror", "2026-11-05") == (3, 3)
     assert client.list_kwargs["StartAfter"] == "reports/2026-11-04"
     assert not (tmp_path / "mirror" / key(0, "2026-11-03")).exists()
+
+
+def test_unhashable_header_values_in_a_flagged_chunk_do_not_abort_the_merge(pf, validator):
+    items = [
+        (key(0), stored(chunk(0, [ROW_OK]))),
+        (key(1), stored(chunk(1, [ROW_OK], site_lat=[], build={}, final=True))),
+    ]
+    merged = pf.merge_report(RID, items, validator)
+    assert [c["seq"] for c in merged["invalid_chunks"]] == [1]
+    assert merged["header_conflicts"] == ["build", "site_lat"]
+    assert merged["site_lat"] == [] and merged["build"] == {}

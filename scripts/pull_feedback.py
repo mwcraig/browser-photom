@@ -14,10 +14,15 @@ and then all of each one's chunks.
 
 Every chunk is re-validated against feedback/report.schema.json. The worker
 already refused anything invalid, so a failure here means the schema or the
-worker changed underneath the stored data: it is flagged in the summary and
-in the merged JSON (``invalid_chunks``), not dropped. Note that Python's
-``re`` lets ``$`` match before a final newline where the worker's JavaScript
-regexes do not, so this check is, if anything, the more lenient of the two.
+worker changed underneath the stored data, or a mirrored file is damaged:
+it is flagged in the summary and in the merged JSON (``invalid_chunks``),
+not dropped. Note that Python's ``re`` lets ``$`` match before a final
+newline where the worker's JavaScript regexes do not, so this check is, if
+anything, the more lenient of the two (the dashboard's own guards use
+``fullmatch`` for the same reason).
+
+One report can never stop the others: a report whose merge or write raises
+is reported on its own line (``MERGE-ERROR``) and the rest go through.
 
 It only reads from R2 and writes local files; it never posts anything.
 
@@ -54,7 +59,7 @@ KEY_RE = re.compile(
 )
 # Fields every chunk of one run should repeat unchanged. comment, final and
 # run legitimately change from chunk to chunk; the latest chunk wins.
-STABLE_FIELDS = ("obscode", "build", "qa_schema", "user_agent", "site_lat", "site_lon")
+STABLE_FIELDS = ("obscode", "build", "qa_schema", "site_lat", "site_lon")
 
 
 # -- pure helpers (tests/test_pull_feedback.py) ------------------------------
@@ -131,15 +136,24 @@ def merge_report(report_id, stored, validator=None):
     ``stored`` is a list of ``(key, record)`` with ``record`` the parsed
     object the worker wrote. Chunks are ordered by seq; if the same seq was
     stored twice (a retry that landed after UTC midnight, so under another
-    day's prefix) the earliest received copy is kept and the duplicate is
-    noted. Header fields come from the highest seq; fields that should not
-    change but did are listed in ``header_conflicts``.
+    day's prefix) the earliest received, readable copy is kept and the
+    duplicate is noted. Header fields come from the highest seq; fields that
+    should not change but did are listed in ``header_conflicts``.
     """
     by_seq = {}
     duplicates = []
     unreadable = []
+
+    def rank(key_record):
+        # A copy with no readable report (a truncated mirror file, say)
+        # must never win over a good one; among readable copies, earliest.
+        rec = key_record[1]
+        return (not isinstance(rec.get("report"), dict), str(rec.get("received_at", "")))
+
     for key, record in stored:
-        report = record.get("report") if isinstance(record, dict) else None
+        if not isinstance(record, dict):
+            record = {"unparseable": f"top level is {type(record).__name__}"}
+        report = record.get("report")
         seq = report.get("seq") if isinstance(report, dict) else None
         if not isinstance(seq, int):
             parsed = parse_key(key)
@@ -148,10 +162,7 @@ def merge_report(report_id, stored, validator=None):
             unreadable.append(key)
             continue
         if seq in by_seq:
-            keep, drop = sorted(
-                [by_seq[seq], (key, record)],
-                key=lambda kr: str(kr[1].get("received_at", "")),
-            )
+            keep, drop = sorted([by_seq[seq], (key, record)], key=rank)
             by_seq[seq] = keep
             duplicates.append(drop[0])
         else:
@@ -190,6 +201,9 @@ def merge_report(report_id, stored, validator=None):
         "comment": latest.get("comment"),
         "run": latest.get("run"),
         "final_received": bool(final_seqs),
+        # Exactly one final, and it is the last chunk, for an honest client;
+        # anything else is flagged ("final-not-last").
+        "final_seqs": final_seqs,
         "seqs": seqs,
         "missing_seqs": missing,
         "duplicate_keys": sorted(duplicates),
@@ -229,7 +243,10 @@ def csv_cell(value):
 
 def write_csv(rows, path, schema=None):
     columns = csv_columns(rows, schema)
-    with open(path, "w", newline="") as fh:
+    # Explicit UTF-8, and a stored string the worker's regexes let through
+    # that UTF-8 cannot encode (an unpaired surrogate, before the schema
+    # refused them) is written escaped rather than raising mid-pull.
+    with open(path, "w", newline="", encoding="utf-8", errors="backslashreplace") as fh:
         writer = csv.DictWriter(fh, fieldnames=columns, restval="")
         writer.writeheader()
         for row in rows:
@@ -254,6 +271,10 @@ def summary_line(merged):
         flags.append(f"conflict {','.join(merged['header_conflicts'])}")
     if merged["duplicate_keys"] or merged["unreadable_keys"]:
         flags.append("dup/unreadable")
+    if merged.get("final_seqs") and merged["final_seqs"] != merged["seqs"][-1:]:
+        flags.append("final-not-last")
+    if merged.get("merge_error"):
+        flags.append(f"MERGE-ERROR {merged['merge_error']}")
     run = merged.get("run")
     outcome = run.get("outcome") if isinstance(run, dict) else None
     comment = " ".join(str(merged.get("comment") or "").split())[:80]
@@ -312,12 +333,29 @@ def merge_all(raw_dir, out_dir, since=None, schema=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     merged_docs = []
     for report_id, stored in sorted(load_raw(raw_dir, since).items()):
-        merged = merge_report(report_id, stored, validator)
-        (out_dir / f"{report_id}.json").write_text(json.dumps(merged, indent=1) + "\n")
-        write_csv(merged["rows"], out_dir / f"{report_id}.csv", schema)
+        try:
+            merged = merge_report(report_id, stored, validator)
+            (out_dir / f"{report_id}.json").write_text(json.dumps(merged, indent=1) + "\n")
+            write_csv(merged["rows"], out_dir / f"{report_id}.csv", schema)
+        except Exception as exc:  # noqa: BLE001 - one report must not stop the rest
+            merged = failed_merge(report_id, stored, exc)
         merged_docs.append(merged)
     merged_docs.sort(key=lambda m: m["first_received_at"] or "")
     return merged_docs
+
+
+def failed_merge(report_id, stored, exc):
+    """A stand-in merged doc for a report whose merge or write raised, with
+    the keys `summary_line` needs, so the pull still reports every other one."""
+    return {
+        "report_id": report_id, "obscode": None, "comment": None, "run": None,
+        "n_rows": 0, "rows": [], "seqs": [], "missing_seqs": [], "final_seqs": [],
+        "final_received": False, "duplicate_keys": [], "unreadable_keys": [],
+        "header_conflicts": [], "invalid_chunks": [],
+        "first_received_at": None, "last_received_at": None, "countries": [],
+        "keys": sorted(k for k, _ in stored),
+        "merge_error": f"{type(exc).__name__}: {exc}"[:200],
+    }
 
 
 # -- R2 (boto3, imported only here) -------------------------------------------
@@ -346,11 +384,17 @@ def r2_client(environ=None):
 
 
 def download(client, bucket, raw_dir, since=None):
-    """Mirror report objects into ``raw_dir``; return (n listed, n fetched).
+    """Mirror report objects into ``raw_dir``; return (n listed, n fetched,
+    n failed).
 
     With ``since``, objects from the day before are mirrored too: a run that
     crossed UTC midnight has its first chunks under the earlier day, and
-    `load_raw` decides by report, not by chunk.
+    `load_raw` decides by report, not by chunk. Each file is written whole
+    or not at all (to a ``.part`` name, then renamed), so an interrupted
+    pull never leaves a truncated file that the next pull would skip as
+    "already here". A get that fails (an object the lifecycle rule deleted
+    between the list and the get, a 5xx boto gave up on) is reported on
+    stderr and skipped; the next pull fetches it if it is still there.
     """
     raw_dir = Path(raw_dir)
     listed = []
@@ -362,16 +406,23 @@ def download(client, bucket, raw_dir, since=None):
     for page in client.get_paginator("list_objects_v2").paginate(**kwargs):
         listed.extend(obj["Key"] for obj in page.get("Contents", []))
     keys = keys_since(listed, first_day)
-    fetched = 0
+    fetched = failed = 0
     for key in keys:
         dest = raw_dir / key
         if dest.exists():
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
-        body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
-        dest.write_bytes(body)
+        try:
+            body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+        except Exception as exc:  # noqa: BLE001 - botocore.ClientError, mostly
+            print(f"could not fetch {key}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            failed += 1
+            continue
+        part = dest.with_name(dest.name + ".part")
+        part.write_bytes(body)
+        os.replace(part, dest)
         fetched += 1
-    return len(keys), fetched
+    return len(keys), fetched, failed
 
 
 def main(argv=None):
@@ -384,20 +435,26 @@ def main(argv=None):
     parser.add_argument("--offline", action="store_true",
                         help="do not contact R2; re-merge <out>/raw only")
     args = parser.parse_args(argv)
-    if args.since and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.since):
-        parser.error("--since must be YYYY-MM-DD")
+    if args.since:
+        try:
+            date.fromisoformat(args.since)
+        except ValueError:
+            parser.error("--since must be a real YYYY-MM-DD date")
 
     raw_dir = args.out / "raw"
     if not args.offline:
-        n_listed, n_fetched = download(r2_client(), args.bucket, raw_dir, args.since)
+        n_listed, n_fetched, n_failed = download(r2_client(), args.bucket, raw_dir, args.since)
         print(f"{n_listed} objects in {args.bucket}"
-              f"{' since ' + args.since if args.since else ''}; fetched {n_fetched} new")
+              f"{' since ' + args.since if args.since else ''}; fetched {n_fetched} new"
+              + (f"; {n_failed} could not be fetched" if n_failed else ""))
     merged = merge_all(raw_dir, args.out, args.since)
     for doc in merged:
         print(summary_line(doc))
     n_invalid = sum(1 for m in merged if m["invalid_chunks"])
+    n_errors = sum(1 for m in merged if m.get("merge_error"))
     print(f"{len(merged)} reports in {args.out}"
-          + (f"; {n_invalid} with chunks that fail the schema" if n_invalid else ""))
+          + (f"; {n_invalid} with chunks that fail the schema" if n_invalid else "")
+          + (f"; {n_errors} could not be merged" if n_errors else ""))
     return 0
 
 

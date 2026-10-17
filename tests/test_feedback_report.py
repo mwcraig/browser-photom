@@ -303,9 +303,38 @@ def test_the_comment_rule_agrees_with_the_schema(validator):
     # clean_comment's verdict and the schema's must never disagree on what
     # comes out of clean_comment, whatever went in.
     for text in ["ok", "a://b", "www.", "x" * 2000, "é ünïcode ✓", "line\nline",
-                 "\x7f", "http:/ /not-a-link", "a.www.b"]:
+                 "\x7f", "http:/ /not-a-link", "a.www.b", "broken \ud83d emoji",
+                 "w\u200bww.hidden", "\ufeffbom", "a\u2028b", "\u202eright-to-left"]:
         comment, _problem = clean_comment(text)
         valid(validator, build_chunk(header(comment=comment), []))
+
+
+def test_format_and_surrogate_characters_are_dropped_not_sent():
+    # An unpaired surrogate (a pasted broken emoji) cannot be UTF-8 encoded,
+    # so it would fail the comm message -- and take the rows with it. A
+    # zero-width space would let "www." past the no-links rule.
+    assert clean_comment("fine \ud83d here") == ("fine  here", None)
+    assert clean_comment("w\u200bww.example")[0] == ""      # unmasked, then refused
+    row = clean_row(ok_qa(), name="\ufeffa\ud800.fit", reason="x\u202ey\udfff")
+    assert row["file"] == "a.fit" and row["reason"] == "xy"
+    for value in (row["file"], row["reason"], clean_comment("a\ud800")[0]):
+        value.encode("utf-8")
+
+
+def test_the_pattern_guards_refuse_a_trailing_newline_like_the_worker_does(validator):
+    # Python's `$` matches before a final newline; the worker's JavaScript
+    # regexes do not. A guard using `match` would pass "ok\n" that the worker
+    # refuses, and lose the whole chunk. jsonschema shares Python's leniency,
+    # so `valid` alone cannot catch this: pin the cleaned values themselves.
+    row = clean_row({**ok_qa(), "status": "error: Foo\n", "dropped_filters": "V;B\n",
+                     "plane_fallback": "plane\n"}, name="a.fit")
+    assert row["status"] == "error: unknown"
+    assert row["dropped_filters"] is None and row["plane_fallback"] is None
+    assert obscode_problem("LG\nEB") is not None       # (a trailing one is stripped first)
+    assert header(build="bandaid-1\n")["build"] == "bandaid-1_"
+    for value in (row["status"], header()["obscode"], header()["build"]):
+        assert not value.endswith("\n")
+    valid(validator, build_chunk(header(), [row]))
 
 
 # --------------------------------------------------------------------------
@@ -313,17 +342,28 @@ def test_the_comment_rule_agrees_with_the_schema(validator):
 # --------------------------------------------------------------------------
 
 
-def test_a_full_first_chunk_validates_and_is_under_the_beacon_cap(validator):
+def _worst_chunk(char):
     worst = clean_row(
         {**ok_qa(), "n_forced_measured": 9999999},
-        name="L" * 250 + ".fit",
-        reason="R" * 400,
+        name=char * 250 + ".fit",
+        reason=char * 400,
         elapsed_s=99999.123456,
     )
-    rows = [worst] * ROWS_PER_CHUNK
-    chunk = build_chunk(header(comment="é" * COMMENT_MAX_CHARS), rows)
+    return build_chunk(header(comment=char * COMMENT_MAX_CHARS), [worst] * ROWS_PER_CHUNK)
+
+
+def test_a_full_first_chunk_of_latin_text_validates_and_is_under_the_beacon_cap(validator):
+    chunk = _worst_chunk("é")
     valid(validator, chunk)
     assert len(chunk_json(chunk).encode()) < 60_000
+
+
+def test_a_full_first_chunk_of_wide_text_is_valid_but_over_the_cap(validator):
+    # Which is why the page flushes by bytes before it reaches ROWS_PER_CHUNK
+    # (dropzone.js `fits`); the kernel's count alone does not bound the body.
+    chunk = _worst_chunk("😀")
+    valid(validator, chunk)
+    assert len(chunk_json(chunk).encode()) > 60_000
 
 
 def test_build_chunk_overrides_outcome_and_hidden_time_without_touching_the_header(validator):
@@ -357,6 +397,11 @@ def test_chunk_json_is_strict():
     ("  http://localhost:8787/report ", "http://localhost:8787/report"),
     ("", ""), (None, ""), ("javascript:alert(1)", ""), ("bp.workers.dev/report", ""),
     ("https://", ""), ("https://a.b/\nx", ""),
+    # Mixed content from the https page, and credentials fetch/sendBeacon
+    # throw on: both would make every send fail.
+    ("http://bp.example.workers.dev/report", ""),
+    ("https://user:pw@bp.example.workers.dev/report", ""),
+    ("http://127.0.0.1:8787/report", "http://127.0.0.1:8787/report"),
 ])
 def test_endpoint_url(value, expected):
     assert endpoint_url(value) == expected

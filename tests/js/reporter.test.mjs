@@ -274,7 +274,7 @@ test('hidden_ms stays null when the tab was never hidden', async () => {
   assert.equal(fetchFn.calls[0].chunk.run.hidden_ms, null);
 });
 
-test('sequence numbers stop at the schema maximum', async () => {
+test('sequence numbers stop at the schema maximum, and what is not sent counts as failed', async () => {
   const fetchFn = fakeFetch();
   const r = makeReporter({ fetchFn, beaconFn: fakeBeacon(), rowsPerChunk: 1 });
   r.start(URL, header(), 0, false);
@@ -283,6 +283,9 @@ test('sequence numbers stop at the schema maximum', async () => {
   await settle();
   assert.equal(fetchFn.calls.length, 1000);
   assert.equal(fetchFn.calls[999].chunk.seq, 999);
+  assert.equal(fetchFn.calls[999].chunk.final, false);
+  // Rows 1000-1004 and the final chunk: six bodies that never went out.
+  assert.deepEqual(r.counts(), { sent: 1000, failed: 6 });
 });
 
 test('handleReportMessage routes report_* and leaves everything else alone', async () => {
@@ -350,11 +353,15 @@ test('pagehide into the back/forward cache flushes the buffer and keeps the repo
 test('the buffer is flushed by bytes so a pagehide needs only one beacon', async () => {
   const fetchFn = fakeFetch();
   const beaconFn = fakeBeacon();
-  // One row plus the header is ~400 bytes; two rows would not fit.
-  const oneRow = JSON.stringify(buildReportChunk(header(), [row(0)], 0, false, null, null));
-  const maxBytes = new TextEncoder().encode(oneRow).length + 20;
+  // One row plus the header is ~400 bytes; two rows would not fit. The cap
+  // is set to exactly what one row costs as the *pagehide* beacon (final,
+  // outcome page_closed, a 10-digit hidden_ms), with no slack, and the tab
+  // is hidden throughout: the early flush must size the buffer the way the
+  // beacon will be built, or the beacon splits in two and the second is lost.
+  const oneRow = JSON.stringify(buildReportChunk(header(), [row(0)], 0, true, 'page_closed', 1_000_000_000));
+  const maxBytes = new TextEncoder().encode(oneRow).length;
   const r = makeReporter({ fetchFn, beaconFn, maxBytes });
-  r.start(URL, header(), 0, false);
+  r.start(URL, header(), 0, true);
   r.row(row(0), header(), 0);
   await settle();
   assert.equal(fetchFn.calls.length, 0);          // fits: nothing sent yet
@@ -367,7 +374,29 @@ test('the buffer is flushed by bytes so a pagehide needs only one beacon', async
   assert.equal(beaconFn.calls.length, 1);
   assert.deepEqual(beaconFn.calls[0].chunk.rows.map((x) => x.file), ['f2.fit']);
   assert.equal(beaconFn.calls[0].chunk.seq, 2);
-  assert.ok(beaconFn.calls[0].bytes <= maxBytes);
+  assert.equal(beaconFn.calls[0].chunk.run.outcome, 'page_closed');
+  assert.equal(beaconFn.calls[0].chunk.run.hidden_ms, 10);
+  assert.ok(new TextEncoder().encode(JSON.stringify(beaconFn.calls[0].chunk)).length <= maxBytes);
   await settle();
   assert.deepEqual(r.counts(), { sent: 3, failed: 0 });
+});
+
+test('hidden time is clamped to the schema maximum', async () => {
+  const fetchFn = fakeFetch();
+  const r = makeReporter({ fetchFn, beaconFn: fakeBeacon() });
+  r.start(URL, header(), 0, true);
+  r.end('done', null, 20 * 24 * 3600 * 1000);   // asleep for three weeks
+  await settle();
+  assert.equal(fetchFn.calls[0].chunk.run.hidden_ms, 1_000_000_000);
+});
+
+test('the kernel can close a report as report_error; other unknown outcomes are done', async () => {
+  const fetchFn = fakeFetch();
+  const r = makeReporter({ fetchFn, beaconFn: fakeBeacon() });
+  r.start(URL, header(), 0, false);
+  r.end('report_error', null, 0);
+  r.start(URL, header(), 0, false);
+  r.end('exploded', null, 0);
+  await settle();
+  assert.deepEqual(fetchFn.calls.map((c) => c.chunk.run.outcome), ['report_error', 'done']);
 });

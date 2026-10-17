@@ -8,8 +8,9 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.toml" },
-      // The real limit (20/min) would trip partway through the suite, where
-      // every request shares one key. The 429 path is tested with a stub.
+      // The real limit (60/min, wrangler.toml) would trip partway through the
+      // suite, where every request shares one key, so it is never exercised
+      // here. The 429 path is tested with a stub.
       miniflare: {
         ratelimits: {
           RATE_LIMITER: { namespace_id: "4201", simple: { limit: 100000, period: 60 } },

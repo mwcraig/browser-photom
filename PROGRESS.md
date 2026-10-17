@@ -1279,7 +1279,7 @@ standing up the backend: `docs/feedback-deploy.md`.
   from the `FEEDBACK_URL` repository variable in `pages.yml`. Empty means
   reporting is off.
 
-Checks: 320 pytest, 82 node, 46 worker (vitest). Python- and JS-built
+Checks: 336 pytest, 84 node, 56 worker (vitest). Python- and JS-built
 chunks from hostile input all validated with the worker's own validator,
 including size-split bodies. The worker is deployed at
 `browser-photom-feedback.mwcraig2.workers.dev`. The curl smoke tests gave
@@ -1313,8 +1313,34 @@ guard's fallback close; and the page flushes by bytes while buffering, so a
 pagehide flush is always a single beacon (beacons and keepalive fetches
 share one 64 KB in-flight budget, and a second queued body would be lost).
 
+Third round, five independent adversarial reviews (kernel, page, worker
+security, pull script/contract, mechanical sweep): the schema's text fields
+now refuse unpaired surrogates and zero-width/bidi format characters (a lone
+surrogate passed the worker's `u`-flag regexes, was stored escaped, and made
+the pull script's CSV write raise -- one such object, under a report_id that
+sorts first, blocked every later pull); `user_agent` is gone from the schema
+(nothing filled it, and it was the one string without a link rule); the
+kernel's pattern guards use `fullmatch` (Python's `$` matches before a
+trailing newline, JavaScript's does not, so a `match` guard passed values
+the worker refused), and a new cross-validation test runs real producer
+output through the worker's validator under node; the guard closes the
+page's report as `report_error`, not `cancelled`; a late `report_status`
+during an unreported run is ignored; the preview after an unreported run
+says nothing was sent; the page's byte-aware flush is sized for the beacon
+it protects (final, `page_closed`, 10-digit `hidden_ms`), bodies past the
+`seq` ceiling count as failed, `hidden_ms` is clamped, and model disposal
+closes an open report; the build requires an https endpoint (or localhost
+http); the pull script writes CSV as UTF-8 with escapes, isolates each
+report's merge, mirrors files atomically, survives a failing get, ranks an
+unreadable duplicate last, flags `final-not-last`, and validates `--since`
+as a date; `[observability] enabled = false` is explicit. Documented, not
+changed: the free-text budget (~25-35 KB of arbitrary characters per chunk)
+and the per-IP limit's limits (one address can use most of the free daily
+request cap). Tests: 336 pytest, 84 node, 56 worker (vitest).
+
 Still owed: set the `FEEDBACK_URL` repository variable after merge, and
-redeploy the worker for the new rate limit.
+redeploy the worker for the new rate limit and the explicit observability
+setting.
 Untested: the `pagehide` beacon path in a real browser. Bump Wrangler past
 4.148 (npm audit, dev-only) once 4.149.0 is two weeks old (after
 2026-10-22).

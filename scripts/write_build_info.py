@@ -22,8 +22,12 @@ endpoint the dashboard's opt-in tester reports are POSTed to
 ``BROWSER_PHOTOM_FEEDBACK_URL`` environment variable -- the Pages workflow
 sets it from the ``FEEDBACK_URL`` repository variable -- and is written as
 ``""`` when unset, which disables reporting in that build. A value that is
-set but is not an http(s) URL fails the build rather than silently shipping
-a dashboard whose reporting quietly does nothing.
+set but is not an https URL without credentials (or an http one on
+localhost, for a ``wrangler dev`` worker) fails the build rather than
+silently shipping a dashboard whose reporting quietly does nothing: the page
+is served over https, so any other http endpoint would be blocked as mixed
+content and every send would fail, and fetch and sendBeacon throw on a URL
+with userinfo.
 """
 
 from __future__ import annotations
@@ -59,20 +63,26 @@ def git_sha(repo, *, short=7):
     return f"{sha}-dirty" if status.strip() else sha
 
 
+# https anywhere, or plain http only on this machine (a `wrangler dev` worker
+# behind a local `build-dash` page). feedback_report.endpoint_url is the
+# kernel's copy of the same rule.
+LOCAL_OR_HTTPS_URL = r"(https://[^\s/@]+|http://(localhost|127\.0\.0\.1)(:\d+)?)(/\S*)?"
+
+
 def feedback_url_from_env(environ=None):
     """``BROWSER_PHOTOM_FEEDBACK_URL``, stripped; ``""`` when unset or blank.
 
-    Raises ``ValueError`` for a value that is set but is not an http(s) URL
-    without whitespace. (The kernel re-checks with
+    Raises ``ValueError`` for a value that is set but is not an https URL
+    without whitespace or userinfo. (The kernel re-checks with
     `feedback_report.endpoint_url` and disables reporting on anything odd;
     this is the loud half of that, at build time.)
     """
     environ = os.environ if environ is None else environ
     value = environ.get(FEEDBACK_URL_ENV, "").strip()
-    if value and not re.fullmatch(r"https?://[^\s/]+\S*", value):
+    if value and not re.fullmatch(LOCAL_OR_HTTPS_URL, value):
         raise ValueError(
-            f"{FEEDBACK_URL_ENV}={value!r} is not an http(s) URL; "
-            "unset it to build without tester reporting"
+            f"{FEEDBACK_URL_ENV}={value!r} is not an https URL (without "
+            "credentials); unset it to build without tester reporting"
         )
     return value
 

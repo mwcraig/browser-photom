@@ -418,8 +418,14 @@ export const REPORT_ROWS_PER_CHUNK = 25;
 export const REPORT_MAX_BYTES = 60_000;
 
 // The schema's seq maximum. A run long enough to reach it (~25,000 frames)
-// simply stops reporting rather than sending chunks the worker rejects.
+// stops reporting rather than sending chunks the worker rejects; each body
+// that would have gone out is counted as failed, so the status line and
+// the pull script's "no-final" flag both tell the truth about it.
 const REPORT_MAX_SEQ = 999;
+// The schema's run.hidden_ms maximum (~11.6 days). Wall-clock time, so a
+// laptop asleep for a fortnight, or a clock jump, must not make every later
+// chunk invalid.
+const REPORT_MAX_HIDDEN_MS = 1_000_000_000;
 
 /**
  * One POST body, assembled exactly as feedback_report.build_chunk does it:
@@ -476,7 +482,8 @@ export function reportBodies(header, rows, seq, final, outcome, hiddenMs, maxByt
  * - start(url, header, nowMs, hiddenNow): the kernel accepted a run it is
  *   reporting. A previous report still open is finished as "cancelled".
  * - row(row, header): buffer one row; send a chunk every rowsPerChunk.
- * - end(outcome, header): send the final chunk ("done"/"cancelled").
+ * - end(outcome, header): send the final chunk ("done"/"cancelled", or
+ *   "report_error" when the kernel's own reporting broke mid-run).
  * - pageClosed(nowMs, persisted): the page is going away mid-run; send the
  *   final chunk by beacon with outcome "page_closed". With `persisted` (the
  *   page is entering the back/forward cache, not closing) beacon the
@@ -508,7 +515,7 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
 
   function hiddenMs(nowMs) {
     const open = hiddenAt === null ? 0 : Math.max(0, nowMs - hiddenAt);
-    const total = Math.round(hiddenTotal + open);
+    const total = Math.min(REPORT_MAX_HIDDEN_MS, Math.round(hiddenTotal + open));
     return total > 0 ? total : null;
   }
 
@@ -542,21 +549,24 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
   function flush(final, outcome, nowMs, viaBeacon) {
     const batch = rows;
     rows = [];
-    if (!url || !header || seq > REPORT_MAX_SEQ) return;
+    if (!url || !header) return;
     const bodies = reportBodies(header, batch, seq, final, outcome, hiddenMs(nowMs), maxBytes);
     for (const { seq: s, body } of bodies) {
-      if (s > REPORT_MAX_SEQ) break;
-      if (viaBeacon) beacon(body);
+      if (s > REPORT_MAX_SEQ) settle(false);
+      else if (viaBeacon) beacon(body);
       else post(body);
     }
     seq += bodies.length;
   }
 
-  // Would `candidate` go out as one body under the current header?
+  // Would `candidate` go out as one body under the current header, however
+  // it ends up being flushed? Sized as the largest body the same rows can
+  // become: the pagehide beacon, which is final, carries the longest
+  // outcome and a hidden_ms that may have grown to its 10-digit maximum.
   function fits(candidate, nowMs) {
     try {
       const body = JSON.stringify(
-        buildReportChunk(header, candidate, seq, false, null, hiddenMs(nowMs))
+        buildReportChunk(header, candidate, seq, true, 'page_closed', REPORT_MAX_HIDDEN_MS)
       );
       return byteLength(body) <= maxBytes;
     } catch (err) {
@@ -619,7 +629,10 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
     },
     end(outcome, newHeader, nowMs) {
       if (newHeader && active) header = newHeader;
-      finish(outcome === 'cancelled' ? 'cancelled' : 'done', nowMs, false);
+      // "report_error" is the kernel closing the report because its own
+      // reporting failed mid-run; anything else unknown is a finished run.
+      const known = outcome === 'cancelled' || outcome === 'report_error';
+      finish(known ? outcome : 'done', nowMs, false);
     },
     pageClosed(nowMs, persisted) {
       // pagehide with `persisted` is the page going into the back/forward
@@ -710,6 +723,15 @@ function initializeDropZone({ model }) {
     listen
   );
   return () => {
+    // The model is being disposed (a kernel restart clears the widget
+    // state) with a report possibly still open: close it as cancelled
+    // rather than losing the buffered rows and leaving the report with no
+    // final chunk. The page is still here, so an ordinary fetch will do.
+    try {
+      reporter.end('cancelled', null, Date.now());
+    } catch (err) {
+      // Swallowed: see the section comment.
+    }
     ac.abort();
     model.off('msg:custom', onMessage);
   };

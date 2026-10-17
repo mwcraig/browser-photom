@@ -330,6 +330,9 @@ def test_a_failing_send_is_logged_once_and_the_run_finishes(view):
 
 
 def test_the_pages_report_status_feeds_the_status_line(view):
+    fill(view)
+    view.report_opt_in.value = True
+    manifest(view, "a.fit")
     receive(view, {"type": "report_status", "sent": 3, "failed": 0})
     assert view.report_status.value == "Diagnostic reports: 3 reports sent."
     receive(view, {"type": "report_status", "sent": 3, "failed": 1})
@@ -377,11 +380,29 @@ def test_run_scoped_report_state_starts_over_each_run(view):
     upload(view, "a.fit")
     assert reports(view)[-1]["header"]["qa_schema"] == 3
     view._report_error_logged = True          # as if run 1's reporting had failed
+    view._on_result("a.fit", {"R": _Table({"full_image_meta": {"site_lat": -34.2, "site_lon": 151.1}})}, None)
+    view._on_qa("stale.fit", {"status": "ok"}, 3)   # a QA record no frame ever claimed
+    assert view._resolved_site == (-34.2, 151.1)
     view.sent.clear()
     manifest(view, "b.fit")                   # run 2: no frame reaches bandaid
     upload(view, "b.fit")
-    assert reports(view)[0]["header"]["qa_schema"] == 0
+    start = reports(view)[0]["header"]
+    assert start["qa_schema"] == 0
     assert view._report_error_logged is False
+    # Run 1's resolved site and its unclaimed QA record do not leak into run 2:
+    # the header falls back to the (empty) form fields, and b.fit's row is a
+    # no-QA row, not stale.fit's record under a new name.
+    assert (start["site_lat"], start["site_lon"]) == (None, None)
+    assert view._pending_qa == {}
+    row = [c for c in reports(view) if c["type"] == "report_row"][0]["row"]
+    assert row["status"] == NO_QA_STATUS
+
+
+class _Table:
+    """The one attribute `_on_result` reads from a bandaid results table."""
+
+    def __init__(self, meta):
+        self.meta = meta
 
 
 def test_an_open_preview_is_repainted_when_the_run_finishes(view):
@@ -403,6 +424,10 @@ def test_an_open_preview_is_repainted_after_an_unreported_run_too(view):
     upload(view, "a.fit")
     assert reports(view) == []
     assert "a.fit" in view.report_preview.value
+    # ...and says so: these rows were never sent, and the id shown is the
+    # next run's, so the caption must not call it "this run's report".
+    assert "nothing was sent" in view.report_preview.value
+    assert "The first report of this run" not in view.report_preview.value
 
 
 def test_a_mid_run_reporting_failure_closes_the_pages_report(view):
@@ -421,8 +446,10 @@ def test_a_mid_run_reporting_failure_closes_the_pages_report(view):
     upload(view, "b.fit")
     assert view.dashboard.phase == "done"
     kinds = [(c["type"], c.get("outcome")) for c in reports(view)]
-    # start, then the end the guard sent when the first row failed; nothing after.
-    assert kinds == [("report_start", None), ("report_end", "cancelled")]
+    # start, then the end the guard sent when the first row failed; nothing
+    # after. Its outcome is report_error, not cancelled: the run went on to
+    # finish, and the report must not read as if the tester stopped it.
+    assert kinds == [("report_start", None), ("report_end", "report_error")]
     assert "header" not in reports(view)[-1]
 
 
@@ -442,6 +469,23 @@ def test_an_unreported_run_does_not_inherit_the_last_runs_status_line(view):
     view.report_opt_in.value = False
     manifest(view, "b.fit")
     assert view.report_status.value == ""
+    # A count from run 1's last POST, settling only now, is not run 2's either.
+    receive(view, {"type": "report_status", "sent": 3, "failed": 0})
+    assert view.report_status.value == ""
+    upload(view, "b.fit")
+    receive(view, {"type": "report_status", "sent": 3, "failed": 1})
+    assert view.report_status.value == ""
+
+
+def test_the_status_line_survives_until_the_next_run_starts(view):
+    # The final chunk settles after report_end; the count must still show.
+    fill(view)
+    view.report_opt_in.value = True
+    manifest(view, "a.fit")
+    upload(view, "a.fit")
+    assert view.dashboard.phase == "done"
+    receive(view, {"type": "report_status", "sent": 1, "failed": 0})
+    assert "1 report sent" in view.report_status.value
 
 
 def test_a_failing_report_end_still_closes_the_pages_report(view):
@@ -462,5 +506,5 @@ def test_a_failing_report_end_still_closes_the_pages_report(view):
     assert view.dashboard.phase == "done"
     assert len(tries) == 1
     ends = [c for c in reports(view) if c["type"] == "report_end"]
-    assert ends == [{"type": "report_end", "outcome": "cancelled"}]
+    assert ends == [{"type": "report_end", "outcome": "report_error"}]
     assert view._report_id is None

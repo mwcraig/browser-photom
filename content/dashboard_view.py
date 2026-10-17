@@ -396,11 +396,16 @@ class DashboardView:
                 "<i>Fill in a valid observer code to see the report.</i>"
             )
             return
-        caption = (
-            "The first report of the next run, before any frame has run:"
-            if not chunk["rows"]
-            else "The first report of this run:"
-        )
+        if not chunk["rows"]:
+            caption = "The first report of the next run, before any frame has run:"
+        elif self._run_report_id is None:
+            # The last run was not reported (box unticked, or no usable
+            # observer code): these rows never went anywhere, and the id
+            # shown is the one the next run will use.
+            caption = ("What the first report of the last run would have been "
+                       "(nothing was sent):")
+        else:
+            caption = "The first report of this run:"
         self.report_preview.value = (
             f'<div style="font-size:0.9em;margin-top:0.5em">{caption}</div>'
             '<pre style="font-size:0.8em;max-height:24em;overflow:auto;'
@@ -427,11 +432,14 @@ class DashboardView:
                          "the run is unaffected.")
             # Close the page's side too, or its buffered rows wait for the
             # next run (sent as "cancelled" then) or for the tab to close
-            # ("page_closed"). No header: building one may be what failed,
-            # and the page keeps the last one it was given.
+            # ("page_closed"). The outcome is "report_error", not
+            # "cancelled": the run itself goes on, and a report filed as
+            # cancelled with the counters frozen mid-run would read as the
+            # tester having stopped it. No header: building one may be what
+            # failed, and the page keeps the last one it was given.
             if was_open:
                 try:
-                    self._report_send({"type": "report_end", "outcome": "cancelled"})
+                    self._report_send({"type": "report_end", "outcome": "report_error"})
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -532,6 +540,12 @@ class DashboardView:
     def _on_drop_zone_msg(self, _widget, content, _buffers):
         try:
             if not isinstance(content, dict) or content.get("type") != "report_status":
+                return
+            # The page counts per report, and settles a POST whenever the
+            # network does: a count from the last reported run can land
+            # during a run that is not being reported, and must not become
+            # its status line.
+            if self._run_report_id is None:
                 return
             sent, failed = content.get("sent"), content.get("failed")
             if not all(isinstance(n, int) and not isinstance(n, bool) and n >= 0

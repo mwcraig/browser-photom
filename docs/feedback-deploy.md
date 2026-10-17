@@ -26,14 +26,22 @@ The worry this design answers is a stranger using the endpoint to put
 something illegal or abusive into storage you own.
 
 - **Schema strictness.** Every field is a number, a boolean, null, or a short
-  string with a fixed pattern. There is no field that can hold a file or an
-  image. Free text is limited to the tester's comment (2000 characters) and
-  the per-row skip reason (300). Both refuse control characters and anything
+  string with a fixed pattern. There is no binary or blob field. Free text
+  is limited to the tester's comment (2000 characters), the per-row skip
+  reason (300) and the per-row file name (200). All three refuse control
+  characters, zero-width and bidi format characters (which can hide text or
+  mask `www.`), unpaired surrogates, and, for comment and reason, anything
   containing `://` or `www.` (in any case). Within those bounds they are
-  untrusted text: a short string of markup or base64 fits the pattern and is
-  stored as typed. Nothing renders it. The dashboard preview escapes it, the
-  pull script writes it to JSON and CSV (CSV cells that a spreadsheet would
-  read as a formula are prefixed with `'`), and you read it in an editor.
+  untrusted text: markup, a bare domain name, or base64 fits the pattern and
+  is stored as typed. Be clear about what that means: the text fields of one
+  64 KB chunk can together carry roughly 25-35 KB of arbitrary characters,
+  so someone determined could stage a file through this endpoint as base64
+  split across chunks. The link rule is a deterrent against casual
+  link-dropping, not a filter a motivated person cannot get around. What
+  protects you is that nothing renders or serves any of it: the dashboard
+  preview escapes it, the pull script writes it to JSON and CSV (CSV cells
+  that a spreadsheet would read as a formula are prefixed with `'`), you
+  read it in an editor, and the bucket is private and expires in 30 days.
   Unknown fields are refused at every level, including inside each row. The
   body is capped at 64 KB and a chunk at 50 rows. The worker stores the
   parsed and validated object. It does not store the raw text, so a
@@ -42,14 +50,16 @@ something illegal or abusive into storage you own.
   key, and only in memory. The stored object is
   `{"received_at", "country", "report"}`. `country` is Cloudflare's
   two-letter country guess. The worker does not log requests. Workers Logs
-  stay off because `wrangler.toml` has no `[observability]` block. Cloudflare
-  itself sees IPs at its edge, as it does for any site it serves. That is
-  outside what this repo stores.
+  are switched off explicitly (`[observability] enabled = false` in
+  `wrangler.toml`), so a change in Cloudflare's default cannot switch them
+  on. Cloudflare itself sees IPs at its edge, as it does for any site it
+  serves. That is outside what this repo stores.
 - **What a report contains.** The tester agreed to send these: the AAVSO
   observer code, the site position rounded to whole degrees, file names,
   per-frame QA numbers, the build tag, and their comment. The consent text
-  also says the server adds the country it infers from the connection. The
-  schema has a `user_agent` field, but the dashboard does not fill it.
+  also says the server adds the country it infers from the connection. There
+  is no user-agent field: the dashboard never sent one, and an unfilled
+  string field is just more room for someone else's text.
 - **30-day expiry on the server.** An R2 lifecycle rule (step 3) deletes
   every report 30 days after it was written, whether you looked at it or
   not. The consent text says exactly that: the *server* deletes reports
@@ -244,9 +254,16 @@ report:
 
 Flags in `[...]` mark anything to look at:
 
-- `INVALID xN`: a chunk fails the schema now. That should be impossible
-  unless the schema changed, and the chunk is kept, not dropped.
+- `INVALID xN`: a chunk fails the schema now. That means the schema changed
+  since it was stored, or a mirrored file under `raw/` is damaged (a chunk
+  the pull script could not read is listed under `unreadable_keys` or
+  `invalid_chunks`, and a readable duplicate of the same seq wins over it).
+  The chunk is kept, not dropped.
 - `no-final`: the tab died before the last chunk.
+- `final-not-last`: a chunk marked final is not the highest seq, or more
+  than one is. The dashboard never does this; a crafted client might.
+- `MERGE-ERROR ...`: merging or writing that one report raised. It gets this
+  line and no files; every other report still goes through.
 - `missing seq`: a chunk was lost or refused.
 - `conflict`: header fields changed mid-run.
 - `dup/unreadable`: duplicate or unreadable chunks.
@@ -279,7 +296,14 @@ allowances as of October 2026. Check them, because they change:
   each doing several 350-frame runs a day is a few thousand requests. The
   docs do not say clearly what happens past the daily cap, but the likely
   outcome is that requests fail, which the dashboard ignores. It is not a
-  bill.
+  bill. Note what the per-IP limit does *not* do, though: one address
+  sending 60 accepted chunks a minute all day is 86,400 requests, most of
+  the daily cap, and 64 KB objects at that rate kept for 30 days would be
+  well past the 10 GB storage tier. The limit is a brake on a runaway or
+  careless client, not protection against someone deliberately filling the
+  bucket. If that happens, the remedies are on the Cloudflare side: pause
+  the worker, tighten the limit, or add a daily budget (a KV counter, or a
+  second rate-limit binding keyed on a constant).
 - **R2 free tier, per month:**
   - 10 GB-month of storage. A 350-frame run is about 15 objects of roughly
     15 KB, so about 250 KB. With 30-day expiry, thousands of runs would fit.
@@ -306,7 +330,11 @@ allowances as of October 2026. Check them, because they change:
   `pattern` regexes with the `u` flag. Its regexes and Python's `re` agree on
   the schema's patterns, with one exception: Python's `$` also matches before
   a trailing newline. So the pull script's re-validation is, if anything,
-  more lenient than the worker.
+  more lenient than the worker. The dashboard's own guards
+  (`feedback_report`) use `fullmatch` so they do not share that leniency,
+  and `tests/test_feedback_cross_validate.py` runs real producer output
+  through the worker's validator under node (when `npm install` has been
+  run here) to catch any other drift between the two engines.
 - Duplicate `(report_id, seq)` within one UTC day are not overwritten. The
   worker checks with `head` before `put`. Two identical retries racing can
   both write, which is harmless because their bodies are identical. A retry

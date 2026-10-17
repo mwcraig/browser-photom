@@ -58,7 +58,12 @@ REPORT_SCHEMA_VERSION = 1
 # Rows per POST. `dropzone.js` has its own copy (REPORT_ROWS_PER_CHUNK); the
 # preview uses this one to show the first chunk. The schema allows 50; 25
 # keeps a chunk of worst-case rows (a 300-character reason, a 200-character
-# name, every number present) well under the 64 KB keepalive/beacon cap.
+# name, every number present) under the 64 KB keepalive/beacon cap when the
+# text is ASCII or Latin (~53 KB with 2-byte characters throughout). Wider
+# characters can push 25 such rows over it (~82 KB with 4-byte emoji
+# everywhere), which is why the page also flushes by bytes before it reaches
+# this count; the preview may then show one more row than the first chunk
+# really carried.
 ROWS_PER_CHUNK = 25
 
 # bandaid's QA_MANIFEST_COLUMNS at the pinned commit (scripts.py), the key set
@@ -119,7 +124,10 @@ _COUNT_LIMIT = 10_000_000
 # escapes undone). Kept literal rather than read from feedback/ at run time:
 # that directory is not part of content/, so the kernel never has it. The
 # tests check every built chunk against the real schema file, which is what
-# catches these drifting.
+# catches these drifting. Always used with `fullmatch`: the worker's
+# JavaScript `$` matches only at the very end, while Python's `$` also
+# matches before a final newline, so a `match` here would pass "ok\n" that
+# the worker refuses (and with it the whole chunk).
 _OBSCODE_RE = re.compile(r"^[A-Z0-9]{1,10}$")
 _STATUS_RE = re.compile(r"^(ok|(skipped|error): [A-Za-z_][A-Za-z0-9_.]{0,79})$")
 _BUILD_RE = re.compile(r"^[A-Za-z0-9._+-]{1,120}$")
@@ -139,6 +147,14 @@ NO_QA_STATUS = "skipped: no_qa_record"
 
 # Control characters, as the schema counts them (C0 plus DEL).
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Also refused by every text field in the schema: zero-width and bidi format
+# characters (which hide or reorder text, and let "www." slip past the
+# no-links rule as "w\u200bww."), the line/paragraph separators, the BOM,
+# and unpaired UTF-16 surrogates (which Python's str can hold -- a pasted
+# broken emoji, a filename decoded with surrogateescape -- but which no
+# UTF-8 encoder accepts, so one would fail the comm message or, stored
+# escaped, the pull script's CSV). Dropped, like control characters.
+_FORMAT_RE = re.compile(r"[\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff\ud800-\udfff]")
 # What the schema's no-URL rule matches: "://" or "www." anywhere.
 _URL_MARK_RE = re.compile(r"://|www\.", re.IGNORECASE)
 # For redacting a URL out of a skip reason (an HTTP error from the Gaia query
@@ -152,15 +168,23 @@ _URL_TOKEN_RE = re.compile(r"\S*(?:://|www\.)\S*", re.IGNORECASE)
 
 
 def endpoint_url(value):
-    """The report endpoint if ``value`` is a usable http(s) URL, else ``""``.
+    """The report endpoint if ``value`` is a usable URL, else ``""``.
 
     ``""`` means reporting is disabled for this build: the view greys the
     checkbox out and the page never sends anything. Anything that is not
-    plainly an http(s) URL (a typo'd repo variable, say) disables reporting
-    rather than having the page POST somewhere odd.
+    plainly an https URL without credentials (a typo'd repo variable, say),
+    or http on localhost, disables reporting rather than having the page
+    POST somewhere that cannot work.
     """
     text = "" if value is None else str(value).strip()
-    if not re.match(r"^https?://[^\s/]+", text):
+    # https, or http only on localhost (a `wrangler dev` worker behind a
+    # local page): the deployed page is served over https, so any other http
+    # endpoint would be blocked as mixed content and every send would fail.
+    # No userinfo: fetch and sendBeacon both throw on a URL with credentials.
+    # scripts/write_build_info.py applies the same rule at build time.
+    if not re.fullmatch(
+        r"(https://[^\s/@]+|http://(localhost|127\.0\.0\.1)(:\d+)?)(/\S*)?", text
+    ):
         return ""
     if _CONTROL_RE.search(text):
         return ""
@@ -183,7 +207,7 @@ def obscode_problem(observer):
     text = "" if observer is None else str(observer).strip().upper()
     if not text:
         return "Reports need your AAVSO observer code — fill it in above."
-    if not _OBSCODE_RE.match(text):
+    if not _OBSCODE_RE.fullmatch(text):
         return (
             "Reports can't be sent with this observer code: an AAVSO obscode "
             "is 1–10 letters or digits."
@@ -198,9 +222,9 @@ def clean_comment(text):
     """``(comment_to_send, problem)`` for the tester's free-text comment.
 
     The one place the comment rules live (the schema's ``comment``: at most
-    2000 characters, no control characters except newline, no "://" or
-    "www."), so the no-links rule -- not yet confirmed -- is a change here
-    and in the schema, nothing else.
+    2000 characters, no control, format or surrogate characters except
+    newline, no "://" or "www."), so the no-links rule is a change here and
+    in the schema, nothing else.
 
     Line endings and tabs are normalised rather than refused (a textarea
     paste routinely carries ``\\r\\n`` and tabs, and neither is the tester's
@@ -214,6 +238,7 @@ def clean_comment(text):
     raw = "" if text is None else str(text)
     comment = raw.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
     comment = re.sub(r"[\x00-\x09\x0b-\x1f\x7f]", "", comment)
+    comment = _FORMAT_RE.sub("", comment)
     if _URL_MARK_RE.search(comment):
         return "", (
             "Links aren't accepted in comments — the frame diagnostics will "
@@ -254,7 +279,7 @@ def site_degrees(value, limit):
 
 def _build_tag(text):
     tag = re.sub(r"[^A-Za-z0-9._+-]", "_", str(text or ""))[:120]
-    return tag if _BUILD_RE.match(tag) else "unknown"
+    return tag if _BUILD_RE.fullmatch(tag) else "unknown"
 
 
 def _counter(value):
@@ -290,7 +315,7 @@ def build_header(
     `clean_comment`; ``obscode`` must already have passed `obscode_problem`
     (the caller decides whether to report at all -- this does not).
     """
-    if not _REPORT_ID_RE.match(str(report_id)):
+    if not _REPORT_ID_RE.fullmatch(str(report_id)):
         raise ValueError(f"report_id must be 32 lowercase hex characters, got {report_id!r}")
     code = str(obscode).strip().upper()
     if obscode_problem(code) is not None:
@@ -345,13 +370,13 @@ def _count(value):
 
 
 def _file(name):
-    text = _CONTROL_RE.sub("", str(name or "")).replace("\\", "/")
+    text = _FORMAT_RE.sub("", _CONTROL_RE.sub("", str(name or ""))).replace("\\", "/")
     return text.rsplit("/", 1)[-1][:_FILE_MAX]
 
 
 def _status(status):
     text = "" if status is None else str(status)
-    if _STATUS_RE.match(text):
+    if _STATUS_RE.fullmatch(text):
         return text
     # A status bandaid built from an exception type name that the schema's
     # identifier pattern does not take (it never should): keep the outcome,
@@ -372,7 +397,7 @@ def _reason(reason):
     """
     if reason is None:
         return None
-    text = _CONTROL_RE.sub(" ", str(reason))
+    text = _FORMAT_RE.sub("", _CONTROL_RE.sub(" ", str(reason)))
     text = _URL_TOKEN_RE.sub("[url]", text)
     text = re.sub(r" {2,}", " ", text).strip()[:_REASON_MAX]
     if _URL_MARK_RE.search(text) or _CONTROL_RE.search(text):
@@ -413,7 +438,7 @@ def clean_row(qa, *, name, reason=None, elapsed_s=None):
 
     dropped = qa.get("dropped_filters")
     row["dropped_filters"] = (
-        dropped if isinstance(dropped, str) and _DROPPED_FILTERS_RE.match(dropped) else None
+        dropped if isinstance(dropped, str) and _DROPPED_FILTERS_RE.fullmatch(dropped) else None
     )
 
     # bandaid sets this to a bool (whether the no-plane fallback fired); the
@@ -422,7 +447,7 @@ def clean_row(qa, *, name, reason=None, elapsed_s=None):
     fallback = qa.get("plane_fallback")
     if isinstance(fallback, bool):
         row["plane_fallback"] = fallback
-    elif isinstance(fallback, str) and _PLANE_FALLBACK_RE.match(fallback):
+    elif isinstance(fallback, str) and _PLANE_FALLBACK_RE.fullmatch(fallback):
         row["plane_fallback"] = fallback
     else:
         row["plane_fallback"] = None

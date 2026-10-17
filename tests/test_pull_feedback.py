@@ -225,6 +225,8 @@ class FakeS3:
     def get_object(self, Bucket, Key):
         self.gets.append(Key)
         body = self.objects[Key]
+        if isinstance(body, Exception):
+            raise body
 
         class Body:
             def read(self):
@@ -244,7 +246,7 @@ def test_download_mirrors_new_keys_only(pf, tmp_path):
     (tmp_path / key(1)).write_bytes(b"already here")
     # --since 2026-11-01 lists from the day before (a run can straddle UTC
     # midnight); load_raw is what then decides by whole report.
-    assert pf.download(client, "bkt", tmp_path, "2026-11-01") == (3, 2)
+    assert pf.download(client, "bkt", tmp_path, "2026-11-01") == (3, 2, 0)
     assert client.list_kwargs == {"Bucket": "bkt", "Prefix": "reports/",
                                   "StartAfter": "reports/2026-10-31"}
     assert client.gets == [key(0, "2026-10-31"), key(0)]
@@ -315,7 +317,7 @@ def test_since_selects_whole_reports_across_utc_midnight(pf, tmp_path):
     objects = {k: json.dumps(v).encode() for k, v in files.items()}
     objects[key(0, "2026-11-03")] = b"{}"
     client = FakeS3(objects)
-    assert pf.download(client, "bkt", tmp_path / "mirror", "2026-11-05") == (3, 3)
+    assert pf.download(client, "bkt", tmp_path / "mirror", "2026-11-05") == (3, 3, 0)
     assert client.list_kwargs["StartAfter"] == "reports/2026-11-04"
     assert not (tmp_path / "mirror" / key(0, "2026-11-03")).exists()
 
@@ -329,3 +331,99 @@ def test_unhashable_header_values_in_a_flagged_chunk_do_not_abort_the_merge(pf, 
     assert [c["seq"] for c in merged["invalid_chunks"]] == [1]
     assert merged["header_conflicts"] == ["build", "site_lat"]
     assert merged["site_lat"] == [] and merged["build"] == {}
+
+
+# -- third review round (PR #16) ----------------------------------------------
+
+
+def test_an_unpaired_surrogate_in_a_stored_string_does_not_abort_the_pull(pf, tmp_path):
+    # The worker's `u`-flag regexes once let a lone surrogate through; it is
+    # stored JSON-escaped and comes back as a str UTF-8 cannot encode. The
+    # CSV must still be written (escaped), and every other report still
+    # merged -- an attacker choosing report_id 000...0 sorts first.
+    raw = tmp_path / "raw"
+    evil = "0" * 32
+    files = {
+        key(0, rid=evil): stored(chunk(0, [{"file": "a\ud800.fits", "status": "ok",
+                                            "reason": "x\udfff"}], report_id=evil, final=True)),
+        key(0): stored(chunk(0, [ROW_OK], final=True)),
+    }
+    for k, rec in files.items():
+        (raw / k).parent.mkdir(parents=True, exist_ok=True)
+        (raw / k).write_text(json.dumps(rec))
+    merged = pf.merge_all(raw, tmp_path)
+    assert [m["report_id"] for m in merged] == [evil, RID]
+    assert not any(m.get("merge_error") for m in merged)
+    text = (tmp_path / f"{evil}.csv").read_text(encoding="utf-8")
+    assert "\\ud800" in text and (tmp_path / f"{RID}.csv").exists()
+
+
+def test_a_report_whose_merge_raises_is_reported_and_the_rest_go_through(pf, tmp_path, monkeypatch):
+    raw = tmp_path / "raw"
+    first, second = "0" * 32, RID
+    for rid in (first, second):
+        (raw / key(0, rid=rid)).parent.mkdir(parents=True)
+        (raw / key(0, rid=rid)).write_text(json.dumps(stored(chunk(0, [ROW_OK], report_id=rid, final=True))))
+    real = pf.merge_report
+
+    def merge_report(report_id, stored_, validator):
+        if report_id == first:
+            raise KeyError("bug in the merge")
+        return real(report_id, stored_, validator)
+
+    monkeypatch.setattr(pf, "merge_report", merge_report)
+    merged = pf.merge_all(raw, tmp_path)
+    by_id = {m["report_id"]: m for m in merged}
+    assert by_id[first]["merge_error"].startswith("KeyError")
+    assert "MERGE-ERROR KeyError" in pf.summary_line(by_id[first])
+    assert (tmp_path / f"{second}.json").exists() and not (tmp_path / f"{first}.json").exists()
+
+
+def test_a_truncated_mirror_copy_never_wins_over_a_readable_duplicate(pf, validator):
+    good = stored(chunk(1, [ROW_SKIP], final=True), received_at="2026-11-06T00:00:01Z")
+    items = [
+        (key(1), {"unparseable": "Expecting value: line 1 column 1"}),   # sorts first by received_at ""
+        (key(1, "2026-11-06"), good),
+    ]
+    merged = pf.merge_report(RID, items, validator)
+    assert merged["duplicate_keys"] == [key(1)]
+    assert merged["n_rows"] == 1 and merged["final_received"] is True
+    assert merged["invalid_chunks"] == []
+
+
+def test_a_non_dict_record_is_flagged_not_fatal(pf, validator):
+    merged = pf.merge_report(RID, [(key(0), [1, 2]), (key(1), stored(chunk(1, [ROW_OK], final=True)))], validator)
+    assert merged["seqs"] == [0, 1]
+    assert [c["seq"] for c in merged["invalid_chunks"]] == [0]
+    assert merged["n_rows"] == 1
+
+
+def test_a_final_chunk_that_is_not_the_last_is_flagged(pf, validator):
+    items = [(key(0), stored(chunk(0, [ROW_OK], final=True))),
+             (key(1), stored(chunk(1, [ROW_OK])))]
+    merged = pf.merge_report(RID, items, validator)
+    assert merged["final_seqs"] == [0] and merged["final_received"] is True
+    assert "final-not-last" in pf.summary_line(merged)
+    honest = pf.merge_report(RID, [(key(0), stored(chunk(0, [ROW_OK]))),
+                                   (key(1), stored(chunk(1, [], final=True)))], validator)
+    assert "final-not-last" not in pf.summary_line(honest)
+
+
+def test_download_writes_whole_files_and_skips_a_failing_get(pf, tmp_path, capsys):
+    objects = {
+        key(0): json.dumps(stored(chunk(0, [ROW_OK]))).encode(),
+        key(1): RuntimeError("NoSuchKey: deleted by the lifecycle rule"),
+        key(2): b"{}",
+    }
+    assert pf.download(FakeS3(objects), "bkt", tmp_path) == (3, 2, 1)
+    err = capsys.readouterr().err
+    assert "could not fetch" in err and key(1) in err
+    assert not (tmp_path / key(1)).exists()
+    assert not list(tmp_path.rglob("*.part"))
+    assert json.loads((tmp_path / key(0)).read_text())["report"]["seq"] == 0
+
+
+def test_since_must_be_a_real_date(pf, tmp_path):
+    with pytest.raises(SystemExit):
+        pf.main(["bucket", "--offline", "--out", str(tmp_path), "--since", "2026-02-30"])
+    assert pf.main(["bucket", "--offline", "--out", str(tmp_path), "--since", "2026-02-28"]) == 0

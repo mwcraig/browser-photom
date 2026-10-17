@@ -750,7 +750,7 @@ module docstring; `FrameProcessor`).
 | `tests/test_dashboard_view.py` | `DashboardView` built headlessly, with messages injected through the drop zone's own `_handle_custom_msg`: `slowdown_factor` is a synced trait, the running notice shows only while running, a `hidden_episode` shows the banner, Dismiss hides it, it survives into the done panel (without the "keep this tab visible" instruction) and is cleared by the next drop, its text is escaped, and `INSTRUCTIONS` quotes the factor. Needs ipywidgets and anywidget (both in the default pixi env) |
 | `tests/test_feedback_report.py` | the tester-report rows, headers and chunks (§11), every built chunk validated against `feedback/report.schema.json` with `jsonschema`: non-finite floats nulled, unknown keys dropped and wrong types nulled, status coercion, hostile file names and reasons (URLs redacted, control characters, length), site rounding and longitude folding, obscode and comment rules (a link or over-long comment blanked, never the rows), a worst-case full chunk under 60 KB; `QA_COLUMNS` against the schema and the pinned bandaid-src; `feedback_url()` and `write_build_info.py`'s `FEEDBACK_URL` |
 | `tests/test_feedback_view.py` | the view's report form and messages, headless: off by default, greyed without an endpoint, an unusable obscode explained and nothing sent, a link in the comment warned about and sent blank (preview too), the preview's chunk before and after a run, start/row/end ordering against `file_done`/`run_done`, QA records and the resolved site reaching rows and headers, cancel, fresh ids per run, a raising reporting path logged once with the run unaffected, and the status line |
-| `tests/js/reporter.test.mjs` | the page's reporter (`buildReportChunk`, `reportBodies`, `makeReporter`, `handleReportMessage`) with injected fetch/sendBeacon: a POST every 25 rows and a final chunk, the newest header winning, `pagehide` beaconing a `page_closed` chunk once, nothing without a URL, failures counted and swallowed (with one non-keepalive retry), a report left open finished as `cancelled`, hidden time, splitting oversize bodies, the `seq` ceiling, sent/failed counts restarting per run, and a `persisted` `pagehide` flushing without closing |
+| `tests/js/reporter.test.mjs` | the page's reporter (`buildReportChunk`, `reportBodies`, `makeReporter`, `handleReportMessage`) with injected fetch/sendBeacon: a POST every 25 rows and a final chunk, the newest header winning, `pagehide` beaconing a `page_closed` chunk once, nothing without a URL, failures counted and swallowed (with one non-keepalive retry), a report left open finished as `cancelled`, hidden time, splitting oversize bodies, the `seq` ceiling, sent/failed counts restarting per run, a `persisted` `pagehide` flushing without closing, bodies past the `seq` ceiling counted as failed, `hidden_ms` clamped to the schema maximum, and the byte-aware flush sized for the beacon |
 | `tests/js/dropzone.test.mjs` | the pure functions extracted from `dropzone.js`: `isFitsName`, `collectEntries`, `sliceChunks`, `validateFound`, `byPath`, `pickRun`, `makeErrorLatch` (first error only, re-arming, and keeping that error), and `makeRunFailure` (the upload loop's first-failure slot: a guarded rejection or a latched kernel error nobody was waiting for, first one wins, cleared by re-arming); and the tab-visibility helpers `makeTabWatch` (episode timing, capping at run end, frame counting only while hidden mid-run, the once-per-run pointer nudge, no negative durations, discarding a refused run), `hiddenTitle`, `tabWarningText`, `dialogChoseStart`, `isViewportExit`, and `readSkipTabWarning`/`writeSkipTabWarning` against missing and throwing storage |
 
 The JS tests exist specifically to pin down two front-end rules that would
@@ -845,7 +845,9 @@ widget does not send twice) buffers the rows and POSTs a chunk with
 `fetch(url, {method: "POST", keepalive: true, body})` every 25 rows (sooner
 if the buffered rows would no longer fit one body, so that a `pagehide`
 flush is always a single beacon: beacons and keepalive fetches share one
-64 KB in-flight budget per page), and the final chunk at the run's end (`outcome` `done` or `cancelled`). On `pagehide`
+64 KB in-flight budget per page; the check sizes the buffer as the largest
+body those rows could become, the `pagehide` beacon), and the final chunk
+at the run's end (`outcome` `done` or `cancelled`). On `pagehide`
 mid-run it sends the final chunk with `navigator.sendBeacon` and outcome
 `page_closed`, so a crashed kernel's rows still arrive when the tester
 reloads; a `pagehide` with `persisted` (the page entering the back/forward
@@ -856,16 +858,29 @@ are plain strings (`text/plain`, so no CORS preflight),
 each capped at 60,000 bytes (split by rows if ever over). Every failure is
 swallowed and counted; the run panel shows "3 reports sent" or "1 report
 failed to send — your run is unaffected" from the page's `report_status`
-messages. On the kernel side every reporting entry point is guarded: an
-exception is logged once ("Tester report stopped …; the run is
-unaffected") and turns reporting off for the rest of that run.
+messages. A run long enough to pass the schema's `seq` ceiling (999 chunks)
+stops sending, and every body that would have gone out counts as failed.
+If the widget model is disposed with a report open (a kernel restart), the
+page closes it as `cancelled` first. On the kernel side every reporting
+entry point is guarded: an exception is logged once ("Tester report stopped
+…; the run is unaffected"), turns reporting off for the rest of that run,
+and closes the page's report with outcome `report_error` (not `cancelled`:
+the run goes on, and the stored report must not read as if the tester
+stopped it). A `report_status` that arrives while no run is being reported
+(a POST from the last run settling late) is ignored. The kernel's pattern
+guards use `fullmatch`, because Python's `$` matches before a trailing
+newline and the worker's JavaScript `$` does not; `tests/test_feedback_cross_validate.py`
+runs real producer output through the worker's own validator under node.
 
 **Endpoint.** A build-time setting: `scripts/write_build_info.py` (the
 `build-info` task) writes `FEEDBACK_URL` into the generated
 `content/build_info.py` from the environment variable
 `BROWSER_PHOTOM_FEEDBACK_URL`. Unset or empty, the build ships with
 reporting disabled: the box is greyed out with a note that reporting is not
-set up in this build. A value that is not an http(s) URL fails the build.
+set up in this build. A value that is not an https URL without credentials
+(or http on localhost, for a `wrangler dev` worker) fails the build: the
+page is served over https, so any other http endpoint would be blocked as
+mixed content, and fetch and sendBeacon throw on a URL with userinfo.
 The kernel reads it with `photom_dashboard.feedback_url()` (`""` without the
 module, as `software_versions` falls back to `unknown`) and the view hands
 it to the page as the drop zone's synced `feedback_url` trait. The Pages

@@ -9,6 +9,12 @@ compatibility_date = "2026-08-01"
 # Only POST /report on the workers.dev hostname; no custom domain.
 workers_dev = true
 
+# Workers Logs off, explicitly: the stored object is the only record of a
+# request (docs/feedback-deploy.md §1, "No IP address"), and this must not
+# depend on whatever the default becomes.
+[observability]
+enabled = false
+
 [vars]
 # The GitHub Pages origin (scheme + host, no path). Comma-separate to allow
 # more than one, e.g. add "http://localhost:8010" while testing a local

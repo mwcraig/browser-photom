@@ -13,7 +13,6 @@ function chunk(overrides = {}) {
     final: false,
     build: "bandaid-d6ba44a.browser-photom-1854672",
     qa_schema: 3,
-    user_agent: "Mozilla/5.0 (Macintosh) Firefox/140.0",
     obscode: "CMW",
     site_lat: 47,
     site_lon: -96,
@@ -124,7 +123,17 @@ describe("schema rejections", () => {
     "extra top-level property": chunk({ image: "aGVsbG8=" }),
     "extra row property": chunk({ rows: [{ file: "a.fits", status: "ok", pixels: [1, 2] }] }),
     "extra run property": chunk({ run: { n_total: 1, n_processed: 1, n_skipped: 0, note: "x" } }),
-    "__proto__ key": JSON.parse('{"__proto__": {"x": 1}}'),
+    // A full valid chunk plus the key, so it is additionalProperties that
+    // refuses it, not `required`.
+    "__proto__ key": JSON.parse(JSON.stringify(chunk()).replace(/^\{/, '{"__proto__":{"x":1},')),
+    "user_agent (dropped from the schema: nothing fills it)": chunk({ user_agent: "Mozilla/5.0" }),
+    "unpaired surrogate in file name": chunk({ rows: [{ file: "a\ud800.fits", status: "ok" }] }),
+    "unpaired surrogate in reason": chunk({ rows: [{ file: "a.fits", status: "ok", reason: "x\udfffy" }] }),
+    "unpaired surrogate in comment": chunk({ comment: "broken \ud83d emoji" }),
+    "zero-width space hiding www.": chunk({ comment: "see w\u200bww.example.com" }),
+    "bidi override in reason": chunk({ rows: [{ file: "a.fits", status: "ok", reason: "\u202eabc" }] }),
+    "BOM in file name": chunk({ rows: [{ file: "\ufeffa.fits", status: "ok" }] }),
+    "line separator in comment": chunk({ comment: "a\u2028b" }),
     "URL in comment (scheme)": chunk({ comment: "look at https://example.com" }),
     "URL in comment (www)": chunk({ comment: "see www.example.com please" }),
     "URL in comment (WWW, mixed case)": chunk({ comment: "see WwW.Example.com please" }),
@@ -137,6 +146,7 @@ describe("schema rejections", () => {
     "bad status": chunk({ rows: [{ file: "a.fits", status: "error: <script>" }] }),
     "too many rows": chunk({ rows: Array.from({ length: 51 }, () => ({ file: "a.fits", status: "ok" })) }),
     "non-finite stand-in": chunk({ rows: [{ file: "a.fits", status: "ok", fwhm: 1e13 }] }),
+    "unknown outcome": chunk({ run: { n_total: 1, n_processed: 1, n_skipped: 0, outcome: "crashed" } }),
     "schema_version 2": chunk({ schema_version: 2 }),
   };
   for (const [name, body] of Object.entries(cases)) {
@@ -168,9 +178,18 @@ describe("schema rejections", () => {
     expect(res.status).toBe(400);
   });
 
+  it("accepts the kernel's report_error outcome and non-ASCII text", async () => {
+    const res = await post(chunk({
+      final: true, comment: "ünïcödé ✓ 😀 中文\nsecond line",
+      run: { n_total: 2, n_processed: 1, n_skipped: 1, outcome: "report_error" },
+      rows: [{ file: "émoji😀.fits", status: "ok", reason: "pas de solution" }],
+    }));
+    expect(res.status).toBe(204);
+  });
+
   it("accepts the edge values the schema allows", async () => {
     const res = await post(chunk({
-      seq: 999, site_lat: null, site_lon: 180, comment: "", user_agent: "",
+      seq: 999, site_lat: null, site_lon: 180, comment: "",
       run: { n_total: 0, n_processed: 0, n_skipped: 0, outcome: null },
       rows: [],
     }));

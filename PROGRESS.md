@@ -1558,6 +1558,19 @@ needs Firefox 133+; a `persisted` pagehide is not a promise the page is
 kept; mobile tab closes fire no `pagehide` and end `no-final`.
 Tests: 504 pytest, 96 node, 70 worker.
 
+Copilot's ninth pass (on 69317f7) found one more of the same shape: the
+endpoint rule took any port in 0-65535, but the Fetch standard blocks a
+list of ports (0, 25, 6000, 10080 and some eighty others) that `new URL()`
+parses and every fetch and sendBeacon then refuses before any connection,
+keepalive retry included, so a build with one would have shipped with
+reporting that never sends. Both copies of `usable_endpoint` now refuse
+the standard's list; port 0 moved from the accepted to the refused test
+cases. A test pins the list to node's fetch, which reports `bad port` as
+the cause for every entry but 0 (undici omits 0; Chromium and Firefox
+block it), and tries the neighbours (24, 26, 443, 5999, 6001, ...) on the
+loopback address to show they fail some other way.
+Tests: 515 pytest, 96 node, 70 worker.
+
 Done 2026-10-18: the `FEEDBACK_URL` repository variable is set, the worker
 is redeployed (again after e862930, though that commit changed nothing the
 worker runs), the account stays on Workers Free for now, the R2 billing

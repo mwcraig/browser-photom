@@ -936,13 +936,16 @@ set up in this build. A value that is not an https URL without credentials
 page is served over https, so any other http endpoint would be blocked as
 mixed content, and fetch and sendBeacon throw on a URL with userinfo. The
 host must be letters, digits, dots and hyphens with an optional port up to
-65535, a numeric last label only as a dotted quad, and any `xn--` label
+65535 and not on the Fetch standard's bad port list (0, 25, 6000 and the
+rest: the URL parses, but every fetch and sendBeacon to it is a network
+error before any connection), a numeric last label only as a dotted quad,
+and any `xn--` label
 valid punycode, since `new URL()` throws on anything else (`https://?x`,
 `https://host:bad/report`, `https://example.123/report`) and every send
 would fail; and the path must be the worker's `/report`, since it answers
 404 to anything else. A test runs the accepted and refused lists through
-node's URL parser so the rule tracks the browser's rather than a
-re-implementation of it.
+node's URL parser, and the bad ports through node's fetch, so the rule
+tracks the browser's rather than a re-implementation of it.
 The kernel reads it with `photom_dashboard.feedback_url()` (`""` without the
 module, as `software_versions` falls back to `unknown`) and the view hands
 it to the page as the drop zone's synced `feedback_url` trait. The Pages

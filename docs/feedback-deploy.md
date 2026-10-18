@@ -242,9 +242,9 @@ endpoint, `https://browser-photom-feedback.<your-subdomain>.workers.dev/report`.
 `.github/workflows/pages.yml` passes it to the build as
 `BROWSER_PHOTOM_FEEDBACK_URL`, and `scripts/write_build_info.py` writes it
 into the dashboard; the build fails on a value the page could not post to
-(no `/report`, a bad port, a host the URL parser rejects), which is the
-place to catch a typo. Re-run the Pages workflow, or push to `main`, for it to
-take effect.
+(no `/report`, a port out of range or one the Fetch standard blocks, a host
+the URL parser rejects), which is the place to catch a typo. Re-run the
+Pages workflow, or push to `main`, for it to take effect.
 
 ## 9. Pulling reports for review
 

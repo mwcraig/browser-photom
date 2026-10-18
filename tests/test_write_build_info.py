@@ -46,7 +46,7 @@ def test_a_good_url_passes_both_checks(wbi):
 PARSES = [
     "https://x.workers.dev/report",
     "https://x.workers.dev:8443/report",
-    "https://x.workers.dev:0/report",
+    "https://x.workers.dev:443/report",
     "https://h:65535/report",
     "https://feedback.example-site.org/report?x=1",
     "https://1.2.3.4/report",
@@ -68,6 +68,18 @@ UNPARSEABLE = [
     "https://xn--/report",
 ]
 
+# Parse fine, and every fetch and sendBeacon to them is a network error before
+# any connection: the Fetch standard's bad port list (Copilot, ninth pass).
+BLOCKED_PORT = [
+    "https://x.workers.dev:0/report",
+    "https://x.workers.dev:25/report",
+    "https://x.workers.dev:6000/report",
+    "https://x.workers.dev:10080/report",
+    "https://1.2.3.4:587/report",
+    "http://localhost:6000/report",
+    "http://127.0.0.1:1/report",
+]
+
 
 @pytest.mark.parametrize("good", PARSES)
 def test_hosts_ports_and_the_report_path_pass_both_checks(wbi, good):
@@ -77,6 +89,13 @@ def test_hosts_ports_and_the_report_path_pass_both_checks(wbi, good):
 
 @pytest.mark.parametrize("bad", UNPARSEABLE)
 def test_what_the_url_parser_throws_on_fails_both_checks(wbi, bad):
+    with pytest.raises(ValueError):
+        wbi.feedback_url_from_env({wbi.FEEDBACK_URL_ENV: bad})
+    assert endpoint_url(bad) == ""
+
+
+@pytest.mark.parametrize("bad", BLOCKED_PORT)
+def test_a_port_the_fetch_standard_blocks_fails_both_checks(wbi, bad):
     with pytest.raises(ValueError):
         wbi.feedback_url_from_env({wbi.FEEDBACK_URL_ENV: bad})
     assert endpoint_url(bad) == ""
@@ -97,6 +116,33 @@ def test_the_lists_above_agree_with_the_browsers_url_parser():
               " try { new URL(u); } catch (e) { threw = true; }"
               " if (!threw) throw new Error('parsed ' + u); }")
     subprocess.run([NODE, "-e", throws, json.dumps(UNPARSEABLE)], check=True)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not on PATH")
+def test_the_bad_port_list_is_the_one_fetch_enforces(wbi):
+    # node's fetch (undici) refuses a bad port before any connection, with
+    # `cause.message === "bad port"`, so this pins `_BAD_PORTS` to the list
+    # the engine enforces rather than to a transcription of the standard. The
+    # one exception is 0: on the standard's list and blocked by Chromium and
+    # Firefox, but not by undici, so it is checked by hand. The neighbours
+    # are tried on the loopback address (no DNS) and must fail some other
+    # way, usually ECONNREFUSED.
+    assert 0 in wbi._BAD_PORTS
+    ours = sorted(wbi._BAD_PORTS - {0})
+    neighbours = [24, 26, 443, 5999, 6001, 8443, 8787, 10079, 10081, 65535]
+    assert not set(neighbours) & wbi._BAD_PORTS
+    script = (
+        "const [bad, ok] = JSON.parse(process.argv[1]);"
+        " const why = async (u) => { try { await fetch(u, {method: 'POST', body: 'x'});"
+        " return 'sent'; } catch (e) { return (e.cause && e.cause.message) || e.message; } };"
+        " (async () => {"
+        " for (const p of bad) { const w = await why('https://h.invalid:' + p + '/report');"
+        "   if (w !== 'bad port') throw new Error('port ' + p + ': ' + w); }"
+        " for (const p of ok) { const w = await why('https://127.0.0.1:' + p + '/report');"
+        "   if (w === 'bad port') throw new Error('port ' + p + ' is blocked'); }"
+        " })();"
+    )
+    subprocess.run([NODE, "-e", script, json.dumps([ours, neighbours])], check=True, timeout=60)
 
 
 def test_github_actions_is_only_the_literal_true(wbi):

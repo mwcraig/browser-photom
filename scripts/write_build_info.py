@@ -79,7 +79,8 @@ CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 # path, /report. `[0-9]` rather than `\d`, which in Python takes every
 # Unicode digit. Each of these built, and the kernel enabled reporting on
 # it, before the checks below: `https://?x` and `https://h:bad/report` (the
-# host class), `https://h:65536/report` (port range), `https://example.123/report`
+# host class), `https://h:65536/report` (port range), `https://h:25/report`
+# (parses, but the Fetch standard blocks the port), `https://example.123/report`
 # and `https://1.2.3.999/report` (a numeric last label is parsed as IPv4
 # and fails unless it is a dotted quad), `https://xn--a/report` (invalid
 # punycode; Python's idna codec refuses what the URL parser refuses on
@@ -93,6 +94,22 @@ _NUMERIC_LABEL_RE = re.compile(r"[0-9]+|0[xX][0-9a-fA-F]*")
 _OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
 _IPV4_RE = re.compile(rf"{_OCTET}(?:\.{_OCTET}){{3}}")
 
+# The Fetch standard's bad port list (https://fetch.spec.whatwg.org/#port-blocking),
+# Copilot's ninth pass: `new URL()` parses `https://h:25/report`, but every
+# fetch and sendBeacon to a port on this list is a network error before any
+# connection, keepalive retry included, so a build with one has reporting
+# that never sends. Port 0 is on the standard's list and blocked by Chromium
+# and Firefox, though node's fetch (undici) lets it through; the parity test
+# in tests/test_write_build_info.py allows for exactly that one.
+_BAD_PORTS = frozenset((
+    0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79,
+    87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137,
+    139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532,
+    540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723,
+    2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669,
+    6679, 6697, 10080,
+))
+
 
 def usable_endpoint(text):
     """True when ``text`` is an endpoint URL every send could reach."""
@@ -100,7 +117,7 @@ def usable_endpoint(text):
     if match is None or CONTROL_RE.search(text):
         return False
     host, port = match.group(1), match.group(2)
-    if port is not None and int(port) > 65535:
+    if port is not None and (int(port) > 65535 or int(port) in _BAD_PORTS):
         return False
     if host is not None:
         if _NUMERIC_LABEL_RE.fullmatch(host.rsplit(".", 1)[-1]) and not _IPV4_RE.fullmatch(host):

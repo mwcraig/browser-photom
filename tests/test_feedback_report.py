@@ -409,6 +409,9 @@ def test_chunk_json_is_strict():
     # Any path but the worker's /report is a 404 on every send.
     ("https://x.workers.dev", ""), ("https://x.workers.dev/report/", ""),
     ("https://h:65536/report", ""), ("https://example.123/report", ""),
+    # Parse, but the Fetch standard blocks the port before any connection.
+    ("https://h:25/report", ""), ("https://h:0/report", ""),
+    ("http://localhost:6000/report", ""),
 ])
 def test_endpoint_url(value, expected):
     assert endpoint_url(value) == expected

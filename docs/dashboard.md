@@ -877,8 +877,11 @@ that says how the run ended. On `pagehide`
 mid-run it sends the final chunk with `navigator.sendBeacon` and outcome
 `page_closed`, so a crashed kernel's rows still arrive when the tester
 reloads; a `pagehide` with `persisted` (the page entering the back/forward
-cache, from which it may return with the run still going) instead beacons
-the buffered rows as an ordinary chunk and keeps the report open. The
+cache, from which it may return with the run still going) instead sends
+the buffered rows as an ordinary keepalive POST, which outlives the page
+like a beacon but is counted against the reserve, so a page that comes
+back while it is still pending cannot start a keepalive POST beside it
+and leave the closing beacon no room; the report stays open. The
 sent/failed counts behind the status line are per run: a POST of the
 previous run settling late counts for nobody on the page, and each
 `report_status` carries its `report_id` so the kernel, which marks the new
@@ -921,7 +924,10 @@ reporting disabled: the box is greyed out with a note that reporting is not
 set up in this build. A value that is not an https URL without credentials
 (or http on localhost, for a `wrangler dev` worker) fails the build: the
 page is served over https, so any other http endpoint would be blocked as
-mixed content, and fetch and sendBeacon throw on a URL with userinfo.
+mixed content, and fetch and sendBeacon throw on a URL with userinfo. The
+host must be letters, digits, dots and hyphens with an optional numeric
+port, since `new URL()` throws on anything else (`https://?x`,
+`https://host:bad/report`) and every send would fail.
 The kernel reads it with `photom_dashboard.feedback_url()` (`""` without the
 module, as `software_versions` falls back to `unknown`) and the view hands
 it to the page as the drop zone's synced `feedback_url` trait. The Pages

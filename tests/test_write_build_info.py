@@ -39,6 +39,17 @@ def test_a_good_url_passes_both_checks(wbi):
     assert endpoint_url(GOOD) == GOOD
 
 
+@pytest.mark.parametrize("good", [
+    "https://x.workers.dev",
+    "https://x.workers.dev:8443/report",
+    "https://feedback.example-site.org/v1/report?x=1",
+    "http://127.0.0.1:8787/report",
+])
+def test_hosts_with_ports_and_bare_hosts_pass_both_checks(wbi, good):
+    assert wbi.feedback_url_from_env({wbi.FEEDBACK_URL_ENV: good}) == good
+    assert endpoint_url(good) == good
+
+
 @pytest.mark.parametrize("bad", [
     "http://browser-photom-feedback.mwcraig2.workers.dev/report",   # mixed content
     "https://user:pw@x.workers.dev/report",                          # userinfo
@@ -49,6 +60,14 @@ def test_a_good_url_passes_both_checks(wbi):
     "https://x.workers.dev/re\nport",
     "ftp://x.workers.dev/report",
     "x.workers.dev/report",
+    # Copilot (PR #16, 2026-10-18): hosts `new URL()` throws on, which the
+    # old `[^\s/@]+` host class let build.
+    "https://?x",
+    "https://[broken/report",
+    "https://x.workers.dev:invalid/report",
+    "https://x.workers.dev:/report",
+    "https://x.workers.dev:123456/report",
+    "https://x_y.workers.dev/report",
 ])
 def test_everything_the_kernel_would_refuse_fails_the_build(wbi, bad):
     with pytest.raises(ValueError):

@@ -515,8 +515,8 @@ export function reportBodies(header, rows, seq, final, outcome, hiddenMs, maxByt
  *   "report_error" when the kernel's own reporting broke mid-run).
  * - pageClosed(nowMs, persisted): the page is going away mid-run; send the
  *   final chunk by beacon with outcome "page_closed". With `persisted` (the
- *   page is entering the back/forward cache, not closing) beacon the
- *   buffered rows as a non-final chunk and stay open.
+ *   page is entering the back/forward cache, not closing) POST the
+ *   buffered rows as a non-final chunk, with keepalive, and stay open.
  * - hide(nowMs) / show(nowMs): tab visibility, for run.hidden_ms. hide()
  *   also POSTs the buffered rows: a hidden tab can be frozen or discarded
  *   by the browser without any pagehide, and rows still in the buffer
@@ -746,7 +746,7 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
     },
     pageClosed(nowMs, persisted) {
       // pagehide with `persisted` is the page going into the back/forward
-      // cache, from which it may come back with the run still going: beacon
+      // cache, from which it may come back with the run still going: send
       // what is buffered as an ordinary chunk and keep the report open. If
       // the page is evicted instead, the report simply has no final chunk,
       // which the pull script flags as "no-final".
@@ -755,8 +755,14 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
         // empty chunk, which would cost a seq, an object and a rate-limit
         // slot for every back/forward-cache entry.
         if (!active || rows.length === 0) return;
+        // A keepalive POST, like hide(), not a beacon: it outlives the page
+        // the same way, and it is counted in `inflight`, so if the page
+        // comes back while it is still pending the next POST sees it and
+        // leaves the closing beacon its reserve (a beacon is invisible to
+        // our accounting, and a pending one plus one keepalive POST would
+        // leave the final chunk no room).
         try {
-          flush(false, null, nowMs, true);
+          flush(false, null, nowMs, false);
         } catch (err) {
           // Swallowed: see the section comment.
         }

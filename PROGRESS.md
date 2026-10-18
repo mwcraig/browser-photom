@@ -1510,7 +1510,26 @@ code does not have (the ~7x is Chrome's, measured on real frames; the
 `SLOWDOWN_FACTOR` constants only feed the banner text). §9 now says that
 a surplus, like a shortfall, is checked only with the final last and no
 seq missing. Worst-case row measured at 3,107 bytes.
-Tests: 461 pytest, 94 node, 69 worker.
+
+Copilot's pass on 12a42a1 (17:25Z) found three real things, none of them
+seen by the nine rounds. (1) `--since 20261018` passed `date.fromisoformat`
+(which also takes compact and ISO-week forms) and was then compared as a
+string with the keys' `2026-10-18`, excluding every report; the value is
+now normalised to `YYYY-MM-DD` first. (2) The endpoint checks' host class
+`[^\s/@]+` let `https://?x`, `https://[broken/report` and
+`https://host:invalid/report` build, and the kernel enabled reporting on
+them, though `new URL()` throws on each and every send would have failed;
+both sides now require letters, digits, dots and hyphens with an optional
+numeric port, with the three cases (and ports, bare hosts) in the parity
+tests. (3) The persisted-pagehide flush went out as a beacon, which the
+reporter's own quota accounting cannot see: a page back from the
+back/forward cache while that beacon was still pending could start a
+keepalive POST beside it and leave the real `pagehide` beacon less than one
+body of quota, losing the final chunk. It now goes as a keepalive POST,
+like `hide()`'s flush, counted in `inflight`; a test holds the persisted
+POST pending, brings the page back, and shows the next POST yielding the
+reserve and the closing beacon going out.
+Tests: 476 pytest, 95 node, 69 worker.
 
 Done 2026-10-18: the `FEEDBACK_URL` repository variable is set, the worker
 is redeployed (again after e862930, though that commit changed nothing the

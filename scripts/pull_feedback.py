@@ -595,7 +595,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.since:
         try:
-            date.fromisoformat(args.since)
+            # Normalised: fromisoformat also takes 20261018 and 2026-W42-1,
+            # and the keys are compared as YYYY-MM-DD strings.
+            args.since = date.fromisoformat(args.since).isoformat()
         except ValueError:
             parser.error("--since must be a real YYYY-MM-DD date")
     if args.report_ids and not all(re.fullmatch(r"[0-9a-f]{32}", r) for r in args.report_ids):

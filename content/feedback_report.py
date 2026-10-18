@@ -191,8 +191,14 @@ def endpoint_url(value):
     # endpoint would be blocked as mixed content and every send would fail.
     # No userinfo: fetch and sendBeacon both throw on a URL with credentials.
     # scripts/write_build_info.py applies the same rule at build time.
+    # The host is letters, digits, dots and hyphens with an optional numeric
+    # port: `https://?x`, `https://[broken/report` and `https://h:bad/report`
+    # pass a looser check but `new URL()` throws on them, so every send
+    # would fail.
     if not re.fullmatch(
-        r"(https://[^\s/@]+|http://(localhost|127\.0\.0\.1)(:\d+)?)(/\S*)?", text
+        r"(https://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::\d{1,5})?"
+        r"|http://(?:localhost|127\.0\.0\.1)(?::\d{1,5})?)(?:/\S*)?",
+        text,
     ):
         return ""
     if _CONTROL_RE.search(text):

@@ -453,6 +453,18 @@ def test_since_must_be_a_real_date(pf, tmp_path):
     assert pf.main(["bucket", "--offline", "--out", str(tmp_path), "--since", "2026-02-28"]) == 0
 
 
+def test_since_is_normalised_before_it_meets_the_keys(pf, tmp_path, monkeypatch):
+    # Copilot (PR #16, 2026-10-18): fromisoformat takes 20260228 too, and the
+    # raw string compared against "2026-02-28" keys excluded every report.
+    seen = []
+    monkeypatch.setattr(pf, "merge_all", lambda raw, out, since=None, **kw: seen.append(since) or [])
+    assert pf.main(["bucket", "--offline", "--out", str(tmp_path), "--since", "20260228"]) == 0
+    assert seen == ["2026-02-28"]
+    k = key(0, "2026-02-28")
+    assert pf.keys_since([k], "2026-02-28") == [k]
+    assert pf.keys_since([k], "20260228") == []      # what the raw string did
+
+
 # -- fourth review round -------------------------------------------------------
 
 

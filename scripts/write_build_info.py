@@ -66,7 +66,14 @@ def git_sha(repo, *, short=7):
 # https anywhere, or plain http only on this machine (a `wrangler dev` worker
 # behind a local `build-dash` page). feedback_report.endpoint_url is the
 # kernel's copy of the same rule.
-LOCAL_OR_HTTPS_URL = r"(https://[^\s/@]+|http://(localhost|127\.0\.0\.1)(:\d+)?)(/\S*)?"
+# The same pattern as feedback_report.endpoint_url (kept in step by the
+# parity tests): a host of letters, digits, dots and hyphens with an optional
+# numeric port, so a value the browser's URL parser would throw on fails
+# the build instead of building a page whose every send fails.
+LOCAL_OR_HTTPS_URL = (
+    r"(https://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::\d{1,5})?"
+    r"|http://(?:localhost|127\.0\.0\.1)(?::\d{1,5})?)(?:/\S*)?"
+)
 
 
 def feedback_url_from_env(environ=None):

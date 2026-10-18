@@ -373,19 +373,25 @@ test('pagehide into the back/forward cache flushes the buffer and keeps the repo
   r.row(row(0), header(), 0);
   r.pageClosed(10, true);               // persisted: bfcache, not a close
   assert.equal(r.isActive(), true);
-  assert.equal(beaconFn.calls.length, 1);
-  assert.equal(beaconFn.calls[0].chunk.final, false);
-  assert.equal(beaconFn.calls[0].chunk.run.outcome, 'running');
-  assert.equal(beaconFn.calls[0].chunk.rows.length, 1);
+  await settle();
+  // A keepalive POST, not a beacon, so it is counted in the quota (below).
+  assert.equal(beaconFn.calls.length, 0);
+  assert.equal(fetchFn.calls.length, 1);
+  assert.equal(fetchFn.calls[0].init.keepalive, true);
+  assert.equal(fetchFn.calls[0].chunk.final, false);
+  assert.equal(fetchFn.calls[0].chunk.run.outcome, 'running');
+  assert.equal(fetchFn.calls[0].chunk.rows.length, 1);
   r.row(row(1), header(), 20);          // the page came back; the run goes on
   r.end('done', null, 30);
   await settle();
-  assert.equal(fetchFn.calls.length, 1);
-  assert.deepEqual(fetchFn.calls[0].chunk.rows.map((x) => x.file), ['f1.fit']);
-  assert.equal(fetchFn.calls[0].chunk.seq, 1);
-  assert.equal(fetchFn.calls[0].chunk.final, true);
+  assert.equal(fetchFn.calls.length, 2);
+  assert.deepEqual(fetchFn.calls[1].chunk.rows.map((x) => x.file), ['f1.fit']);
+  assert.equal(fetchFn.calls[1].chunk.seq, 1);
+  assert.equal(fetchFn.calls[1].chunk.final, true);
   r.pageClosed(40, true);               // nothing open: nothing sent
-  assert.equal(beaconFn.calls.length, 1);
+  await settle();
+  assert.equal(fetchFn.calls.length, 2);
+  assert.equal(beaconFn.calls.length, 0);
 });
 
 test('the buffer is flushed by bytes so a pagehide needs only one beacon', async () => {
@@ -472,6 +478,44 @@ test('a POST that would eat into the beacon reserve goes out without keepalive',
   r.pageClosed(10, false);
   await settle();
   assert.deepEqual(r.counts(), { sent: 4, failed: 0 });
+});
+
+test('a persisted pagehide flush still pending when the page comes back keeps the closing beacon its reserve', async () => {
+  // Copilot (PR #16, 2026-10-18): beaconed, the persisted flush was
+  // invisible to the quota accounting, so a POST after the page's return
+  // could go out with keepalive beside it and leave the real pagehide
+  // beacon less than one body of quota. Quota 1000, cap 400, bodies ~350
+  // (so one row per chunk): the pending persisted POST (keepalive) plus
+  // the next would be ~700 > 600, so the next goes without keepalive, and
+  // the final beacon fits.
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  const calls = [];
+  const fetchFn = (url, init) => {
+    calls.push(init);
+    return calls.length === 1 ? held.then(() => ({ ok: true })) : Promise.resolve({ ok: true });
+  };
+  const beaconFn = fakeBeacon();
+  const r = makeReporter({ fetchFn, beaconFn, rowsPerChunk: 1, maxBytes: 400, quotaBytes: 1000 });
+  r.start(URL, header(), 0, false);
+  // Buffer a row without flushing it: hidden, the first short flush waits
+  // for hiddenFlushRows, and rowsPerChunk is checked after the row is
+  // buffered, so hand the row over by the persisted pagehide itself.
+  r.hide(5);
+  r.row(row(0), null, 5);
+  r.pageClosed(10, true);                // into the bfcache: keepalive POST, pending
+  await settle();
+  assert.deepEqual(calls.map((c) => c.keepalive), [true]);
+  r.show(20);
+  r.row(row(1), null, 20);               // back; a flush beside the pending one
+  await settle();
+  assert.deepEqual(calls.map((c) => c.keepalive), [true, false]);
+  r.pageClosed(30, false);               // a real close: the beacon has its reserve
+  assert.equal(beaconFn.calls.length, 1);
+  assert.equal(beaconFn.calls[0].chunk.run.outcome, 'page_closed');
+  release();
+  await settle();
+  assert.deepEqual(r.counts(), { sent: 3, failed: 0 });
 });
 
 test('a POST of the previous run settling late does not count in the new run', async () => {
@@ -647,17 +691,22 @@ test('a persisted pagehide with nothing buffered sends nothing', async () => {
   assert.equal(fetchFn.calls.length, 1);
   r.pageClosed(20, true);      // bfcache entry with an empty buffer: no empty chunk
   r.pageClosed(30, true);
+  await settle();
+  assert.equal(fetchFn.calls.length, 1);
   assert.equal(beaconFn.calls.length, 0);
   r.show(40);
   r.row(row(3), null, 50);
-  r.pageClosed(60, true);      // a row buffered: beaconed as a non-final chunk
-  assert.equal(beaconFn.calls.length, 1);
-  assert.equal(beaconFn.calls[0].chunk.seq, 1);
-  assert.equal(beaconFn.calls[0].chunk.final, false);
+  r.pageClosed(60, true);      // a row buffered: a keepalive POST of a non-final chunk
+  await settle();
+  assert.equal(fetchFn.calls.length, 2);
+  assert.equal(fetchFn.calls[1].init.keepalive, true);
+  assert.equal(fetchFn.calls[1].chunk.seq, 1);
+  assert.equal(fetchFn.calls[1].chunk.final, false);
+  assert.equal(beaconFn.calls.length, 0);
   r.pageClosed(70, false);     // the real close: the final chunk goes even when empty
-  assert.equal(beaconFn.calls.length, 2);
-  assert.equal(beaconFn.calls[1].chunk.seq, 2);
-  assert.equal(beaconFn.calls[1].chunk.final, true);
-  assert.equal(beaconFn.calls[1].chunk.run.outcome, 'page_closed');
+  assert.equal(beaconFn.calls.length, 1);
+  assert.equal(beaconFn.calls[0].chunk.seq, 2);
+  assert.equal(beaconFn.calls[0].chunk.final, true);
+  assert.equal(beaconFn.calls[0].chunk.run.outcome, 'page_closed');
   assert.equal(r.isActive(), false);
 });

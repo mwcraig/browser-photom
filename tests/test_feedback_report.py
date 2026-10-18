@@ -402,6 +402,10 @@ def test_chunk_json_is_strict():
     ("http://bp.example.workers.dev/report", ""),
     ("https://user:pw@bp.example.workers.dev/report", ""),
     ("http://127.0.0.1:8787/report", "http://127.0.0.1:8787/report"),
+    # Hosts the browser's URL parser throws on (Copilot, PR #16).
+    ("https://?x", ""), ("https://[broken/report", ""),
+    ("https://x.workers.dev:invalid/report", ""),
+    ("https://x.workers.dev:8443/report", "https://x.workers.dev:8443/report"),
 ])
 def test_endpoint_url(value, expected):
     assert endpoint_url(value) == expected

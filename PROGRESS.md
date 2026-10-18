@@ -1246,3 +1246,343 @@ max `tot_count` 4.8e-7 relative -- the SgemmBallet-versus-numpy round-off
 of issue #8, nothing from the refactor. Docs, README, `pixi.toml` and the
 watch notebook's comments updated. Still owed: a browser run at the new
 pin (the smoke run exercised the processor natively, not under Pyodide).
+
+# Opt-in tester reports (2026-10-16)
+
+Testers recruited at the November talk can opt in to sending diagnostic
+reports from their dashboard runs. Design: `docs/dashboard.md` §11;
+standing up the backend: `docs/feedback-deploy.md`.
+
+- Contract: `feedback/report.schema.json`. It is strict on purpose: no blob
+  fields, short printable strings only, no URLs in free text, and a 64 KB
+  body cap. The dashboard tests build chunks against it, and the worker
+  imports the same file.
+- Kernel (`content/feedback_report.py`, `dashboard_view.py`): an opt-in
+  checkbox (off by default) with consent text naming the observer code and
+  the 1-degree position. A comment box: a comment with a link is blanked
+  with a warning, and the rows are still sent. "Preview report" shows the
+  exact JSON. Rows are bandaid's own QA record via `on_qa`, cleaned (NaN/inf
+  to null, whitelist, caps). The site position comes from the resolved
+  frame metadata, falling back to the form.
+- Page (`dropzone.js`): owns the buffer and does all the sending. A
+  keepalive POST goes every 25 rows, a final chunk at done or cancel, and a
+  `sendBeacon` on `pagehide` mid-run. A crashed kernel still reports.
+  Reporting failures never touch the run.
+- `feedback-worker/`: a Cloudflare Worker. It validates with
+  `@cfworker/json-schema`, rate-limits each IP to 60/min, accepts only the
+  Pages origin, and stores `{received_at, country, report}` in R2. The IP
+  is never stored. A 30-day lifecycle rule handles expiry.
+- `scripts/pull_feedback.py`: local review. It mirrors R2, merges each
+  report's chunks into JSON + CSV, and re-validates. It never posts
+  anything.
+- The endpoint is a build-time setting: `BROWSER_PHOTOM_FEEDBACK_URL`, set
+  from the `FEEDBACK_URL` repository variable in `pages.yml`. Empty means
+  reporting is off.
+
+Checks: 336 pytest, 84 node, 56 worker (vitest). Python- and JS-built
+chunks from hostile input all validated with the worker's own validator,
+including size-split bodies. The worker is deployed at
+`browser-photom-feedback.mwcraig2.workers.dev`. The curl smoke tests gave
+204 / 400 for a link / 403 for a foreign origin / 405 for GET. Browser end
+to end: a local `build-dash` run of the 155-frame LS Psc set landed 7
+chunks (6 x 25 rows plus a final 5, outcome `done`), all schema-valid,
+with 155 `ok` rows and no gaps.
+
+Review fixes on PR #16 (Copilot plus a `/code-review` pass): the CSV export
+neutralises formula-leading cells; the pull script survives a flagged chunk
+whose `rows` or `run` has the wrong type, does not call unknown-then-known
+header fields a conflict, and `--since` selects whole reports (a run that
+crossed UTC midnight is no longer cut in two); the schema's no-links
+patterns are case-insensitive like the Python cleaners; the view resets the
+QA schema version and the once-per-run failure log at each run, repaints an
+open preview when a run finishes, closes the page's report (as `cancelled`)
+when its own reporting fails mid-run, and the preview's `final` matches the
+page at exactly 25 frames; the page restarts its sent/failed counts per run
+and treats a `pagehide` with `persisted` (back/forward cache) as a flush,
+not a close; the rate limit is 60/min (a setup-failed run drains in
+seconds). Consent and docs now say the server adds the inferred country,
+that the 30 days is server-side with downloaded copies kept for the testing
+period, and that the free-text fields are bounded but not markup-free.
+
+Second Copilot round (4 findings, all taken): the header-conflict check no
+longer does a set lookup on a value a flagged chunk could make unhashable;
+the status line is cleared before `_report_start` decides whether to report
+(an unreported run no longer inherits "3 reports sent"); `_report_id` is
+cleared only after `report_end` is sent, so a raising send still gets the
+guard's fallback close; and the page flushes by bytes while buffering, so a
+pagehide flush is always a single beacon (beacons and keepalive fetches
+share one 64 KB in-flight budget, and a second queued body would be lost).
+
+Third round, five independent adversarial reviews (kernel, page, worker
+security, pull script/contract, mechanical sweep): the schema's text fields
+now refuse unpaired surrogates and zero-width/bidi format characters (a lone
+surrogate passed the worker's `u`-flag regexes, was stored escaped, and made
+the pull script's CSV write raise -- one such object, under a report_id that
+sorts first, blocked every later pull); `user_agent` is gone from the schema
+(nothing filled it, and it was the one string without a link rule); the
+kernel's pattern guards use `fullmatch` (Python's `$` matches before a
+trailing newline, JavaScript's does not, so a `match` guard passed values
+the worker refused), and a new cross-validation test runs real producer
+output through the worker's validator under node; the guard closes the
+page's report as `report_error`, not `cancelled`; a late `report_status`
+during an unreported run is ignored; the preview after an unreported run
+says nothing was sent; the page's byte-aware flush is sized for the beacon
+it protects (final, `page_closed`, 10-digit `hidden_ms`), bodies past the
+`seq` ceiling count as failed, `hidden_ms` is clamped, and model disposal
+closes an open report; the build requires an https endpoint (or localhost
+http); the pull script writes CSV as UTF-8 with escapes, isolates each
+report's merge, mirrors files atomically, survives a failing get, ranks an
+unreadable duplicate last, flags `final-not-last`, and validates `--since`
+as a date; `[observability] enabled = false` is explicit. Documented, not
+changed: the free-text budget (~25-35 KB of arbitrary characters per chunk)
+and the per-IP limit's limits (one address can use most of the free daily
+request cap). Tests: 336 pytest, 84 node, 56 worker (vitest).
+
+Fourth round (three more fresh reviewers -- a single-value end-to-end trace,
+the worker and deploy path, the run lifecycle and consent -- plus Copilot's
+third pass). Page: each body is capped at 32,000 bytes (half the 64 KiB
+keepalive budget) and a POST that would leave less than one body's worth of
+that budget goes out without keepalive, so a POST in flight at `pagehide`
+can no longer starve the beacon (Copilot's point; the earlier "no fix
+page-side" answer was wrong); hiding the tab POSTs the buffered rows (a
+background tab can be frozen or discarded with no `pagehide`); the
+sent/failed counts are per run, so a late settle of the previous run counts
+for nobody; the byte-aware check sizes for the longest outcome. Kernel: the
+obscode and form site are snapshotted at the reported run's start and the
+preview of a finished run shows the header the final chunk carried; the
+front end's error-path cancels carry a `reason` and the report ends as
+`failed` (new enum value) rather than reading as the tester pressing Stop;
+the pre-run preview explains a null site; the consent text now names the
+run counters/outcome/hidden time/build and the server timestamp, and says
+a skip reason can quote the header value that caused it (bandaid's
+`FrameMetadataError` messages carry `obs_time`/`ra`/`dec` with `!r`).
+Worker: the rate limit keys an IPv6 client by its /64 (a host with a /64
+could otherwise rotate past the limit); limiter and R2 failures are caught
+and answered 503 with CORS headers; the head-then-put race is described
+honestly (not atomic; only a client's own report is affected). Pull script:
+the whole bucket is listed and `--since` selects whole reports by id (the
+day-before lookback is gone; a run spanning three UTC days is not a real
+case, the selection just no longer depends on a window); the header comes
+from the last *readable* chunk; objects older than 31 days produce a
+lifecycle WARNING. Build: `write_build_info` refuses control characters
+and, under `GITHUB_ACTIONS`, anything but https. Tests: 355 pytest
+(incl. new `tests/test_write_build_info.py`), 89 node, 61 worker (vitest).
+Not changed: the preview cannot show the counters as they stood when the
+first chunk really went out (documented).
+
+Fifth round (three fresh reviewers: content injection into reports and
+its sinks, regressions from the fourth round, worker/operator abuse).
+Page: a keepalive POST the browser refused and that was retried released
+its in-flight bytes twice, wiping out another POST's share and letting a
+later one past the beacon reserve -- released once now; while the tab is
+hidden the buffer is flushed every 5 rows, not 25 (hide() alone only
+covered the rows buffered at the moment the tab went dark). Kernel: the
+preview masks `report_id` (it is what lets anyone post chunks under a run's
+report, and previews get screenshotted); a run that died before any frame
+is captioned as such and a guard-closed report previews as `report_error`,
+not `done`; there is no Stop button, so comments, docs and consent no
+longer describe one (`cancelled` = the page closed the report itself).
+Schema: the refused-character class gains C1 controls (U+009B is CSI to a
+UTF-8 terminal), soft hyphen, Arabic letter mark, U+180E, U+FFF9-FFFB,
+U+FFFE/FFFF and the tag block, written as literal code points because
+`\udb40\udc00` means two lone surrogates to Python and one code point to
+JavaScript; `elapsed_s` has a lower bound of 0. Worker: a body stream that
+fails mid-read is a 400 with CORS, not the runtime's 500; `preview_urls =
+false`; the report_id comment is honest (random, not secret). Pull
+script: CSV cells and column names escape non-printable characters;
+duplicate copies of one seq with different bodies are flagged
+`DUP-DIFFERS`; the missing-seq list is capped; the header is taken from
+the last chunk that has one; the stale-object date is UTC;
+`--max-objects` (default 20,000) refuses a flood and `--report-id` pulls
+known runs out of one. Docs: the Workers Free daily cap is account-wide
+and counts refused requests (Matt's call: lockout with a bounded bill on
+Free, or no lockout and an open bill on Paid; set an R2 billing alert
+either way); real cost of one key at the limit; a reversible pause and a
+purge that works at flood scale; obscode is a claim; free text is
+untrusted input to an LLM; `wrangler logout`; deploy order. Tests: 372
+pytest, 91 node, 69 worker.
+
+Copilot's 2026-10-18 pass (on 6c56a6d) had two items: the double release,
+already fixed in cdebf91, and a real ordering gap in the status line. The
+kernel marks the new run and clears the line before the page has processed
+its `report_start`, so a POST of the previous run settling in that gap
+wrote stale counts into the new run's line. Every `report_status` now
+carries the `report_id` its counts belong to and the kernel shows only the
+current run's. The same message carries `last_http`, the HTTP status of
+the last refused POST (null when the last failure got no answer), and the
+status line, Matt's ask, now tells a tester whose reports are being
+refused what happened and that the photometry is fine: "Diagnostic
+reports: none delivered so far, the report server refused them (HTTP
+503). Your photometry is unaffected; thank you for trying to send
+feedback." in amber; a mixed run reads "2 reports sent; 1 report could not
+be delivered, …". Tests: 374 pytest, 92 node, 69 worker.
+
+Sixth round (three fresh reviewers on the streaming mechanics only: the
+page-side reporter, the worker and merge, the kernel-side producer).
+Nothing high. Fixed: while hidden, the 5-row flushes are now at least 2 s
+apart (`REPORT_HIDDEN_FLUSH_MIN_MS`), because a run whose frames all fail
+at once in a hidden tab sent ~70 POSTs in under a minute and the worker's
+60-a-minute limit would have dropped the rest for good, which was exactly
+the run a report is most wanted from (30 short chunks a minute at most now,
+and the 25-row cap above that; no worker change); a `pagehide` with
+`persisted` and nothing buffered no longer beacons an empty chunk per
+back/forward-cache entry; the merge gains cross-chunk consistency checks
+(`INCONSISTENT final-not-terminal / terminal-before-final /
+counts-decrease / rows!=counts`), which is the only thing that can catch a
+chunk swapped in under a known report_id on the *same* UTC day (the
+worker's head-then-put keeps the first copy of a key and answers 204 to
+the second, so `DUP-DIFFERS` only ever fires across midnight; comment and
+docs corrected); the dashboard calls the end hook before `_push_runs` in
+both `_finish_if_done` and `_on_cancel`, so a raise in the glob cannot
+leave a report open with no `report_end`; the view's run-scoped report
+reset runs before the processor reset; rows after a guard-closed report
+stay out of the preview (its caption now says reporting stopped); the
+`fits()` test now sits the cap between the plain and the beacon size of
+two rows so it fails if the worst-case sizing is lost; the earliest-copy
+rule is pinned with the later copy listed first; the once-per-run log
+latch is exercised with a row that fails every frame; and an end-to-end
+test chunks a real run's rows as the page does and merges them clean.
+Documented, not changed: a Cloudflare-generated refusal (Free-plan lockout,
+error 1101) has no CORS headers, so the page sees a rejected fetch, retries
+once and reports "could not be reached" rather than the status; the
+keepalive budget is tracked per drop-zone model, not per page (two
+reporting models on one page is not a supported case); a manifest accepted
+mid-run (only a twice-rendered widget racing the hide) gives a second
+`report_start`, which the page resolves by closing the first report as
+`cancelled`; `no-final` has several causes besides a dead tab, now listed.
+Copilot's pass on 6924242 (16:14Z) found the same hidden-tab rate problem
+(already fixed above) and one real miss: `write_build_info.py`'s control
+class stayed at C0+DEL when the kernel's grew to C1 in the fifth round, so
+a URL with U+009B built fine and was silently disabled by the kernel.
+Aligned, with a parity test over the whole class on both sides.
+
+Seventh round (two fresh reviewers on the diff since 6924242 only). One
+likely bug in the pull script: a kept chunk whose body could not be read (a
+truncated mirror file whose key still parses, or a flagged chunk with
+something other than a list under `rows`) counted as zero rows, so an
+otherwise complete report was flagged `INCONSISTENT rows!=counts`, which
+§9 says to read as a substitution. `rows!=counts` is now checked only when
+every kept chunk's rows were readable; the unreadable chunk already has its
+own `INVALID` flag. Three comments overclaimed and were reworded: the
+hidden-flush spacing bounds the 5-row chunks to 30 a minute but the 25-row
+cap is not spaced, so only a burst above 25 rows a second (a manifest of
+unreadable files failing in one go) could still exceed 60 POSTs a minute;
+the worker's "a same-day second body is never stored" ignored the
+head-then-put window it describes four lines earlier, where the last put
+lands; and the guard-closed preview keeps the rows as sent but builds its
+header live, so its counts keep following the run while the page's final
+chunk carries the last header it was sent. Tests: the `chunk()` fixture's
+default run only matches one row per chunk and the "honest" case in the
+final-not-last test was not honest (passed because it asserted another
+flag), fixed; each of the four consistency flags is now exercised alone;
+unreadable and non-list rows are shown not to trip `rows!=counts`; eight
+malformed `run` headers (string, int, null, list, bool/str/float counts, empty)
+are shown to flag or skip without raising. Not changed: a single row over
+the body cap is dropped and its empty chunk still consumes a seq, which
+would read as `rows!=counts`; the schema bounds every row field, so no
+real row reaches the cap.
+
+Eighth round (two fresh reviewers on the round-7 diff). No code bug. One
+over-suppression: an unreadable chunk can only lose rows, so it explains a
+shortfall but not a surplus, and `rows!=counts` now still fires when the
+rows exceed the final counts whatever the chunks' state. The test
+fixture's default header was still only consistent for one row in every
+chunk, so `chunk(N, [], final=True)` was inconsistent and the "quiet
+byte-identical retry" case was in fact `INCONSISTENT`; the default now
+counts one row per earlier chunk plus this one's, and the quiet case
+asserts no inconsistencies. The malformed-header test pins the exact flags
+per case (a final with no terminal outcome is `final-not-terminal`, as it
+should be) and that each is `INVALID`. Wording: the burst that could pass
+60 POSTs a minute needs a run doing no work per frame in a visible tab,
+since every row's file is uploaded first and the page filters 0-byte files
+(the kernel's manifest-time rows are for other front ends); a hidden
+350-frame run takes over an hour at background rates, not 20 minutes;
+the worst-case row is ~3 KB, not ~2 KB; §9 says what a surplus does.
+
+Ninth round (two fresh reviewers on the round-8 diff). No code bug; a
+plugin that logged every `merge_report` call's flags across the suite
+found none that a test does not assert. Added: an honest report with
+several rows per chunk and an empty final merges clean. Wording: the
+burst that could pass 60 POSTs a minute is over 1,500 rows in one minute
+(61 full chunks), so a 350-frame run cannot reach it hidden or visible;
+the earlier "hidden throttling keeps it under" claimed a mechanism the
+code does not have (the ~7x is Chrome's, measured on real frames; the
+`SLOWDOWN_FACTOR` constants only feed the banner text). §9 now says that
+a surplus, like a shortfall, is checked only with the final last and no
+seq missing. Worst-case row measured at 3,107 bytes.
+
+Copilot's pass on 12a42a1 (17:25Z) found three real things, none of them
+seen by the nine rounds. (1) `--since 20261018` passed `date.fromisoformat`
+(which also takes compact and ISO-week forms) and was then compared as a
+string with the keys' `2026-10-18`, excluding every report; the value is
+now normalised to `YYYY-MM-DD` first. (2) The endpoint checks' host class
+`[^\s/@]+` let `https://?x`, `https://[broken/report` and
+`https://host:invalid/report` build, and the kernel enabled reporting on
+them, though `new URL()` throws on each and every send would have failed;
+both sides now require letters, digits, dots and hyphens with an optional
+numeric port, with the three cases (and ports, bare hosts) in the parity
+tests. (3) The persisted-pagehide flush went out as a beacon, which the
+reporter's own quota accounting cannot see: a page back from the
+back/forward cache while that beacon was still pending could start a
+keepalive POST beside it and leave the real `pagehide` beacon less than one
+body of quota, losing the final chunk. It now goes as a keepalive POST,
+like `hide()`'s flush, counted in `inflight`; a test holds the persisted
+POST pending, brings the page back, and shows the next POST yielding the
+reserve and the closing beacon going out.
+
+Tenth round, whole PR with two narrow lenses after Copilot's finds all
+turned out to be "a validator accepts more than its consumer" (none of
+them in a recent diff). Lens one, validator versus consumer, found six
+more. The endpoint check, tightened an hour earlier, still let through
+ports above 65535, Unicode digits in the port (Python's `\d`), hosts whose
+last label is numeric or hex (parsed as IPv4 and refused unless a dotted
+quad), invalid punycode, and any path at all, though the worker answers
+404 to everything but `/report`; both sides now share one
+`usable_endpoint` rule, and a test runs the accepted and refused lists
+through node's own URL parser. `site_lat`/`site_lon` were re-read from
+every frame's meta, so a position straddling a whole degree flagged an
+honest report `conflict site_lat`; the first position found is now held
+for the run. `--max-objects -1` read as a flood with nothing selected;
+`GITHUB_ACTIONS=false` counted as an Actions build. Test gaps closed: the
+page's constants are pinned to the schema file rather than restated, the
+Python and JS chunk sizes are compared, and a worker test posts bodies
+built by `dropzone.js`'s own `buildReportChunk`/`reportBodies` (a split
+run and its final) instead of hand-written ones. Lens two, browser
+lifecycle, found no bugs: `pagehide`/`persisted`, hide-before-pagehide,
+keepalive rejection shape, beacon byte counting, comm ordering and the
+no-timer design all hold. Taken as hardening: a Chrome `freeze` listener
+runs the hide flush (a frozen tab can be discarded with no event, and up
+to 24 rows can sit inside the 2 s gate), and `pageshow` with the page
+visible resets the hidden clock. Documented: keepalive outliving the page
+needs Firefox 133+; a `persisted` pagehide is not a promise the page is
+kept; mobile tab closes fire no `pagehide` and end `no-final`.
+Tests: 504 pytest, 96 node, 70 worker.
+
+Copilot's ninth pass (on 69317f7) found one more of the same shape: the
+endpoint rule took any port in 0-65535, but the Fetch standard blocks a
+list of ports (0, 25, 6000, 10080 and some eighty others) that `new URL()`
+parses and every fetch and sendBeacon then refuses before any connection,
+keepalive retry included, so a build with one would have shipped with
+reporting that never sends. Both copies of `usable_endpoint` now refuse
+the standard's list; port 0 moved from the accepted to the refused test
+cases. A test pins the list to node's fetch, which reports `bad port` as
+the cause for every entry but 0 (undici omits 0; Chromium and Firefox
+block it), and tries the neighbours (24, 26, 443, 5999, 6001, ...) on the
+loopback address to show they fail some other way.
+Tests: 515 pytest, 96 node, 70 worker.
+
+Done 2026-10-18: the `FEEDBACK_URL` repository variable is set, the worker
+is redeployed (again after e862930, though that commit changed nothing the
+worker runs), the account stays on Workers Free for now, the R2 billing
+notification was set up when the bucket was created, and `wrangler r2
+bucket lifecycle list` shows `expire-30d` (enabled, prefix `reports/`,
+expire after 30 days) next to the default 7-day multipart abort rule, so
+the 30-day deletion promise in the consent text is backed.
+
+Still owed on the backend: nothing. The worker, bucket, lifecycle rule,
+billing notification and repository variable are all in place; merging
+the PR is what turns reporting on for testers.
+Untested: the `pagehide` beacon path in a real browser. Wrangler bumped to
+4.151.1 on 2026-10-18 (the two-week wait was caution, not a requirement);
+the audit's remaining lines are the vitest pool's nested wrangler and
+miniflare, which only a new pool release clears.

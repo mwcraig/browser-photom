@@ -20,3 +20,7 @@ content/build_info.py
 
 # python bytecode
 __pycache__/
+
+# scripts/pull_feedback.py output: tester reports with observer codes;
+# reviewed locally, never committed
+feedback-reports/

@@ -1,0 +1,20 @@
+{
+  "name": "browser-photom-feedback-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker that accepts opt-in tester report chunks from the browser-photom dashboard, validates them against ../feedback/report.schema.json and stages them in R2.",
+  "scripts": {
+    "test": "vitest run",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@cfworker/json-schema": "4.1.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "vitest": "4.1.11",
+    "wrangler": "4.151.1"
+  }
+}

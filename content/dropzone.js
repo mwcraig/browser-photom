@@ -393,6 +393,495 @@ export function makeTabWatch() {
   };
 }
 
+// ---------------------------------------------------------------------
+// Opt-in tester reports (docs/dashboard.md §11, docs/feedback-deploy.md)
+//
+// The kernel builds the rows and the header (content/feedback_report.py)
+// and pushes them here as report_start / report_row / report_end, each
+// carrying the whole current header. This side owns the buffer and does
+// all the sending, because only the page can: the kernel is a web worker
+// (no sendBeacon), and a report has to outlive a crashed kernel or a
+// closed tab, which the kernel cannot see. Rows go out every
+// REPORT_ROWS_PER_CHUNK as a fetch(keepalive); the run's end sends a
+// `final` chunk; `pagehide` mid-run sends one with sendBeacon and outcome
+// "page_closed". Every failure is swallowed and counted: reporting must
+// never break or slow a run. DOM-free, with fetch/sendBeacon injected, so
+// node can test it.
+// ---------------------------------------------------------------------
+
+// Rows per POST. feedback_report.ROWS_PER_CHUNK is the Python copy (the
+// preview uses it); the schema allows 50.
+export const REPORT_ROWS_PER_CHUNK = 25;
+
+// Rows per POST while the tab is hidden, where the browser may freeze or
+// discard the page with no pagehide and take the buffer with it (subject to
+// the spacing below).
+export const REPORT_HIDDEN_FLUSH_ROWS = 5;
+
+// Minimum spacing between those short hidden-tab flushes. Frames that fail
+// at once (a pipeline setup that did not work, a folder bandaid cannot
+// read) arrive several a second, and 5-row chunks at that rate would pass
+// the worker's 60-a-minute limit inside a minute and lose rows to 429s.
+// Spaced like this a hidden run sends at most 30 short chunks a minute.
+// The 25-row cap still applies on top and is not spaced, so a run that
+// produces rows faster than 25 a second for a whole minute can still
+// exceed 60 POSTs a minute and lose the overflow to 429s. That is over
+// 1,500 rows in the minute, each with its file uploaded first (the page
+// filters 0-byte files before the manifest goes out): a folder of over
+// 1,500 files that cost almost nothing each (tiny unreadable files, or
+// small ones after the setup-failure latch). A 350-frame run is at most
+// 14 full chunks and cannot get there, hidden or not.
+export const REPORT_HIDDEN_FLUSH_MIN_MS = 2000;
+
+// The browser's budget for keepalive requests: per the Fetch and Beacon
+// specs, fetch(keepalive) bodies and sendBeacon payloads in flight at once
+// share 64 KiB per page, and one that would go over is refused (fetch
+// rejects, sendBeacon returns false). An engine that counts beacons on
+// their own only makes the reserve below more generous than it need be.
+export const KEEPALIVE_QUOTA_BYTES = 64 * 1024;
+
+// Per-body byte cap: half the quota, less a margin, so that one keepalive
+// POST still in flight when the tab closes leaves room for the pagehide
+// beacon. `post` also stops using keepalive once the in-flight bytes plus
+// a body would eat into that reserve (see there). A body over the cap is
+// split by rows. The worker accepts up to the full 64 KiB.
+export const REPORT_MAX_BYTES = 32_000;
+
+// The schema's seq maximum. A run long enough to reach it (~25,000 frames)
+// stops reporting rather than sending chunks the worker rejects; each body
+// that would have gone out is counted as failed, so the status line and
+// the pull script's "no-final" flag both tell the truth about it.
+export const REPORT_MAX_SEQ = 999;
+// The schema's run.hidden_ms maximum (~11.6 days). Wall-clock time, so a
+// laptop asleep for a fortnight, or a clock jump, must not make every later
+// chunk invalid.
+export const REPORT_MAX_HIDDEN_MS = 1_000_000_000;
+
+/**
+ * One POST body, assembled exactly as feedback_report.build_chunk does it:
+ * the header the kernel sent, then seq/final/rows, with run.outcome and
+ * run.hidden_ms overridden when given. The Python tests validate that
+ * shape against the schema; the JS tests pin that this matches it.
+ */
+export function buildReportChunk(header, rows, seq, final, outcome, hiddenMs) {
+  const run = { ...header.run };
+  if (outcome != null) run.outcome = outcome;
+  if (hiddenMs != null) run.hidden_ms = hiddenMs;
+  return { ...header, run, seq, final: Boolean(final), rows: [...rows] };
+}
+
+function byteLength(text) {
+  return new TextEncoder().encode(text).length;
+}
+
+/**
+ * Serialised bodies for `rows`, starting at sequence number `seq`, each at
+ * most `maxBytes`. Normally one body; a body over the cap is split in half
+ * by rows (recursively), every part but the last non-final. A single row
+ * that alone is over the cap is dropped (the schema's limits make one
+ * impossible in practice). Returns [{ seq, body }].
+ */
+export function reportBodies(header, rows, seq, final, outcome, hiddenMs, maxBytes = REPORT_MAX_BYTES) {
+  const out = [];
+  function emit(part, isFinal) {
+    const body = JSON.stringify(
+      buildReportChunk(header, part, seq + out.length, isFinal, isFinal ? outcome : null, hiddenMs)
+    );
+    if (byteLength(body) <= maxBytes) {
+      out.push({ seq: seq + out.length, body });
+      return;
+    }
+    if (part.length > 1) {
+      const mid = Math.ceil(part.length / 2);
+      emit(part.slice(0, mid), false);
+      emit(part.slice(mid), isFinal);
+      return;
+    }
+    if (part.length === 1) {
+      emit([], isFinal);
+    }
+    // An empty chunk over the cap: nothing smaller to send.
+  }
+  emit(rows, final);
+  return out;
+}
+
+/**
+ * Run-scoped report buffer and sender.
+ *
+ * - start(url, header, nowMs, hiddenNow): the kernel accepted a run it is
+ *   reporting. A previous report still open is finished as "cancelled".
+ * - row(row, header): buffer one row; send a chunk every rowsPerChunk
+ *   (every hiddenFlushRows while the tab is hidden).
+ * - end(outcome, header): send the final chunk ("done"/"cancelled", or
+ *   "report_error" when the kernel's own reporting broke mid-run).
+ * - pageClosed(nowMs, persisted): the page is going away mid-run; send the
+ *   final chunk by beacon with outcome "page_closed". With `persisted` (the
+ *   page is entering the back/forward cache, not closing) POST the
+ *   buffered rows as a non-final chunk, with keepalive, and stay open.
+ * - hide(nowMs) / show(nowMs): tab visibility, for run.hidden_ms. hide()
+ *   also POSTs the buffered rows: a hidden tab can be frozen or discarded
+ *   by the browser without any pagehide, and rows still in the buffer
+ *   then would be gone.
+ * - counts(): { sent, failed } POSTs of the current run so far.
+ *
+ * `fetchFn(url, init)` and `beaconFn(url, body)` are injected; `onStatus`
+ * gets `{ sent, failed, report_id, last_http }` after every settled POST:
+ * the counts, the id of the report they belong to (the kernel matches it
+ * against the run it is reporting, since a POST of the previous run can
+ * settle after the next has started), and the HTTP status of the most
+ * recent failed POST the server answered (null when the last failure got
+ * no answer at all), so the status line can say whether the server is
+ * refusing reports or cannot be reached. Nothing here throws.
+ */
+export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPORT_ROWS_PER_CHUNK, hiddenFlushRows = REPORT_HIDDEN_FLUSH_ROWS, hiddenFlushMinMs = REPORT_HIDDEN_FLUSH_MIN_MS, maxBytes = REPORT_MAX_BYTES, quotaBytes = KEEPALIVE_QUOTA_BYTES } = {}) {
+  let url = '';
+  let header = null;
+  let active = false;
+  let rows = [];
+  let seq = 0;
+  let hiddenTotal = 0;
+  let hiddenAt = null;
+  let lastFlushMs = -Infinity;
+  let sent = 0;
+  let failed = 0;
+  // Which run the counts belong to: a POST settles whenever the network
+  // lets it, and one from the previous run must not land in this run's
+  // "N reports sent" line. The report_id goes out with every status so the
+  // kernel can tell as well: it marks the new run before this side has
+  // seen the report_start, and a count landing in that gap is the old
+  // run's.
+  let run = 0;
+  let reportId = null;
+  let lastHttp = null;
+  // Bytes of keepalive bodies this reporter has in flight, by its own
+  // accounting (settled when the response arrives, which for a 204 is when
+  // the browser lets the quota go too).
+  let inflight = 0;
+
+  function status() {
+    try {
+      if (onStatus) onStatus({ sent, failed, report_id: reportId, last_http: lastHttp });
+    } catch (err) {
+      // A status line is not worth an exception.
+    }
+  }
+
+  function hiddenMs(nowMs) {
+    const open = hiddenAt === null ? 0 : Math.max(0, nowMs - hiddenAt);
+    const total = Math.min(REPORT_MAX_HIDDEN_MS, Math.round(hiddenTotal + open));
+    return total > 0 ? total : null;
+  }
+
+  // `http` is the status of a refused POST (the server answered), or null
+  // when there was no answer: a rejected fetch, a refused beacon, the seq
+  // ceiling.
+  function settle(ok, ofRun = run, http = null) {
+    if (ofRun !== run) return;
+    if (ok) {
+      sent += 1;
+    } else {
+      failed += 1;
+      lastHttp = http;
+    }
+    status();
+  }
+
+  function httpStatus(resp) {
+    const code = resp && resp.status;
+    return Number.isInteger(code) && code > 0 ? code : null;
+  }
+
+  function post(body) {
+    const ofRun = run;
+    const bytes = byteLength(body);
+    // Reserve one body's worth of the keepalive quota for the pagehide
+    // beacon: when this POST would leave less than that, send it without
+    // keepalive instead. Such a POST dies with the page, but so would the
+    // beacon the alternative starves, and the final chunk is the one that
+    // says how the run ended.
+    const keepalive = inflight + bytes <= quotaBytes - maxBytes;
+    const init = { method: 'POST', body, keepalive, credentials: 'omit' };
+    const attempt = (opts) => Promise.resolve().then(() => fetchFn(url, opts));
+    if (keepalive) inflight += bytes;
+    // Released once, whichever path settles first: the retry below runs
+    // release() before the non-keepalive attempt and the final handlers
+    // run it again, and subtracting twice would wipe out another
+    // keepalive POST's share and let a later one past the reserve.
+    let held = keepalive;
+    const release = () => {
+      if (!held) return;
+      held = false;
+      inflight = Math.max(0, inflight - bytes);
+    };
+    // The browser's own accounting may differ from ours (another keepalive
+    // sender on the page), so a keepalive fetch can still reject at once;
+    // one retry without keepalive covers that and a transient network blip.
+    attempt(init)
+      .catch(() => {
+        release();
+        return attempt({ ...init, keepalive: false });
+      })
+      .then((resp) => {
+        release();
+        const ok = Boolean(resp && resp.ok);
+        settle(ok, ofRun, ok ? null : httpStatus(resp));
+      }, () => { release(); settle(false, ofRun, null); });
+  }
+
+  function beacon(body) {
+    let ok = false;
+    try {
+      ok = Boolean(beaconFn && beaconFn(url, body));
+    } catch (err) {
+      ok = false;
+    }
+    settle(ok);
+  }
+
+  function flush(final, outcome, nowMs, viaBeacon) {
+    const batch = rows;
+    rows = [];
+    if (typeof nowMs === 'number') lastFlushMs = nowMs;
+    if (!url || !header) return;
+    const bodies = reportBodies(header, batch, seq, final, outcome, hiddenMs(nowMs), maxBytes);
+    for (const { seq: s, body } of bodies) {
+      if (s > REPORT_MAX_SEQ) settle(false);
+      else if (viaBeacon) beacon(body);
+      else post(body);
+    }
+    seq += bodies.length;
+  }
+
+  // Would `candidate` go out as one body under the current header, however
+  // it ends up being flushed? Sized as the largest body the same rows can
+  // become: a final chunk with the longest outcome string the schema has
+  // and a hidden_ms grown to its 10-digit maximum.
+  function fits(candidate, nowMs) {
+    try {
+      const body = JSON.stringify(
+        buildReportChunk(header, candidate, seq, true, 'report_error', REPORT_MAX_HIDDEN_MS)
+      );
+      return byteLength(body) <= maxBytes;
+    } catch (err) {
+      return true;
+    }
+  }
+
+  function finish(outcome, nowMs, viaBeacon) {
+    if (!active) return;
+    active = false;
+    try {
+      flush(true, outcome, nowMs, viaBeacon);
+    } catch (err) {
+      // Swallowed: see the section comment.
+    }
+  }
+
+  return {
+    start(newUrl, newHeader, nowMs, hiddenNow) {
+      if (active) finish('cancelled', nowMs, false);
+      url = typeof newUrl === 'string' ? newUrl : '';
+      header = newHeader || null;
+      active = Boolean(url && header);
+      rows = [];
+      seq = 0;
+      hiddenTotal = 0;
+      hiddenAt = hiddenNow ? nowMs : null;
+      lastFlushMs = typeof nowMs === 'number' ? nowMs : -Infinity;
+      // The status line reads "N reports sent" for *this* run (the view
+      // clears it at each start), so the counts start over too, and a POST
+      // of the previous run still in flight settles into nothing.
+      run += 1;
+      sent = 0;
+      failed = 0;
+      lastHttp = null;
+      reportId = header && typeof header.report_id === 'string' ? header.report_id : null;
+    },
+    row(row, newHeader, nowMs) {
+      if (!active) return;
+      if (newHeader) header = newHeader;
+      // The buffer is kept to what one body can carry, so a pagehide flush
+      // is a single beacon: beacons and keepalive fetches share one 64 KB
+      // in-flight budget per page, and two bodies queued back to back on
+      // pagehide would lose the second. Rows are at most ~3 KB (4-byte
+      // characters throughout) so this only ever triggers on hostile-size
+      // input; reportBodies' split stays as the fallback (a header that
+      // grew by a long comment between here and the flush).
+      if (rows.length > 0 && !fits([...rows, row], nowMs)) {
+        try {
+          flush(false, null, nowMs, false);
+        } catch (err) {
+          // Swallowed.
+        }
+      }
+      rows.push(row);
+      // A hidden tab is the dashboard's normal case (the run goes on in
+      // the background) and the one the browser may freeze or discard
+      // without a pagehide, so while hidden the buffer is kept short:
+      // hide() sent what was there when the tab went dark, and this keeps
+      // the window after it to a few rows, at most one short chunk every
+      // REPORT_HIDDEN_FLUSH_MIN_MS. A 350-frame run hidden throughout at
+      // background frame rates (12-14 s a frame, over an hour in all) is
+      // ~70 POSTs, one per 5 frames, instead of
+      // ~15; one whose frames fail several a second goes out 25 rows at a
+      // time, so neither passes the worker's 60-a-minute limit (only a
+      // burst above 25 rows a second could, see REPORT_HIDDEN_FLUSH_MIN_MS).
+      const shortDue = hiddenAt !== null && rows.length >= hiddenFlushRows
+        && nowMs - lastFlushMs >= hiddenFlushMinMs;
+      if (rows.length >= rowsPerChunk || shortDue) {
+        try {
+          flush(false, null, nowMs, false);
+        } catch (err) {
+          // Swallowed.
+        }
+      }
+    },
+    end(outcome, newHeader, nowMs) {
+      if (newHeader && active) header = newHeader;
+      // "failed" is the run dying on an error (the upload loop's cancel
+      // carries a reason); "report_error" is the kernel closing the report
+      // because its own reporting failed mid-run; anything else unknown is
+      // a finished run.
+      const known = outcome === 'cancelled' || outcome === 'failed' || outcome === 'report_error';
+      finish(known ? outcome : 'done', nowMs, false);
+    },
+    pageClosed(nowMs, persisted) {
+      // pagehide with `persisted` is the page going into the back/forward
+      // cache, from which it may come back with the run still going: send
+      // what is buffered as an ordinary chunk and keep the report open. If
+      // the page is evicted instead, the report simply has no final chunk,
+      // which the pull script flags as "no-final".
+      if (persisted) {
+        // Nothing buffered (hide() usually ran first and sent it): no
+        // empty chunk, which would cost a seq, an object and a rate-limit
+        // slot for every back/forward-cache entry.
+        if (!active || rows.length === 0) return;
+        // A keepalive POST, like hide(), not a beacon: it outlives the page
+        // the same way, and it is counted in `inflight`, so if the page
+        // comes back while it is still pending the next POST sees it and
+        // leaves the closing beacon its reserve (a beacon is invisible to
+        // our accounting, and a pending one plus one keepalive POST would
+        // leave the final chunk no room).
+        try {
+          flush(false, null, nowMs, false);
+        } catch (err) {
+          // Swallowed: see the section comment.
+        }
+        return;
+      }
+      finish('page_closed', nowMs, true);
+    },
+    hide(nowMs) {
+      if (!active) return;
+      if (hiddenAt === null) hiddenAt = nowMs;
+      // A background tab may be frozen or discarded with no pagehide at
+      // all (Chrome's memory saver, phones), taking the buffer with it: get
+      // the buffered rows out now, as an ordinary keepalive POST (which
+      // survives a discard; a beacon could be refused for quota and the
+      // rows would be gone with it).
+      if (rows.length > 0) {
+        try {
+          flush(false, null, nowMs, false);
+        } catch (err) {
+          // Swallowed.
+        }
+      }
+    },
+    show(nowMs) {
+      if (hiddenAt === null) return;
+      hiddenTotal += Math.max(0, nowMs - hiddenAt);
+      hiddenAt = null;
+    },
+    isActive() {
+      return active;
+    },
+    counts() {
+      return { sent, failed };
+    },
+  };
+}
+
+/**
+ * Route one kernel message to the reporter. Returns true when it was a
+ * report message (handled or deliberately ignored), false otherwise.
+ */
+export function handleReportMessage(reporter, url, msg, nowMs, hiddenNow) {
+  if (!msg || typeof msg.type !== 'string' || !msg.type.startsWith('report_')) return false;
+  if (msg.type === 'report_start') reporter.start(url, msg.header, nowMs, hiddenNow);
+  else if (msg.type === 'report_row') reporter.row(msg.row, msg.header, nowMs);
+  else if (msg.type === 'report_end') reporter.end(msg.outcome, msg.header, nowMs);
+  return true;
+}
+
+// One reporter per drop-zone *model*, not per view: anywidget calls
+// initialize() once per model, and a model rendered twice must not send
+// every row twice. The view's upload loop lets report_* messages fall
+// through (no waiter predicate matches them), and the report_status
+// messages sent back only feed the view's status line.
+function initializeDropZone({ model }) {
+  const ac = new AbortController();
+  const listen = { signal: ac.signal };
+  const reporter = makeReporter({
+    fetchFn: (url, init) => globalThis.fetch(url, init),
+    beaconFn: (url, body) => navigator.sendBeacon(url, body),
+    onStatus: ({ sent, failed, report_id, last_http }) => {
+      try {
+        model.send({ type: 'report_status', report_id, sent, failed, last_http });
+      } catch (err) {
+        // The comm is gone (a crashed kernel); the page still reported.
+      }
+    },
+  });
+  function onMessage(msg) {
+    try {
+      handleReportMessage(
+        reporter,
+        model.get('feedback_url') || '',
+        msg,
+        Date.now(),
+        document.visibilityState === 'hidden'
+      );
+    } catch (err) {
+      // Never let reporting disturb the comm.
+    }
+  }
+  model.on('msg:custom', onMessage);
+  window.addEventListener('pagehide', (ev) => reporter.pageClosed(Date.now(), ev.persisted), listen);
+  // Coming back from the back/forward cache: the spec fires
+  // visibilitychange on reactivation too, but a pageshow with the page
+  // visible costs nothing and keeps hidden_ms honest if an engine skips it.
+  window.addEventListener('pageshow', () => {
+    if (document.visibilityState === 'visible') reporter.show(Date.now());
+  }, listen);
+  // Chrome (only) says when it is about to freeze a hidden tab, and a frozen
+  // tab can then be discarded with no further event: get the rows buffered
+  // since the hide flush (up to 24 inside the 2 s gate) out first. hide()
+  // is idempotent on the hidden clock.
+  document.addEventListener('freeze', () => reporter.hide(Date.now()), listen);
+  document.addEventListener(
+    'visibilitychange',
+    () => {
+      if (document.visibilityState === 'hidden') reporter.hide(Date.now());
+      else reporter.show(Date.now());
+    },
+    listen
+  );
+  return () => {
+    // The model is being disposed (a kernel restart clears the widget
+    // state) with a report possibly still open: close it as cancelled
+    // rather than losing the buffered rows and leaving the report with no
+    // final chunk. The page is still here, so an ordinary fetch will do.
+    try {
+      reporter.end('cancelled', null, Date.now());
+    } catch (err) {
+      // Swallowed: see the section comment.
+    }
+    ac.abort();
+    model.off('msg:custom', onMessage);
+  };
+}
+
 /**
  * Drop-zone widget: drag a folder of FITS frames in, stream them to the
  * kernel over the comm in chunk_bytes-sized pieces.
@@ -792,7 +1281,7 @@ function renderDropZone({ model, el, signal }) {
         // firing here must not cancel a healthy later upload.
         if (waiter.runId === runCounter) {
           try {
-            model.send({ type: 'cancel' });
+            model.send({ type: 'cancel', reason: 'timeout' });
           } catch (sendErr) {
             // Comm is gone; the reject below still unwinds the loop, and
             // the status line it produces says reload is the recovery.
@@ -823,7 +1312,7 @@ function renderDropZone({ model, el, signal }) {
       // send, and the download button would never appear. With no waiter
       // pending the loop itself sends it, from its catch, once rethrow()
       // picks the error up from the latch.
-      if (pending.length > 0) model.send({ type: 'cancel' });
+      if (pending.length > 0) model.send({ type: 'cancel', reason: 'error' });
       setStatus(`Error: ${msg.reason || 'unknown error'}`);
       return;
     }
@@ -973,7 +1462,7 @@ function renderDropZone({ model, el, signal }) {
       // `cancel` is idempotent, so the extra one sent when the kernel's own
       // error message is what unwound us is harmless.
       try {
-        model.send({ type: 'cancel' });
+        model.send({ type: 'cancel', reason: 'upload' });
       } catch (sendErr) {
         // Comm is gone; nothing left to tell it with. Reload is the only
         // recovery, and the status line above says so as well as it can.
@@ -1289,4 +1778,9 @@ function render({ model, el, signal }) {
     : renderDropZone({ model, el, signal });
 }
 
-export default { render };
+function initialize({ model }) {
+  if (model.get('_role') === 'zip') return undefined;
+  return initializeDropZone({ model });
+}
+
+export default { initialize, render };

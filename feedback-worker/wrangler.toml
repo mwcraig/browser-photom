@@ -1,0 +1,46 @@
+# Cloudflare Worker that receives the dashboard's opt-in tester reports.
+# Setup and deploy steps: docs/feedback-deploy.md. Contract:
+# feedback/report.schema.json (imported directly by src/index.js, so the
+# worker and the dashboard validate against the same file).
+name = "browser-photom-feedback"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+# Only POST /report on the workers.dev hostname; no custom domain. No
+# per-version preview URLs either: with them, an uploaded version keeps
+# answering at <version>-browser-photom-feedback.<sub>.workers.dev even
+# after workers.dev is switched off to pause the endpoint.
+workers_dev = true
+preview_urls = false
+
+# Workers Logs off, explicitly: the stored object is the only record of a
+# request (docs/feedback-deploy.md §1, "No IP address"), and this must not
+# depend on whatever the default becomes.
+[observability]
+enabled = false
+
+[vars]
+# The GitHub Pages origin (scheme + host, no path). Comma-separate to allow
+# more than one, e.g. add "http://localhost:8010" while testing a local
+# build-dash. A request whose Origin header is anything else is refused.
+ALLOWED_ORIGIN = "https://mwcraig.github.io"
+
+[[r2_buckets]]
+binding = "REPORTS"
+bucket_name = "browser-photom-feedback"
+
+# Per-IP limit. Counters are per Cloudflare location and approximate by
+# design; this is a brake on a runaway or hostile client, not accounting.
+# A 350-frame run sends ~15 chunks, and a run whose pipeline setup failed
+# sends all of them within seconds, so a tester who drops the folder again
+# right away makes ~30 in a minute. 60 per minute covers that, or a couple
+# of testers behind one NAT; the page does not retry a 429, so a limit
+# that bites loses rows for good. namespace_id is any integer string
+# unique within the account. period must be 10 or 60.
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "4201"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60

@@ -39,6 +39,7 @@ __all__ = [
     "RunState",
     "SLOWDOWN_FACTOR",
     "build_results_zip",
+    "feedback_url",
     "format_duration",
     "hidden_banner_text",
     "make_bandaid_processor",
@@ -109,6 +110,26 @@ def software_versions():
         "bandaid": str(getattr(build_info, "BANDAID_SHA", UNKNOWN_SHA)),
         "browser_photom": str(getattr(build_info, "BROWSER_PHOTOM_SHA", UNKNOWN_SHA)),
     }
+
+
+def feedback_url():
+    """The tester-report endpoint this build was made with, or ``""``.
+
+    Also from the generated ``build_info`` module: `write_build_info.py`
+    copies it from ``BROWSER_PHOTOM_FEEDBACK_URL`` at build time (the Pages
+    workflow sets that from the ``FEEDBACK_URL`` repo variable). ``""`` --
+    no module, an older module without the name, an unset variable, or
+    anything that is not an http(s) URL -- means reporting is disabled and
+    the view greys the opt-in out. Never an exception: the form has to build
+    whatever this says.
+    """
+    from feedback_report import endpoint_url
+
+    try:
+        import build_info
+    except ImportError:
+        return ""
+    return endpoint_url(getattr(build_info, "FEEDBACK_URL", ""))
 
 
 def provenance_tag(versions=None):
@@ -623,6 +644,12 @@ class PhotometryDashboard:
         JS  -> kernel  {type:"hidden_episode", hidden_ms, frames}
         kernel -> JS   {type:"hidden_episode_error", reason}  <- never `error`
 
+    The opt-in tester reports (`docs/dashboard.md` §11) add
+    ``report_start``/``report_row``/``report_end`` (kernel -> JS) and
+    ``report_status`` (JS -> kernel). The view sends and handles those, via
+    the ``on_frame``/``on_end`` hooks below and its own ``on_msg``
+    listener; nothing here dispatches on them.
+
     ``hidden_episode`` is sent when the tab becomes visible again after
     being hidden during a run (often after the run ended, so it is accepted
     in any phase): how long it was hidden and how many ``file_done`` the
@@ -663,6 +690,8 @@ class PhotometryDashboard:
         provenance=None,
         on_change=None,
         on_manifest=None,
+        on_frame=None,
+        on_end=None,
     ):
         self.drop_zone = drop_zone
         self.zip_widget = zip_widget
@@ -679,6 +708,19 @@ class PhotometryDashboard:
         self.provenance = provenance_tag() if provenance is None else str(provenance)
         self.on_change = on_change
         self.on_manifest = on_manifest
+        # Tester-report hooks (feedback_report, the view's `_report_*`).
+        # `on_frame(dashboard, name, ok, reason, elapsed_s)` once per frame
+        # the run counts, after the counters move and before its file_done
+        # goes out; `on_end(dashboard, outcome)` once when the run ends:
+        # "done" before run_done goes out, "failed" on a cancel the front
+        # end sent with a reason (its upload loop died: an `error` reply, a
+        # read error, a timeout), "cancelled" on a bare cancel (nothing in
+        # the front end sends one today -- there is no Stop button -- so it
+        # is the fallback for a cancel without a reason). Both are called
+        # through `_call_hook`, so a hook that raises cannot touch the run:
+        # reporting must never cost a frame.
+        self.on_frame = on_frame
+        self.on_end = on_end
 
         self.state = RunState()
         self.assembler = ChunkAssembler(tmpdir)
@@ -728,7 +770,7 @@ class PhotometryDashboard:
                   "drop_zone", "error"),
         "zip_request": (lambda self, content, buffers: self._on_zip_request(content),
                          "zip_widget", "zip_error"),
-        "cancel": (lambda self, content, buffers: self._on_cancel(),
+        "cancel": (lambda self, content, buffers: self._on_cancel(content),
                    "drop_zone", "error"),
         # Deliberately NOT "error": this message only feeds a banner, often
         # arrives after the run ended, and an `error` would cancel a run
@@ -834,6 +876,7 @@ class PhotometryDashboard:
             if size == 0:
                 self.assembler.mark_completed(name)
                 self.state.frame_skipped(name, "empty file (0 bytes)")
+                self._call_hook(self.on_frame, name, False, "empty file (0 bytes)", None)
                 self._send(self.drop_zone, {
                     "type": "file_done", "name": name, "ok": False,
                     "reason": "empty file (0 bytes)",
@@ -901,6 +944,7 @@ class PhotometryDashboard:
             self.state.frame_ok(base, elapsed)
         else:
             self.state.frame_skipped(base, reason, elapsed)
+        self._call_hook(self.on_frame, base, ok, reason, elapsed)
         self._send(
             self.drop_zone,
             {"type": "file_done", "name": base, "ok": ok, "reason": reason},
@@ -911,6 +955,12 @@ class PhotometryDashboard:
     def _finish_if_done(self):
         if self.state.finished and self.phase == "running":
             self.phase = "done"
+            # The end hook before _push_runs: the hook is fenced, the glob
+            # in _push_runs is not, and a raise there must not leave a
+            # tester report open with no report_end (the page would close
+            # it as `cancelled` at the next drop, a finished run stored
+            # with the wrong outcome).
+            self._call_hook(self.on_end, "done")
             self._push_runs()
             self._send(self.drop_zone, {"type": "run_done"})
 
@@ -951,7 +1001,7 @@ class PhotometryDashboard:
                    {"type": "zip", "filename": zip_name(run, self.provenance)},
                    [data])
 
-    def _on_cancel(self):
+    def _on_cancel(self, content=None):
         if self.phase != "running":
             # The JS error path and its watchdog timers send cancels freely,
             # and the kernel dispatches queued messages in order -- so a
@@ -963,6 +1013,15 @@ class PhotometryDashboard:
         # frame runs to completion inside its own handler.
         self.assembler.reset()
         self.phase = "cancelled"
+        # Every cancel the front end sends today carries a `reason` (a
+        # kernel `error` reply, a file that would not read, a watchdog
+        # timeout): the run died, and a tester report says "failed". A bare
+        # cancel -- none is sent now; there is no Stop button -- would be
+        # the tester's own doing and reads as "cancelled". The run panel
+        # shows "Stopped" either way. The hook goes before _push_runs for
+        # the reason given in _finish_if_done.
+        reason = content.get("reason") if isinstance(content, dict) else None
+        self._call_hook(self.on_end, "failed" if reason else "cancelled")
         self._push_runs()
         self._changed()
 
@@ -1020,6 +1079,17 @@ class PhotometryDashboard:
             # one silent failure with another.
             pass
 
+    def _call_hook(self, hook, *args):
+        # For the reporting hooks only. The view's own hooks already catch
+        # everything; this is the second fence, so that a reporting bug can
+        # never surface as an `error` reply (which cancels the run).
+        if hook is None:
+            return
+        try:
+            hook(self, *args)
+        except Exception:  # noqa: BLE001 - reporting must never break a run
+            pass
+
     def _send(self, widget, content, buffers=None):
         widget.send(content, buffers=buffers)
 
@@ -1070,13 +1140,17 @@ def make_bandaid_processor(
     fixed. `on_result(name, by_filter, prep)` is called
     after each measured frame's `.star` file is written, with the per-filter
     tables and the batch prep, for callers that want the tables themselves
-    (the notebook's light curve). `on_qa(name, qa)` is called once for every
+    (the notebook's light curve). `on_qa(name, qa, schema_version)` is called
+    once for every
     frame that reached bandaid's per-frame step, measured or not, with the
     frame's final QA record: bandaid's own `FrameResult.qa` (a dict keyed by
     `bandaid.QA_MANIFEST_COLUMNS`, every value a plain str/int/float/bool/
     None), or the ``skipped`` record rebuilt with `qa_record_skipped` when
     the writer raised a `FrameError` after photometry -- the same row
-    bandaid's own `process_batch` would have put in its QA manifest. A frame
+    bandaid's own `process_batch` would have put in its QA manifest -- and
+    the `FrameResult.schema_version` the record was built under (the tester
+    reports carry it as ``qa_schema``, so a report says which column set its
+    rows follow). A frame
     that never got past batch prep has no record. Floats may be non-finite
     (``g_cut`` is ``inf`` on a sparse frame, ``fwhm`` and
     ``solve_offset_deg`` can be NaN): a sender that needs strict JSON maps
@@ -1124,9 +1198,9 @@ def make_bandaid_processor(
     # does with the first file of a batch.
     batch = {"prep": None, "n": 0}
 
-    def emit_qa(name, qa):
+    def emit_qa(name, qa, schema_version):
         if on_qa is not None:
-            on_qa(name, qa)
+            on_qa(name, qa, schema_version)
 
     def process_frame(path, name):
         # `path` is already the MEMFS copy -- unlike the watch loop there is
@@ -1158,7 +1232,7 @@ def make_bandaid_processor(
         )
         qa = result.qa
         if not result.ok:
-            emit_qa(name, qa)
+            emit_qa(name, qa, result.schema_version)
             if isinstance(result.error, FrameError):
                 return str(result.error)
             return f"{result.reason_type}: {result.error}"
@@ -1174,7 +1248,7 @@ def make_bandaid_processor(
             # rebuilt as `process_batch` rebuilds it. Anything else is a
             # systemic write failure and propagates.
             qa = qa_record_skipped(name, exc, pointing_offset=result.pointing_offset)
-            emit_qa(name, qa)
+            emit_qa(name, qa, result.schema_version)
             return str(exc)
         # One line per frame, the same shape the watch notebook printed. The
         # dashboard's counters alone cannot answer "is this actually faster
@@ -1185,7 +1259,7 @@ def make_bandaid_processor(
         l4 = by_filter["L4"]
         log(f"[{batch['n']:>3d}] {time.monotonic() - started:5.1f}s  {name}  "
             f"{len(l4)} stars  fwhm={l4.meta['fwhm']:.2f}px")
-        emit_qa(name, qa)
+        emit_qa(name, qa, result.schema_version)
         if on_result is not None:
             on_result(name, by_filter, prep)
         return None

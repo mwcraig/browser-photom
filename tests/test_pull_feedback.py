@@ -642,6 +642,19 @@ def test_an_honest_report_has_no_inconsistencies(pf, validator):
     # Nor one still running (no final yet) or with a header-less chunk.
     running = pf.merge_report(RID, items[:2] + [(key(2), stored({"seq": 2, "rows": []}))], validator)
     assert running["inconsistencies"] == []
+    # Chunks the size the page sends (several rows each, an empty final from
+    # a pagehide with nothing buffered), headers cumulative as the kernel's.
+    multi = [(key(0), stored(chunk(0, [ROW_OK, ROW_SKIP, ROW_OK],
+                                   run={"n_total": 5, "n_processed": 2, "n_skipped": 1,
+                                        "outcome": "running"}))),
+             (key(1), stored(chunk(1, [ROW_OK, ROW_OK],
+                                   run={"n_total": 5, "n_processed": 4, "n_skipped": 1,
+                                        "outcome": "running"}))),
+             (key(2), stored(chunk(2, [], final=True,
+                                   run={"n_total": 5, "n_processed": 4, "n_skipped": 1,
+                                        "outcome": "done"})))]
+    merged = pf.merge_report(RID, multi, validator)
+    assert merged["n_rows"] == 5 and merged["inconsistencies"] == []
 
 
 def test_chunks_that_contradict_each_other_are_flagged(pf, validator):

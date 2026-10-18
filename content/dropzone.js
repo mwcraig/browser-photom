@@ -424,12 +424,13 @@ export const REPORT_HIDDEN_FLUSH_ROWS = 5;
 // the worker's 60-a-minute limit inside a minute and lose rows to 429s.
 // Spaced like this a hidden run sends at most 30 short chunks a minute.
 // The 25-row cap still applies on top and is not spaced, so a run that
-// produces rows faster than 25 a second can still exceed 60 POSTs a minute
-// and lose the overflow to 429s. Every row needs its file uploaded first
-// (the page filters 0-byte files before the manifest goes out), so that
-// takes a run doing no work per frame (the setup-failure latch, tiny
-// unreadable files) in a visible tab; hidden, the throttling keeps even
-// such a run under it.
+// produces rows faster than 25 a second for a whole minute can still
+// exceed 60 POSTs a minute and lose the overflow to 429s. That is over
+// 1,500 rows in the minute, each with its file uploaded first (the page
+// filters 0-byte files before the manifest goes out): a folder of over
+// 1,500 files that cost almost nothing each (tiny unreadable files, or
+// small ones after the setup-failure latch). A 350-frame run is at most
+// 14 full chunks and cannot get there, hidden or not.
 export const REPORT_HIDDEN_FLUSH_MIN_MS = 2000;
 
 // The browser's budget for keepalive requests: fetch(keepalive) bodies and

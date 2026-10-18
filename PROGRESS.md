@@ -1498,6 +1498,18 @@ since every row's file is uploaded first and the page filters 0-byte files
 (the kernel's manifest-time rows are for other front ends); a hidden
 350-frame run takes over an hour at background rates, not 20 minutes;
 the worst-case row is ~3 KB, not ~2 KB; §9 says what a surplus does.
+
+Ninth round (two fresh reviewers on the round-8 diff). No code bug; a
+plugin that logged every `merge_report` call's flags across the suite
+found none that a test does not assert. Added: an honest report with
+several rows per chunk and an empty final merges clean. Wording: the
+burst that could pass 60 POSTs a minute is over 1,500 rows in one minute
+(61 full chunks), so a 350-frame run cannot reach it hidden or visible;
+the earlier "hidden throttling keeps it under" claimed a mechanism the
+code does not have (the ~7x is Chrome's, measured on real frames; the
+`SLOWDOWN_FACTOR` constants only feed the banner text). §9 now says that
+a surplus, like a shortfall, is checked only with the final last and no
+seq missing. Worst-case row measured at 3,107 bytes.
 Tests: 461 pytest, 94 node, 69 worker.
 
 Done 2026-10-18: the `FEEDBACK_URL` repository variable is set, the worker

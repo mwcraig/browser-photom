@@ -598,8 +598,14 @@ class DashboardView:
 
     def _on_result(self, _name, by_filter, _prep):
         # The site bandaid resolved for the frame, from its tables' meta.
-        # Read every frame (cheap) rather than once, so a run whose first
-        # frame lacked SITELAT still picks the position up later.
+        # Checked every frame (cheap) so a run whose first frame lacked
+        # SITELAT still picks the position up later, but kept once found:
+        # site_lat/site_lon are header fields the pull script expects every
+        # chunk of a run to repeat, and a position that drifts from frame to
+        # frame (a phone's GPS straddling a whole degree) would otherwise
+        # flag an honest report as a header conflict.
+        if self._resolved_site != (None, None):
+            return
         try:
             for table in by_filter.values():
                 full = (table.meta or {}).get("full_image_meta") or {}

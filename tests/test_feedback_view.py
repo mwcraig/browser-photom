@@ -431,6 +431,11 @@ def test_run_scoped_report_state_starts_over_each_run(view):
     view._on_result("a.fit", {"R": _Table({"full_image_meta": {"site_lat": -34.2, "site_lon": 151.1}})}, None)
     view._on_qa("stale.fit", {"status": "ok"}, 3)   # a QA record no frame ever claimed
     assert view._resolved_site == (-34.2, 151.1)
+    # Held for the rest of the run: a position that drifts across a whole
+    # degree from frame to frame would otherwise change a header field the
+    # pull script expects every chunk to repeat (conflict site_lat).
+    view._on_result("b.fit", {"R": _Table({"full_image_meta": {"site_lat": -33.9, "site_lon": 151.2}})}, None)
+    assert view._resolved_site == (-34.2, 151.1)
     view.sent.clear()
     manifest(view, "b.fit")                   # run 2: no frame reaches bandaid
     upload(view, "b.fit")

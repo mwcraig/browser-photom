@@ -9,6 +9,10 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import json
+import shutil
+import subprocess
+
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -39,15 +43,67 @@ def test_a_good_url_passes_both_checks(wbi):
     assert endpoint_url(GOOD) == GOOD
 
 
-@pytest.mark.parametrize("good", [
-    "https://x.workers.dev",
+PARSES = [
+    "https://x.workers.dev/report",
     "https://x.workers.dev:8443/report",
-    "https://feedback.example-site.org/v1/report?x=1",
+    "https://x.workers.dev:0/report",
+    "https://h:65535/report",
+    "https://feedback.example-site.org/report?x=1",
+    "https://1.2.3.4/report",
+    "https://xn--bcher-kva.example/report",
     "http://127.0.0.1:8787/report",
-])
-def test_hosts_with_ports_and_bare_hosts_pass_both_checks(wbi, good):
+    "http://localhost/report",
+]
+# Accepted by a letters-digits-dots-hyphens host class with `\d{1,5}` for the
+# port, and thrown on by `new URL()` (seventh-round whole-PR review).
+UNPARSEABLE = [
+    "https://h:65536/report",
+    "https://h:99999/report",
+    "https://h:\u0661\u0662\u0663/report",     # Arabic-Indic digits: Python's \d
+    "https://1.2.3.999/report",
+    "https://example.123/report",
+    "https://a.0x/report",
+    "https://1.2.3.4.5/report",
+    "https://xn--a/report",
+    "https://xn--/report",
+]
+
+
+@pytest.mark.parametrize("good", PARSES)
+def test_hosts_ports_and_the_report_path_pass_both_checks(wbi, good):
     assert wbi.feedback_url_from_env({wbi.FEEDBACK_URL_ENV: good}) == good
     assert endpoint_url(good) == good
+
+
+@pytest.mark.parametrize("bad", UNPARSEABLE)
+def test_what_the_url_parser_throws_on_fails_both_checks(wbi, bad):
+    with pytest.raises(ValueError):
+        wbi.feedback_url_from_env({wbi.FEEDBACK_URL_ENV: bad})
+    assert endpoint_url(bad) == ""
+
+
+NODE = shutil.which("node")
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not on PATH")
+def test_the_lists_above_agree_with_the_browsers_url_parser():
+    # The checks exist so that a value the page's `new URL()` would throw on
+    # (every send failing) never builds; this pins the lists to node's WHATWG
+    # parser rather than to a re-implementation of it.
+    parses = ("for (const u of JSON.parse(process.argv[1])) { const p = new URL(u);"
+              " if (p.pathname !== '/report') throw new Error('path ' + u); }")
+    subprocess.run([NODE, "-e", parses, json.dumps(PARSES)], check=True)
+    throws = ("for (const u of JSON.parse(process.argv[1])) { let threw = false;"
+              " try { new URL(u); } catch (e) { threw = true; }"
+              " if (!threw) throw new Error('parsed ' + u); }")
+    subprocess.run([NODE, "-e", throws, json.dumps(UNPARSEABLE)], check=True)
+
+
+def test_github_actions_is_only_the_literal_true(wbi):
+    local = "http://localhost:8787/report"
+    for not_actions in ("false", "0", ""):
+        env = {wbi.FEEDBACK_URL_ENV: local, "GITHUB_ACTIONS": not_actions}
+        assert wbi.feedback_url_from_env(env) == local
 
 
 @pytest.mark.parametrize("bad", [
@@ -68,6 +124,13 @@ def test_hosts_with_ports_and_bare_hosts_pass_both_checks(wbi, good):
     "https://x.workers.dev:/report",
     "https://x.workers.dev:123456/report",
     "https://x_y.workers.dev/report",
+    # The worker answers 404 to any path but /report.
+    "https://x.workers.dev",
+    "https://x.workers.dev/",
+    "https://x.workers.dev/report/",
+    "https://x.workers.dev/Report",
+    "https://x.workers.dev/v1/report",
+    "http://localhost:8787",
 ])
 def test_everything_the_kernel_would_refuse_fails_the_build(wbi, bad):
     with pytest.raises(ValueError):

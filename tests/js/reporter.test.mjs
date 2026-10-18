@@ -2,6 +2,7 @@
 // byte cap, the buffer/flush/beacon logic and its failure handling.
 // fetch and sendBeacon are injected, so nothing here touches a network.
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import {
   KEEPALIVE_QUOTA_BYTES,
@@ -13,6 +14,8 @@ import {
   handleReportMessage,
   makeReporter,
   reportBodies,
+  REPORT_MAX_SEQ,
+  REPORT_MAX_HIDDEN_MS,
 } from '../../content/dropzone.js';
 
 const URL = 'https://bp.example.workers.dev/report';
@@ -709,4 +712,22 @@ test('a persisted pagehide with nothing buffered sends nothing', async () => {
   assert.equal(beaconFn.calls[0].chunk.final, true);
   assert.equal(beaconFn.calls[0].chunk.run.outcome, 'page_closed');
   assert.equal(r.isActive(), false);
+});
+
+test('the page constants match the schema the worker enforces', () => {
+  // Hard-coded twins of schema bounds (999, 1e9) drift silently; read the
+  // schema the worker imports instead of restating the numbers.
+  const schema = JSON.parse(readFileSync(new globalThis.URL('../../feedback/report.schema.json', import.meta.url), 'utf8'));
+  assert.equal(REPORT_MAX_SEQ, schema.properties.seq.maximum);
+  assert.equal(REPORT_MAX_HIDDEN_MS, schema.properties.run.properties.hidden_ms.maximum);
+  assert.ok(REPORT_ROWS_PER_CHUNK <= schema.properties.rows.maxItems);
+  const outcomes = schema.properties.run.properties.outcome.enum;
+  for (const o of ['running', 'done', 'cancelled', 'failed', 'page_closed', 'report_error']) {
+    assert.ok(outcomes.includes(o), o);
+  }
+  // fits() sizes the final body with the longest outcome; keep it the longest.
+  const longest = outcomes.filter((o) => typeof o === 'string').sort((a, b) => b.length - a.length)[0];
+  assert.equal(longest, 'report_error');
+  // The worker's body cap (feedback-worker/src/index.js) is 64 KiB; ours is under half of it.
+  assert.ok(REPORT_MAX_BYTES * 2 <= 64 * 1024);
 });

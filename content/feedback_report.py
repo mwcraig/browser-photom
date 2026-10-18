@@ -176,6 +176,45 @@ _URL_TOKEN_RE = re.compile(r"\S*(?:://|www\.)\S*", re.IGNORECASE)
 # --------------------------------------------------------------------------
 
 
+# What `new URL()` in the page would accept and the worker would answer:
+# https (or http on localhost / 127.0.0.1) with no userinfo, a host of
+# letters, digits, dots and hyphens, an optional port, and the worker's one
+# path, /report. `[0-9]` rather than `\d`, which in Python takes every
+# Unicode digit. Each of these built, and the kernel enabled reporting on
+# it, before the checks below: `https://?x` and `https://h:bad/report` (the
+# host class), `https://h:65536/report` (port range), `https://example.123/report`
+# and `https://1.2.3.999/report` (a numeric last label is parsed as IPv4
+# and fails unless it is a dotted quad), `https://xn--a/report` (invalid
+# punycode; Python's idna codec refuses what the URL parser refuses on
+# every case tried), and a URL without /report, which the worker answers
+# 404.
+_ENDPOINT_RE = re.compile(
+    r"(?:https://([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)|http://(?:localhost|127\.0\.0\.1))"
+    r"(?::([0-9]{1,5}))?/report(?:\?\S*)?"
+)
+_NUMERIC_LABEL_RE = re.compile(r"[0-9]+|0[xX][0-9a-fA-F]*")
+_OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
+_IPV4_RE = re.compile(rf"{_OCTET}(?:\.{_OCTET}){{3}}")
+
+
+def usable_endpoint(text):
+    """True when ``text`` is an endpoint URL every send could reach."""
+    match = _ENDPOINT_RE.fullmatch(text)
+    if match is None or _CONTROL_RE.search(text):
+        return False
+    host, port = match.group(1), match.group(2)
+    if port is not None and int(port) > 65535:
+        return False
+    if host is not None:
+        if _NUMERIC_LABEL_RE.fullmatch(host.rsplit(".", 1)[-1]) and not _IPV4_RE.fullmatch(host):
+            return False
+        try:
+            host.encode("ascii").decode("idna")
+        except UnicodeError:
+            return False
+    return True
+
+
 def endpoint_url(value):
     """The report endpoint if ``value`` is a usable URL, else ``""``.
 
@@ -190,20 +229,9 @@ def endpoint_url(value):
     # local page): the deployed page is served over https, so any other http
     # endpoint would be blocked as mixed content and every send would fail.
     # No userinfo: fetch and sendBeacon both throw on a URL with credentials.
-    # scripts/write_build_info.py applies the same rule at build time.
-    # The host is letters, digits, dots and hyphens with an optional numeric
-    # port: `https://?x`, `https://[broken/report` and `https://h:bad/report`
-    # pass a looser check but `new URL()` throws on them, so every send
-    # would fail.
-    if not re.fullmatch(
-        r"(https://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::\d{1,5})?"
-        r"|http://(?:localhost|127\.0\.0\.1)(?::\d{1,5})?)(?:/\S*)?",
-        text,
-    ):
-        return ""
-    if _CONTROL_RE.search(text):
-        return ""
-    return text
+    # scripts/write_build_info.py applies the same rule at build time (its
+    # own copy of usable_endpoint; the parity tests keep the two in step).
+    return text if usable_endpoint(text) else ""
 
 
 def new_report_id():

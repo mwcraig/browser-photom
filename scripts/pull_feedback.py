@@ -602,6 +602,8 @@ def main(argv=None):
             parser.error("--since must be a real YYYY-MM-DD date")
     if args.report_ids and not all(re.fullmatch(r"[0-9a-f]{32}", r) for r in args.report_ids):
         parser.error("--report-id must be 32 lowercase hex characters")
+    if args.max_objects < 0:
+        parser.error("--max-objects must be 0 (no limit) or a positive count")
 
     raw_dir = args.out / "raw"
     if not args.offline:

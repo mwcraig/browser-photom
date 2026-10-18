@@ -241,7 +241,9 @@ In the GitHub repository go to **Settings → Secrets and variables → Actions
 endpoint, `https://browser-photom-feedback.<your-subdomain>.workers.dev/report`.
 `.github/workflows/pages.yml` passes it to the build as
 `BROWSER_PHOTOM_FEEDBACK_URL`, and `scripts/write_build_info.py` writes it
-into the dashboard. Re-run the Pages workflow, or push to `main`, for it to
+into the dashboard; the build fails on a value the page could not post to
+(no `/report`, a bad port, a host the URL parser rejects), which is the
+place to catch a typo. Re-run the Pages workflow, or push to `main`, for it to
 take effect.
 
 ## 9. Pulling reports for review
@@ -290,7 +292,9 @@ Flags in `[...]` mark anything to look at:
   `invalid_chunks`, and a readable duplicate of the same seq wins over it).
   The chunk is kept, not dropped.
 - `no-final`: the last chunk never arrived. Usually the tab was discarded
-  with the run still going (a hidden tab under memory pressure); also a
+  with the run still going (a hidden tab under memory pressure, a page
+  evicted from the back/forward cache, a mobile tab swiped away or ended
+  by the OS, none of which fire `pagehide`); also a
   final POST the worker refused (`429` at the rate limit, `503` on storage
   trouble, `400` from a schema the worker has not been redeployed for), a
   run past the 999-chunk ceiling, or a final sent without keepalive (the

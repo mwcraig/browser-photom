@@ -453,6 +453,14 @@ def test_since_must_be_a_real_date(pf, tmp_path):
     assert pf.main(["bucket", "--offline", "--out", str(tmp_path), "--since", "2026-02-28"]) == 0
 
 
+def test_max_objects_must_not_be_negative(pf, tmp_path):
+    # -1 is truthy and len(keys) > -1 always, so it read as "a flood" even
+    # with nothing selected; 0 is the documented "no limit".
+    with pytest.raises(SystemExit):
+        pf.main(["bucket", "--offline", "--out", str(tmp_path), "--max-objects", "-1"])
+    assert pf.main(["bucket", "--offline", "--out", str(tmp_path), "--max-objects", "0"]) == 0
+
+
 def test_since_is_normalised_before_it_meets_the_keys(pf, tmp_path, monkeypatch):
     # Copilot (PR #16, 2026-10-18): fromisoformat takes 20260228 too, and the
     # raw string compared against "2026-02-28" keys excluded every report.

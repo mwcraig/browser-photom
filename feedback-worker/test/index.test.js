@@ -1,6 +1,7 @@
 import { env, exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleReport, MAX_BODY_BYTES, rateLimitKey } from "../src/index.js";
+import { buildReportChunk, reportBodies } from "../../content/dropzone.js";
 
 const ORIGIN = "https://mwcraig.github.io";
 const URL_ = "https://feedback.example.workers.dev/report";
@@ -50,6 +51,25 @@ async function listKeys() {
 }
 
 describe("accepted chunks", () => {
+  it("accepts the bodies the page itself builds (dropzone.js), including a split run and its final", async () => {
+    // Every other test here posts a hand-written chunk; this one runs the
+    // page's own builders through the worker, so a field the page adds or
+    // renames shows up here rather than as INVALID in the pull script.
+    const { seq, final, rows, ...rest } = chunk();
+    const header = { ...rest, run: { ...rest.run, outcome: "running" } };
+    const one = JSON.stringify(buildReportChunk(header, rows, 0, false, null, null));
+    expect((await post(one)).status).toBe(204);
+    const many = Array.from({ length: 30 }, (_, i) => ({ ...rows[0], file: `frame-${i}.fits` }));
+    const bodies = reportBodies(header, many, 1, true, "done", 123456, 2000);
+    expect(bodies.length).toBeGreaterThan(1);
+    for (const { body } of bodies) expect((await post(body)).status).toBe(204);
+    const last = JSON.parse(bodies[bodies.length - 1].body);
+    expect(last.final).toBe(true);
+    expect(last.run.outcome).toBe("done");
+    expect(last.run.hidden_ms).toBe(123456);
+    expect((await listKeys()).length).toBe(1 + bodies.length);
+  });
+
   it("stores a valid chunk wrapped with received_at and country, and returns 204", async () => {
     const body = chunk();
     const req = new Request(URL_, {

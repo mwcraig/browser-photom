@@ -406,9 +406,27 @@ def test_chunk_json_is_strict():
     ("https://?x", ""), ("https://[broken/report", ""),
     ("https://x.workers.dev:invalid/report", ""),
     ("https://x.workers.dev:8443/report", "https://x.workers.dev:8443/report"),
+    # Any path but the worker's /report is a 404 on every send.
+    ("https://x.workers.dev", ""), ("https://x.workers.dev/report/", ""),
+    ("https://h:65536/report", ""), ("https://example.123/report", ""),
 ])
 def test_endpoint_url(value, expected):
     assert endpoint_url(value) == expected
+
+
+def test_rows_per_chunk_matches_the_page_and_fits_the_schema():
+    # ROWS_PER_CHUNK (the preview's idea of a chunk) and dropzone.js's
+    # REPORT_ROWS_PER_CHUNK (what the page sends) are two copies of one
+    # number, and the schema caps a chunk's rows.
+    import json
+    import re
+    from pathlib import Path
+    content = Path(__file__).resolve().parents[1] / "content"
+    js = (content / "dropzone.js").read_text()
+    page = int(re.search(r"^export const REPORT_ROWS_PER_CHUNK = (\d+);", js, re.M).group(1))
+    assert ROWS_PER_CHUNK == page
+    schema = json.loads((content.parent / "feedback" / "report.schema.json").read_text())
+    assert ROWS_PER_CHUNK <= schema["properties"]["rows"]["maxItems"]
 
 
 def test_feedback_url_is_empty_without_build_info(monkeypatch):

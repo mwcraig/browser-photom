@@ -1529,7 +1529,34 @@ body of quota, losing the final chunk. It now goes as a keepalive POST,
 like `hide()`'s flush, counted in `inflight`; a test holds the persisted
 POST pending, brings the page back, and shows the next POST yielding the
 reserve and the closing beacon going out.
-Tests: 476 pytest, 95 node, 69 worker.
+
+Tenth round, whole PR with two narrow lenses after Copilot's finds all
+turned out to be "a validator accepts more than its consumer" (none of
+them in a recent diff). Lens one, validator versus consumer, found six
+more. The endpoint check, tightened an hour earlier, still let through
+ports above 65535, Unicode digits in the port (Python's `\d`), hosts whose
+last label is numeric or hex (parsed as IPv4 and refused unless a dotted
+quad), invalid punycode, and any path at all, though the worker answers
+404 to everything but `/report`; both sides now share one
+`usable_endpoint` rule, and a test runs the accepted and refused lists
+through node's own URL parser. `site_lat`/`site_lon` were re-read from
+every frame's meta, so a position straddling a whole degree flagged an
+honest report `conflict site_lat`; the first position found is now held
+for the run. `--max-objects -1` read as a flood with nothing selected;
+`GITHUB_ACTIONS=false` counted as an Actions build. Test gaps closed: the
+page's constants are pinned to the schema file rather than restated, the
+Python and JS chunk sizes are compared, and a worker test posts bodies
+built by `dropzone.js`'s own `buildReportChunk`/`reportBodies` (a split
+run and its final) instead of hand-written ones. Lens two, browser
+lifecycle, found no bugs: `pagehide`/`persisted`, hide-before-pagehide,
+keepalive rejection shape, beacon byte counting, comm ordering and the
+no-timer design all hold. Taken as hardening: a Chrome `freeze` listener
+runs the hide flush (a frozen tab can be discarded with no event, and up
+to 24 rows can sit inside the 2 s gate), and `pageshow` with the page
+visible resets the hidden clock. Documented: keepalive outliving the page
+needs Firefox 133+; a `persisted` pagehide is not a promise the page is
+kept; mobile tab closes fire no `pagehide` and end `no-final`.
+Tests: 504 pytest, 96 node, 70 worker.
 
 Done 2026-10-18: the `FEEDBACK_URL` repository variable is set, the worker
 is redeployed (again after e862930, though that commit changed nothing the

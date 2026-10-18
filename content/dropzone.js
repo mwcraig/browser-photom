@@ -433,9 +433,11 @@ export const REPORT_HIDDEN_FLUSH_ROWS = 5;
 // 14 full chunks and cannot get there, hidden or not.
 export const REPORT_HIDDEN_FLUSH_MIN_MS = 2000;
 
-// The browser's budget for keepalive requests: fetch(keepalive) bodies and
-// sendBeacon payloads in flight at once share 64 KiB per page, and one that
-// would go over is refused (fetch rejects, sendBeacon returns false).
+// The browser's budget for keepalive requests: per the Fetch and Beacon
+// specs, fetch(keepalive) bodies and sendBeacon payloads in flight at once
+// share 64 KiB per page, and one that would go over is refused (fetch
+// rejects, sendBeacon returns false). An engine that counts beacons on
+// their own only makes the reserve below more generous than it need be.
 export const KEEPALIVE_QUOTA_BYTES = 64 * 1024;
 
 // Per-body byte cap: half the quota, less a margin, so that one keepalive
@@ -449,11 +451,11 @@ export const REPORT_MAX_BYTES = 32_000;
 // stops reporting rather than sending chunks the worker rejects; each body
 // that would have gone out is counted as failed, so the status line and
 // the pull script's "no-final" flag both tell the truth about it.
-const REPORT_MAX_SEQ = 999;
+export const REPORT_MAX_SEQ = 999;
 // The schema's run.hidden_ms maximum (~11.6 days). Wall-clock time, so a
 // laptop asleep for a fortnight, or a clock jump, must not make every later
 // chunk invalid.
-const REPORT_MAX_HIDDEN_MS = 1_000_000_000;
+export const REPORT_MAX_HIDDEN_MS = 1_000_000_000;
 
 /**
  * One POST body, assembled exactly as feedback_report.build_chunk does it:
@@ -846,6 +848,17 @@ function initializeDropZone({ model }) {
   }
   model.on('msg:custom', onMessage);
   window.addEventListener('pagehide', (ev) => reporter.pageClosed(Date.now(), ev.persisted), listen);
+  // Coming back from the back/forward cache: the spec fires
+  // visibilitychange on reactivation too, but a pageshow with the page
+  // visible costs nothing and keeps hidden_ms honest if an engine skips it.
+  window.addEventListener('pageshow', () => {
+    if (document.visibilityState === 'visible') reporter.show(Date.now());
+  }, listen);
+  // Chrome (only) says when it is about to freeze a hidden tab, and a frozen
+  // tab can then be discarded with no further event: get the rows buffered
+  // since the hide flush (up to 24 inside the 2 s gate) out first. hide()
+  // is idempotent on the hidden clock.
+  document.addEventListener('freeze', () => reporter.hide(Date.now()), listen);
   document.addEventListener(
     'visibilitychange',
     () => {

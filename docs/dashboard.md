@@ -879,9 +879,19 @@ mid-run it sends the final chunk with `navigator.sendBeacon` and outcome
 reloads; a `pagehide` with `persisted` (the page entering the back/forward
 cache, from which it may return with the run still going) instead sends
 the buffered rows as an ordinary keepalive POST, which outlives the page
-like a beacon but is counted against the reserve, so a page that comes
-back while it is still pending cannot start a keepalive POST beside it
-and leave the closing beacon no room; the report stays open. The
+like a beacon (Safari 13+, Chrome, Firefox from 133; an older Firefox
+ignores the option and may cancel the request on unload) but is counted
+against the reserve, so a page that comes back while it is still pending
+cannot start a keepalive POST beside it and leave the closing beacon no
+room; the report stays open. A `persisted` `pagehide` is not a promise
+that the page is kept: it may be evicted at any point with no further
+event, which ends the report `no-final`. Mobile tab closes (a tab swiped
+away, iOS ending a backgrounded Safari) usually fire no `pagehide` at all,
+so they end `no-final` too, with the rows up to the last `hide()` flush
+delivered. Chrome fires `freeze` before freezing a hidden tab (and may
+discard it afterwards with no event), so `freeze` runs the same flush as
+hiding; `pageshow` with the page visible resets the hidden clock in case
+an engine skips `visibilitychange` on a back/forward-cache return. The
 sent/failed counts behind the status line are per run: a POST of the
 previous run settling late counts for nobody on the page, and each
 `report_status` carries its `report_id` so the kernel, which marks the new
@@ -925,9 +935,14 @@ set up in this build. A value that is not an https URL without credentials
 (or http on localhost, for a `wrangler dev` worker) fails the build: the
 page is served over https, so any other http endpoint would be blocked as
 mixed content, and fetch and sendBeacon throw on a URL with userinfo. The
-host must be letters, digits, dots and hyphens with an optional numeric
-port, since `new URL()` throws on anything else (`https://?x`,
-`https://host:bad/report`) and every send would fail.
+host must be letters, digits, dots and hyphens with an optional port up to
+65535, a numeric last label only as a dotted quad, and any `xn--` label
+valid punycode, since `new URL()` throws on anything else (`https://?x`,
+`https://host:bad/report`, `https://example.123/report`) and every send
+would fail; and the path must be the worker's `/report`, since it answers
+404 to anything else. A test runs the accepted and refused lists through
+node's URL parser so the rule tracks the browser's rather than a
+re-implementation of it.
 The kernel reads it with `photom_dashboard.feedback_url()` (`""` without the
 module, as `software_versions` falls back to `unknown`) and the view hands
 it to the page as the drop zone's synced `feedback_url` trait. The Pages

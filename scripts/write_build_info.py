@@ -66,14 +66,50 @@ def git_sha(repo, *, short=7):
 # https anywhere, or plain http only on this machine (a `wrangler dev` worker
 # behind a local `build-dash` page). feedback_report.endpoint_url is the
 # kernel's copy of the same rule.
-# The same pattern as feedback_report.endpoint_url (kept in step by the
-# parity tests): a host of letters, digits, dots and hyphens with an optional
-# numeric port, so a value the browser's URL parser would throw on fails
-# the build instead of building a page whose every send fails.
-LOCAL_OR_HTTPS_URL = (
-    r"(https://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::\d{1,5})?"
-    r"|http://(?:localhost|127\.0\.0\.1)(?::\d{1,5})?)(?:/\S*)?"
+# A copy of feedback_report.usable_endpoint (this script runs outside the
+# kernel environment); tests/test_write_build_info.py keeps the two in step.
+# The same control class as feedback_report._CONTROL_RE: C0, DEL and C1
+# (U+0080-009F; `\S` lets most of C1 through, and a UTF-8 terminal reads
+# U+009B as an escape introducer).
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+# What `new URL()` in the page would accept and the worker would answer:
+# https (or http on localhost / 127.0.0.1) with no userinfo, a host of
+# letters, digits, dots and hyphens, an optional port, and the worker's one
+# path, /report. `[0-9]` rather than `\d`, which in Python takes every
+# Unicode digit. Each of these built, and the kernel enabled reporting on
+# it, before the checks below: `https://?x` and `https://h:bad/report` (the
+# host class), `https://h:65536/report` (port range), `https://example.123/report`
+# and `https://1.2.3.999/report` (a numeric last label is parsed as IPv4
+# and fails unless it is a dotted quad), `https://xn--a/report` (invalid
+# punycode; Python's idna codec refuses what the URL parser refuses on
+# every case tried), and a URL without /report, which the worker answers
+# 404.
+_ENDPOINT_RE = re.compile(
+    r"(?:https://([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)|http://(?:localhost|127\.0\.0\.1))"
+    r"(?::([0-9]{1,5}))?/report(?:\?\S*)?"
 )
+_NUMERIC_LABEL_RE = re.compile(r"[0-9]+|0[xX][0-9a-fA-F]*")
+_OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
+_IPV4_RE = re.compile(rf"{_OCTET}(?:\.{_OCTET}){{3}}")
+
+
+def usable_endpoint(text):
+    """True when ``text`` is an endpoint URL every send could reach."""
+    match = _ENDPOINT_RE.fullmatch(text)
+    if match is None or CONTROL_RE.search(text):
+        return False
+    host, port = match.group(1), match.group(2)
+    if port is not None and int(port) > 65535:
+        return False
+    if host is not None:
+        if _NUMERIC_LABEL_RE.fullmatch(host.rsplit(".", 1)[-1]) and not _IPV4_RE.fullmatch(host):
+            return False
+        try:
+            host.encode("ascii").decode("idna")
+        except UnicodeError:
+            return False
+    return True
 
 
 def feedback_url_from_env(environ=None):
@@ -81,7 +117,7 @@ def feedback_url_from_env(environ=None):
 
     Raises ``ValueError`` for a value that is set but is not an https URL
     without whitespace, control characters or userinfo -- or, in a GitHub
-    Actions build (``GITHUB_ACTIONS`` set), that is not https at all: the
+    Actions build (``GITHUB_ACTIONS`` is ``true``), that is not https at all: the
     localhost exception is for a developer's own machine, and a published
     page must never post to its visitors' localhost. The kernel re-checks
     with `feedback_report.endpoint_url` and disables reporting on anything
@@ -92,15 +128,14 @@ def feedback_url_from_env(environ=None):
     value = environ.get(FEEDBACK_URL_ENV, "").strip()
     if not value:
         return ""
-    # The same control class as feedback_report._CONTROL_RE: C0, DEL and C1
-    # (U+0080-009F; `\S` lets most of C1 through, and a UTF-8 terminal reads
-    # U+009B as an escape introducer).
-    if not re.fullmatch(LOCAL_OR_HTTPS_URL, value) or re.search(r"[\x00-\x1f\x7f-\x9f]", value):
+    if not usable_endpoint(value):
         raise ValueError(
             f"{FEEDBACK_URL_ENV}={value!r} is not an https URL (without "
-            "credentials); unset it to build without tester reporting"
+            "credentials) ending in /report; unset it to build without tester reporting"
         )
-    if environ.get("GITHUB_ACTIONS") and not value.startswith("https://"):
+    # GitHub sets GITHUB_ACTIONS to the string "true" in every Actions job;
+    # a developer's GITHUB_ACTIONS=false or 0 is not an Actions build.
+    if environ.get("GITHUB_ACTIONS") == "true" and not value.startswith("https://"):
         raise ValueError(
             f"{FEEDBACK_URL_ENV}={value!r}: a published build must use https"
         )

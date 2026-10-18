@@ -1418,12 +1418,16 @@ feedback." in amber; a mixed run reads "2 reports sent; 1 report could not
 be delivered, …". Tests: 374 pytest, 92 node, 69 worker.
 
 Done 2026-10-18: the `FEEDBACK_URL` repository variable is set, the worker
-is redeployed, the account stays on Workers Free for now, and `wrangler r2
+is redeployed (again after e862930, though that commit changed nothing the
+worker runs), the account stays on Workers Free for now, the R2 billing
+notification was set up when the bucket was created, and `wrangler r2
 bucket lifecycle list` shows `expire-30d` (enabled, prefix `reports/`,
 expire after 30 days) next to the default 7-day multipart abort rule, so
 the 30-day deletion promise in the consent text is backed.
 
-Still owed: the R2 billing notification (docs/feedback-deploy.md §11).
+Still owed on the backend: nothing. The worker, bucket, lifecycle rule,
+billing notification and repository variable are all in place; merging
+the PR is what turns reporting on for testers.
 Untested: the `pagehide` beacon path in a real browser. Bump Wrangler past
 4.148 (npm audit, dev-only) once 4.149.0 is two weeks old (after
 2026-10-22).

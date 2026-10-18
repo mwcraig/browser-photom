@@ -1370,10 +1370,45 @@ and, under `GITHUB_ACTIONS`, anything but https. Tests: 355 pytest
 Not changed: the preview cannot show the counters as they stood when the
 first chunk really went out (documented).
 
+Fifth round (three fresh reviewers: content injection into reports and
+its sinks, regressions from the fourth round, worker/operator abuse).
+Page: a keepalive POST the browser refused and that was retried released
+its in-flight bytes twice, wiping out another POST's share and letting a
+later one past the beacon reserve -- released once now; while the tab is
+hidden the buffer is flushed every 5 rows, not 25 (hide() alone only
+covered the rows buffered at the moment the tab went dark). Kernel: the
+preview masks `report_id` (it is what lets anyone post chunks under a run's
+report, and previews get screenshotted); a run that died before any frame
+is captioned as such and a guard-closed report previews as `report_error`,
+not `done`; there is no Stop button, so comments, docs and consent no
+longer describe one (`cancelled` = the page closed the report itself).
+Schema: the refused-character class gains C1 controls (U+009B is CSI to a
+UTF-8 terminal), soft hyphen, Arabic letter mark, U+180E, U+FFF9-FFFB,
+U+FFFE/FFFF and the tag block, written as literal code points because
+`\udb40\udc00` means two lone surrogates to Python and one code point to
+JavaScript; `elapsed_s` has a lower bound of 0. Worker: a body stream that
+fails mid-read is a 400 with CORS, not the runtime's 500; `preview_urls =
+false`; the report_id comment is honest (random, not secret). Pull
+script: CSV cells and column names escape non-printable characters;
+duplicate copies of one seq with different bodies are flagged
+`DUP-DIFFERS`; the missing-seq list is capped; the header is taken from
+the last chunk that has one; the stale-object date is UTC;
+`--max-objects` (default 20,000) refuses a flood and `--report-id` pulls
+known runs out of one. Docs: the Workers Free daily cap is account-wide
+and counts refused requests (Matt's call: lockout with a bounded bill on
+Free, or no lockout and an open bill on Paid; set an R2 billing alert
+either way); real cost of one key at the limit; a reversible pause and a
+purge that works at flood scale; obscode is a claim; free text is
+untrusted input to an LLM; `wrangler logout`; deploy order. Tests: 372
+pytest, 91 node, 69 worker.
+
 Still owed: set the `FEEDBACK_URL` repository variable after merge, and
 redeploy the worker for the new rate limit, the schema (`failed` outcome,
-no `user_agent`), the IPv6 keying, the 503 path and the explicit
-observability setting.
+the extended character class, `elapsed_s >= 0`, no `user_agent`), the IPv6
+keying, the 503/400 paths, `preview_urls = false` and the explicit
+observability setting. Confirm `wrangler r2 bucket lifecycle list` shows
+`expire-30d` on `reports/` before the first tester opts in. Decide Free vs
+Paid (docs/feedback-deploy.md §11) and add the R2 billing notification.
 Untested: the `pagehide` beacon path in a real browser. Bump Wrangler past
 4.148 (npm audit, dev-only) once 4.149.0 is two weeks old (after
 2026-10-22).

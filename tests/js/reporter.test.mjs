@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   KEEPALIVE_QUOTA_BYTES,
+  REPORT_HIDDEN_FLUSH_ROWS,
   REPORT_MAX_BYTES,
   REPORT_ROWS_PER_CHUNK,
   buildReportChunk,
@@ -512,4 +513,64 @@ test('a new start resets hidden time, and rows and hide() are ignored while inac
   assert.equal(fetchFn.calls[1].chunk.run.hidden_ms, null);
   assert.deepEqual(fetchFn.calls[1].chunk.rows, []);
   assert.equal(fetchFn.calls[0].init.credentials, 'omit');
+});
+
+// -- fifth review round --------------------------------------------------------
+
+test('a keepalive POST that is refused and retried does not free another POST\'s share', async () => {
+  // Quota wide enough for two bodies with keepalive (reserve 1200 - 400 =
+  // 800 >= 2 x ~350), not three. A is held; B is refused at once and its
+  // retry succeeds; C must then still go out without keepalive, because A
+  // alone fills the second slot.
+  let releaseA;
+  const heldA = new Promise((resolve) => { releaseA = resolve; });
+  const calls = [];
+  const fetchFn = (url, init) => {
+    calls.push(init);
+    if (calls.length === 1) return heldA.then(() => ({ ok: true }));
+    if (calls.length === 2) return Promise.reject(new TypeError('quota'));
+    return Promise.resolve({ ok: true });
+  };
+  const r = makeReporter({ fetchFn, beaconFn: fakeBeacon(), rowsPerChunk: 1, maxBytes: 400, quotaBytes: 1200 });
+  r.start(URL, header(), 0, false);
+  r.row(row(0), null, 0);                // A: keepalive, held
+  r.row(row(1), null, 0);                // B: keepalive, refused -> retried without
+  await settle();
+  assert.deepEqual(calls.map((c) => c.keepalive), [true, true, false]);
+  r.row(row(2), null, 0);                // C: A (350) + C (350) <= 800: keepalive
+  r.row(row(3), null, 0);                // D: A + C + D > 800: no keepalive
+  await settle();
+  assert.deepEqual(calls.map((c) => c.keepalive), [true, true, false, true, false]);
+  releaseA();
+  await settle();
+  assert.deepEqual(r.counts(), { sent: 4, failed: 0 });
+});
+
+test('while the tab is hidden the buffer is flushed every few rows', async () => {
+  const fetchFn = fakeFetch();
+  const r = makeReporter({ fetchFn, beaconFn: fakeBeacon(), rowsPerChunk: 25, hiddenFlushRows: 5 });
+  r.start(URL, header(), 0, false);
+  for (let i = 0; i < 7; i++) r.row(row(i), null, i);
+  await settle();
+  assert.equal(fetchFn.calls.length, 0);      // visible: 25 per POST
+  r.hide(100);                                // the 7 go out now
+  await settle();
+  assert.equal(fetchFn.calls.length, 1);
+  for (let i = 7; i < 16; i++) r.row(row(i), null, 100 + i);
+  await settle();
+  // 9 more rows while hidden: a POST at the 5th, 4 still buffered.
+  assert.equal(fetchFn.calls.length, 2);
+  assert.deepEqual(fetchFn.calls[1].chunk.rows.map((x) => x.file), ['f7.fit', 'f8.fit', 'f9.fit', 'f10.fit', 'f11.fit']);
+  r.show(200);
+  for (let i = 16; i < 30; i++) r.row(row(i), null, 200 + i);
+  await settle();
+  // Visible again: back to 25 per POST, so the 4 + 14 = 18 wait.
+  assert.equal(fetchFn.calls.length, 2);
+  r.end('done', null, 300);
+  await settle();
+  assert.equal(fetchFn.calls.length, 3);
+  assert.equal(fetchFn.calls[2].chunk.rows.length, 18);
+  assert.equal(fetchFn.calls[2].chunk.final, true);
+  // The default is a few rows, and never more than a visible chunk.
+  assert.ok(REPORT_HIDDEN_FLUSH_ROWS >= 1 && REPORT_HIDDEN_FLUSH_ROWS < REPORT_ROWS_PER_CHUNK);
 });

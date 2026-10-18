@@ -471,3 +471,16 @@ def test_write_build_info_fails_on_a_feedback_url_that_is_not_a_url(tmp_path):
     assert proc.returncode != 0
     assert "BROWSER_PHOTOM_FEEDBACK_URL" in proc.stderr
     assert not out.exists()
+
+
+def test_c1_controls_and_the_remaining_invisible_characters_are_dropped(validator):
+    # A UTF-8 terminal reads U+009B as CSI, just like ESC [; a soft hyphen
+    # hides "www." the way a zero-width space did; tag characters are
+    # invisible copies of ASCII. The schema refuses all of them, so the
+    # producer drops them rather than lose the chunk.
+    assert clean_comment("cleared\x9b2J\x85 w­ww.example")[0] == ""   # unmasked, then refused
+    assert clean_comment("a\x9bb؜c\U000e0041d￿e") == ("abcde", None)
+    row = clean_row(ok_qa(), name="\x9b31mevil᠎.fit", reason="x­y \U000e0041z￹")
+    assert row["file"] == "31mevil.fit" and row["reason"] == "xy z"
+    assert clean_comment("fine ️❤ emoji") == ("fine ️❤ emoji", None)   # VS stays
+    valid(validator, build_chunk(header(comment="a\x9bb"), [row]))

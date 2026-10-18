@@ -79,8 +79,8 @@ REPORT_CONSENT = """
   plate-solve results, how long each took) and, for a skipped frame, the
   <b>reason</b>, which can quote the header value that caused it (an
   observation time or pointing, say). Each report also carries the run's
-  counts and timing, whether it finished, was stopped, failed or the tab
-  was closed, how long the tab spent in the background, and the dashboard
+  counts and timing, how it ended (finished, failed, or the tab was
+  closed), how long the tab spent in the background, and the dashboard
   version, plus your comment below. The receiving server adds the
   <b>country</b> it infers from your connection and when the report
   arrived; it does not keep your IP address. No images, starlists or
@@ -90,6 +90,9 @@ REPORT_CONSENT = """
   way. Use <i>Preview report</i> to see what would be sent.
 </div>
 """
+
+# What the preview shows in place of the run's random report_id.
+REPORT_ID_PLACEHOLDER = "(32 random hex characters, drawn when the run starts; not shown)"
 
 REPORT_UNAVAILABLE = (
     '<div style="font-size:0.9em;color:var(--jp-ui-font-color2,#666)">'
@@ -411,7 +414,7 @@ class DashboardView:
             )
             return
         note = ""
-        if not chunk["rows"]:
+        if self._run_report_id is None and not chunk["rows"]:
             caption = "The first report of the next run, before any frame has run:"
             if chunk["site_lat"] is None and chunk["site_lon"] is None:
                 note = ("site_lat and site_lon are null here because the form's "
@@ -420,19 +423,24 @@ class DashboardView:
                         "SITELONG headers, rounded to whole degrees.")
         elif self._run_report_id is None:
             # The last run was not reported (box unticked, or no usable
-            # observer code): these rows never went anywhere, and the id
-            # shown is the one the next run will use.
+            # observer code): these rows never went anywhere.
             caption = ("What the first report of the last run would have been "
                        "(nothing was sent):")
+        elif not chunk["rows"] and self._run_outcome is not None:
+            caption = "The only report of this run (it ended before any frame ran):"
         else:
             caption = "The first report of this run:"
+        # The id is the one field kept back: it is what lets someone else
+        # add chunks to this run's report, and a preview gets screenshotted
+        # and pasted into help requests.
+        shown = {**chunk, "report_id": REPORT_ID_PLACEHOLDER}
         self.report_preview.value = (
             f'<div style="font-size:0.9em;margin-top:0.5em">{caption}</div>'
             + (f'<div style="font-size:0.85em;color:var(--jp-warn-color1,#b26a00)">'
                f"{_escape(note)}</div>" if note else "")
             + '<pre style="font-size:0.8em;max-height:24em;overflow:auto;'
             'padding:0.5em;background:var(--jp-layout-color2,#f5f5f5);'
-            f'border-radius:4px;white-space:pre-wrap">{_escape(chunk_json(chunk, indent=2))}</pre>'
+            f'border-radius:4px;white-space:pre-wrap">{_escape(chunk_json(shown, indent=2))}</pre>'
         )
 
     # -- tester reports: messages ------------------------------------------
@@ -460,6 +468,9 @@ class DashboardView:
             # tester having stopped it. No header: building one may be what
             # failed, and the page keeps the last one it was given.
             if was_open:
+                # Remembered so the preview shows this run as it was sent,
+                # not as the "done" final chunk the page never received.
+                self._run_outcome = "report_error"
                 try:
                     self._report_send({"type": "report_end", "outcome": "report_error"})
                 except Exception:  # noqa: BLE001
@@ -547,7 +558,11 @@ class DashboardView:
             })
 
     def _report_end(self, _dashboard, outcome):
-        self._run_outcome = outcome
+        # Unless the guard already closed this run's report as report_error:
+        # the preview then shows what was actually sent, not a "done" final
+        # chunk the page never got.
+        if self._run_outcome is None:
+            self._run_outcome = outcome
         self._report_guard(self._report_end_unguarded, outcome)
 
     def _report_end_unguarded(self, outcome):

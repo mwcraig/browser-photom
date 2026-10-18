@@ -77,6 +77,8 @@ def _hostile_chunks():
         "wide characters everywhere": clean_row(
             qa, name="😀" * 300 + ".fit", reason="中文" * 300, elapsed_s=1e13),
         "no QA record": clean_row(None, name="b.fit", reason="empty file (0 bytes)"),
+        "C1 controls, soft hyphen and tag characters in name and reason": clean_row(
+            qa, name="\x9b31mevil\x85.fit", reason="w\u00adww.x \U000e0041 \u061c\uffff"),
         "bool-ish and huge counts": clean_row(
             {**qa, "n_detected": True, "n_good_stars": 10**9, "plane_n_used": 3.0}, name="a.fit"),
     }
@@ -86,6 +88,8 @@ def _hostile_chunks():
         "comment hiding www. with zero-width": "see w​ww.example.com",
         "comment at the limit, 4-byte": "😀" * COMMENT_MAX_CHARS,
         "comment with CRLF and tabs": "a\r\nb\tc",
+        "comment with C1 controls and a soft hyphen": "cleared\x9b2J so\u00adft",
+        "comment with emoji and variation selector": "fine \u2764\ufe0f \U0001f600",
     }
     chunks = [(name, build_chunk(_header(), [row])) for name, row in rows.items()]
     chunks += [(name, build_chunk(_header(comment=text), [])) for name, text in comments.items()]

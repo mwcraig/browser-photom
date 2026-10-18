@@ -130,7 +130,14 @@ export async function handleReport(request, env) {
   if (declared !== null && Number(declared) > MAX_BODY_BYTES) {
     return reply(413, "body too large", cors);
   }
-  const bytes = await readCapped(request, MAX_BODY_BYTES);
+  let bytes;
+  try {
+    bytes = await readCapped(request, MAX_BODY_BYTES);
+  } catch {
+    // The client went away mid-body, or the stream errored: a controlled
+    // 400 with CORS headers rather than the runtime's own 500 without.
+    return reply(400, "body could not be read", cors);
+  }
   if (bytes === null) return reply(413, "body too large", cors);
 
   let report;
@@ -139,7 +146,12 @@ export async function handleReport(request, env) {
   } catch {
     return reply(400, "body is not UTF-8 JSON", cors);
   }
-  const result = validator.validate(report);
+  let result;
+  try {
+    result = validator.validate(report);
+  } catch {
+    return reply(400, "schema validation failed", cors);
+  }
   if (!result.valid) return reply(400, schemaReason(result.errors), cors);
 
   const received = new Date();
@@ -149,12 +161,14 @@ export async function handleReport(request, env) {
   // A retried chunk must not replace the first copy. head-then-put is not
   // atomic: two simultaneous POSTs to the same key both write and the last
   // one lands. The dashboard's retries carry identical bodies, so for it
-  // the race is harmless; a client racing *different* bodies can only
-  // decide which of its own versions is kept, since report_id is 128
-  // random bits and an existing object is never replaced after the fact.
-  // (R2's conditional put, onlyIf: { etagDoesNotMatch: "*" }, would close
-  // the window; it is not used until its behaviour on the real service,
-  // not just Miniflare, has been checked.)
+  // the race is harmless. report_id is random but not a secret the worker
+  // can verify: anyone who learns a run's id (the dashboard does not show
+  // it) can post chunks under it, and the worker cannot tell them from the
+  // tester's. What it guarantees is only that an existing object is never
+  // replaced after the fact; the pull script flags same-id copies whose
+  // bodies differ. (R2's conditional put, onlyIf: { etagDoesNotMatch: "*" },
+  // would close the race window; it is not used until its behaviour on the
+  // real service, not just Miniflare, has been checked.)
   try {
     if ((await env.REPORTS.head(key)) === null) {
       // Re-serialised from the parsed object, not spliced from the raw

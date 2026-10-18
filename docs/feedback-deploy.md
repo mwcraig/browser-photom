@@ -29,11 +29,16 @@ something illegal or abusive into storage you own.
   string with a fixed pattern. There is no binary or blob field. Free text
   is limited to the tester's comment (2000 characters), the per-row skip
   reason (300) and the per-row file name (200). All three refuse control
-  characters, zero-width and bidi format characters (which can hide text or
-  mask `www.`), unpaired surrogates, and, for comment and reason, anything
-  containing `://` or `www.` (in any case). Within those bounds they are
-  untrusted text: markup, a bare domain name, or base64 fits the pattern and
-  is stored as typed. Be clear about what that means: the text fields of one
+  characters (C0 and C1: a UTF-8 terminal reads U+009B as CSI, like ESC),
+  zero-width, bidi, soft-hyphen and tag format characters (which can hide
+  text or mask `www.`), noncharacters, unpaired surrogates, and, for
+  comment and reason, anything containing `://` or `www.` (in any case).
+  Within those bounds they are untrusted text: markup, a bare domain name,
+  or base64 fits the pattern and is stored as typed. So is every other
+  field: the endpoint is open, so an `obscode` is a claim, not a verified
+  identity, and a report under a real observer's code may not be theirs.
+  Treat the free text as untrusted when you feed `feedback-reports/` to
+  anything that follows instructions, an LLM included. Be clear about what that means: the text fields of one
   64 KB chunk can together carry roughly 25-35 KB of arbitrary characters,
   so someone determined could stage a file through this endpoint as base64
   split across chunks. The link rule is a deterrent against casual
@@ -78,8 +83,9 @@ something illegal or abusive into storage you own.
 2. Open **Storage & databases → R2 object storage** in the dashboard and
    follow the prompt to enable R2. **Check:** Cloudflare has asked for a
    payment method (card or PayPal) before enabling R2, even though this
-   usage stays inside the free tier (§10). If it asks, that is expected.
-   Nothing is charged unless you exceed the free allowance.
+   usage stays inside the free tier (§11). If it asks, that is expected.
+   Nothing is charged unless you exceed the free allowance, which a
+   deliberate flood can do (§11).
 3. Note your **Account ID**. It is on the R2 overview page and in the right
    sidebar of **Workers & Pages**. `pull_feedback.py` needs it.
 
@@ -119,8 +125,12 @@ days by up to about a day.
 **This step is what makes the consent text's "deletes reports after 30
 days" true.** Nothing in the code enforces it. `lifecycle list` must show
 the rule before you deploy, and the pull script (step 9) warns on stderr
-whenever it lists an object more than 31 days old, which means the rule is
-missing or broken.
+whenever it lists an object past 30 days plus the day of lag R2 allows
+itself, which means the rule is missing or broken.
+
+`wrangler login` leaves a full-account OAuth token in `~/.wrangler`. When
+you are done deploying, `npx wrangler logout` removes it; the pull script
+never needs it (step 9's token is read-only and scoped to the bucket).
 
 ## 4. Allowed origin
 
@@ -257,7 +267,10 @@ of small objects), then mirrors the selected objects into
 has a chunk on or after that day, so a run that straddled UTC midnight
 comes whole. Already-downloaded objects are skipped. A `WARNING` on stderr
 about objects older than 30 days means the lifecycle rule from step 3 is
-not doing its job. It writes
+not doing its job. More than 20,000 objects selected (`--max-objects`; a
+tester's run is ~15) stops the pull before anything is fetched: that is a
+flood, and `--report-id <hex>` (repeatable) pulls the runs you know about
+out of it. It writes
 `feedback-reports/<report_id>.json` and `.csv` and prints one line per
 report:
 
@@ -290,40 +303,77 @@ Keep `feedback-reports/` out of git. It holds observer codes.
   repository variable and re-run the Pages workflow. The build then ships
   with reporting disabled and the checkbox greyed out. For a local build,
   leave `BROWSER_PHOTOM_FEEDBACK_URL` unset or empty.
-- **Stop the endpoint immediately,** including for anyone with an old page
-  open or using curl: `npx wrangler delete` (from `feedback-worker/`).
+- **Pause the endpoint, reversibly,** including for anyone with an old page
+  open or using curl: in the Cloudflare dashboard, **Workers & Pages →
+  browser-photom-feedback → Settings → Domains & Routes**, disable the
+  workers.dev route; or set `workers_dev = false` in `wrangler.toml` and
+  `npx wrangler deploy`. Requests then get a 404 from Cloudflare's edge,
+  which does not run the worker. (`preview_urls = false` in `wrangler.toml`
+  is what keeps a per-version preview hostname from staying up past that.)
+  Re-enable the route, or set it back to `true` and deploy, to resume.
   Dashboards still running will have their POSTs fail, and the dashboard
   ignores those failures by design.
+- **Stop it for good:** `npx wrangler delete` (from `feedback-worker/`).
 - **Remove the data:** wait out the 30-day rule, or delete objects in the
-  dashboard (R2 → bucket → select → Delete). Then remove the bucket with
+  dashboard (R2 → bucket → select → Delete), which is fine for a few
+  hundred. For a flood of 10^5 or more, add a temporary rule that expires
+  everything in a day and remove it afterwards:
+
+  ```sh
+  npx wrangler r2 bucket lifecycle add browser-photom-feedback purge-1d reports/ --expire-days 1
+  # a day or two later:
+  npx wrangler r2 bucket lifecycle remove browser-photom-feedback purge-1d
+  ```
+
+  Then, if you are done, remove the bucket with
   `npx wrangler r2 bucket delete browser-photom-feedback`, which only works
   on an empty bucket.
 
 ## 11. Cost
 
-This should stay at $0. The figures are Cloudflare's published free
-allowances as of October 2026. Check them, because they change:
+With testers alone this stays at $0. The figures are Cloudflare's
+published free allowances as of October 2026. Check them, because they
+change:
 
-- **Workers Free plan:** 100,000 requests a day, with 10 ms of CPU time per
-  request. Validating a 64 KB chunk takes well under that. Even 100 testers
-  each doing several 350-frame runs a day is a few thousand requests. The
-  docs do not say clearly what happens past the daily cap, but the likely
-  outcome is that requests fail, which the dashboard ignores. It is not a
-  bill. Note what the per-IP limit does *not* do, though: one address (or
-  one IPv6 /64) sending 60 accepted chunks a minute all day is 86,400
-  requests, most of the daily cap, and 64 KB objects at that rate kept for
-  30 days would be well past the 10 GB storage tier. The limit is a brake
-  on a runaway or careless client, not protection against someone
-  deliberately filling the bucket. If that happens, the remedies are on the
-  Cloudflare side: pause the worker, tighten the limit, or add a daily
-  budget (a KV counter, or a second rate-limit binding keyed on a constant;
-  not added up front because one hostile client would then lock every
-  tester out).
+- **Workers Free plan:** 100,000 requests a day, account-wide, with 10 ms of
+  CPU time per request. Validating a 64 KB chunk takes about 1 ms. Even 100
+  testers each doing several 350-frame runs a day is a few thousand
+  requests. Past the cap, requests fail until 00:00 UTC, which the
+  dashboard ignores. It is not a bill.
+- **What one hostile client can do, and the choice it forces.** The per-IP
+  limit is a brake on a runaway or careless client, not protection against
+  a deliberate flood, and *refused* requests count against the daily cap
+  too (the worker still ran). So:
+  - On the **Free plan**, one client at ~100 requests a second empties the
+    daily cap in about 17 minutes. Every tester's reports then fail until
+    midnight UTC, and so does **every other Worker on the account**. The
+    bill stays bounded: the most one rate-limit key can store is ~60
+    accepted chunks a minute, which over a month is ~2.6 million puts (R2
+    charges $4.50 per million past the first million) and ~165 GB-months
+    at the 64 KB maximum ($0.015 per GB-month past 10 GB), roughly $10 a
+    month per key; the daily cap holds the whole account to about that.
+  - On the **Workers Paid plan** there is no daily cap and so no lockout,
+    and no ceiling on the bill either: a client with a /48 has 65,536
+    rate-limit keys.
+  - Decide which failure you prefer before the first tester opts in. For a
+    testing period, Free is the sensible default *if nothing else on the
+    account must stay up*: a lockout ends at midnight, a bill does not.
+    Either way, set a **usage-based billing notification** for R2
+    (Cloudflare dashboard → Notifications → Add → "Billing") so a flood
+    pages you rather than surprising you.
+  - A daily write budget inside the worker (a KV counter, or a second
+    rate-limit binding keyed on a constant) would cap the bill on Paid; it
+    is not added up front because one hostile client would then lock every
+    tester out of *reporting*, which on Free the request cap does anyway.
+  - After a flood: §10 for pausing and purging; the pull script refuses to
+    mirror more than 20,000 objects and `--report-id` pulls known runs.
 - **R2 free tier, per month:**
   - 10 GB-month of storage. A 350-frame run is about 15 objects of roughly
     15 KB, so about 250 KB. With 30-day expiry, thousands of runs would fit.
-  - 1 million Class A operations. Each chunk costs one put; listing during a
-    pull also counts.
+  - 1 million Class A operations. Each chunk costs one put (a 300-byte
+    `rows: []` chunk costs the same put as a 64 KB one); listing during a
+    pull also counts. One key at the rate limit uses the free million in
+    about 12 days.
   - 10 million Class B operations. Each chunk costs one head check, and each
     get during a pull counts.
   - No egress charge.
@@ -355,8 +405,13 @@ allowances as of October 2026. Check them, because they change:
   the same key racing both write and the last lands. The dashboard's
   retries carry identical bodies, so for it that is harmless; a client
   racing *different* bodies can only choose which of its own versions is
-  kept (report_id is 128 random bits, and an existing object is never
-  replaced after the fact). R2's conditional put
+  kept. report_id is random but not a secret the worker can verify: anyone
+  who learns a run's id can post chunks under it, and the worker cannot
+  tell them from the tester's, which is why the dashboard's preview masks
+  it. What the worker guarantees is only that an existing object is never
+  replaced after the fact; when two copies of one `(report_id, seq)` differ
+  (a copy under another day's prefix), the pull script flags the report
+  `DUP-DIFFERS`. R2's conditional put
   (`onlyIf: { etagDoesNotMatch: "*" }`) would close the window and save the
   `head`; Miniflare honours it, but check it against the real service
   before switching. A retry that lands after UTC midnight goes under the
@@ -368,9 +423,17 @@ allowances as of October 2026. Check them, because they change:
   without CORS headers, which the page also counts as a failure, so the
   difference is a controlled status, not safety.
 - `run.outcome` values: `running` until the final chunk, then `done`,
-  `cancelled` (Stop button), `failed` (the run died: the front end's cancel
-  carried a reason), `page_closed` (tab closed mid-run) or `report_error`
-  (the dashboard's own reporting failed; the run went on).
+  `failed` (the run died: the front end's cancel carried a reason),
+  `cancelled` (the page closed the report itself: a new run started with
+  one open, or the widget was disposed on a kernel restart; there is no
+  Stop button, so it is never "the tester stopped it"), `page_closed` (tab
+  closed mid-run) or `report_error` (the dashboard's own reporting failed;
+  the run went on).
+- **Deploy order.** The worker bundles the schema at deploy time, so a
+  schema change (the `failed` outcome, the extended character class) is
+  rejected by the running worker until it is redeployed. Redeploy before
+  the Pages build that ships the matching dashboard, or the first reports
+  under the new schema come back `no-final`.
 - Pinned versions (exact, all released at least two weeks before
   2026-10-16): `@cfworker/json-schema` 4.1.1, `wrangler` 4.146.0, `vitest`
   4.1.11, `@cloudflare/vitest-pool-workers` 0.22.0.

@@ -413,6 +413,10 @@ export function makeTabWatch() {
 // preview uses it); the schema allows 50.
 export const REPORT_ROWS_PER_CHUNK = 25;
 
+// Rows per POST while the tab is hidden, where the browser may freeze or
+// discard the page with no pagehide and take the buffer with it.
+export const REPORT_HIDDEN_FLUSH_ROWS = 5;
+
 // The browser's budget for keepalive requests: fetch(keepalive) bodies and
 // sendBeacon payloads in flight at once share 64 KiB per page, and one that
 // would go over is refused (fetch rejects, sendBeacon returns false).
@@ -489,7 +493,8 @@ export function reportBodies(header, rows, seq, final, outcome, hiddenMs, maxByt
  *
  * - start(url, header, nowMs, hiddenNow): the kernel accepted a run it is
  *   reporting. A previous report still open is finished as "cancelled".
- * - row(row, header): buffer one row; send a chunk every rowsPerChunk.
+ * - row(row, header): buffer one row; send a chunk every rowsPerChunk
+ *   (every hiddenFlushRows while the tab is hidden).
  * - end(outcome, header): send the final chunk ("done"/"cancelled", or
  *   "report_error" when the kernel's own reporting broke mid-run).
  * - pageClosed(nowMs, persisted): the page is going away mid-run; send the
@@ -505,7 +510,7 @@ export function reportBodies(header, rows, seq, final, outcome, hiddenMs, maxByt
  * `fetchFn(url, init)` and `beaconFn(url, body)` are injected; `onStatus`
  * gets the counts after every settled POST. Nothing here throws.
  */
-export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPORT_ROWS_PER_CHUNK, maxBytes = REPORT_MAX_BYTES, quotaBytes = KEEPALIVE_QUOTA_BYTES } = {}) {
+export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPORT_ROWS_PER_CHUNK, hiddenFlushRows = REPORT_HIDDEN_FLUSH_ROWS, maxBytes = REPORT_MAX_BYTES, quotaBytes = KEEPALIVE_QUOTA_BYTES } = {}) {
   let url = '';
   let header = null;
   let active = false;
@@ -557,8 +562,15 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
     const init = { method: 'POST', body, keepalive, credentials: 'omit' };
     const attempt = (opts) => Promise.resolve().then(() => fetchFn(url, opts));
     if (keepalive) inflight += bytes;
+    // Released once, whichever path settles first: the retry below runs
+    // release() before the non-keepalive attempt and the final handlers
+    // run it again, and subtracting twice would wipe out another
+    // keepalive POST's share and let a later one past the reserve.
+    let held = keepalive;
     const release = () => {
-      if (keepalive) inflight = Math.max(0, inflight - bytes);
+      if (!held) return;
+      held = false;
+      inflight = Math.max(0, inflight - bytes);
     };
     // The browser's own accounting may differ from ours (another keepalive
     // sender on the page), so a keepalive fetch can still reject at once;
@@ -655,7 +667,15 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
         }
       }
       rows.push(row);
-      if (rows.length >= rowsPerChunk) {
+      // A hidden tab is the dashboard's normal case (the run goes on in
+      // the background) and the one the browser may freeze or discard
+      // without a pagehide, so while hidden the buffer is kept short:
+      // hide() sent what was there when the tab went dark, and this keeps
+      // the window after it to a few rows. A 350-frame run hidden
+      // throughout is ~70 POSTs instead of ~15, well inside the worker's
+      // 60-a-minute limit at background frame rates and the seq ceiling.
+      const limit = hiddenAt === null ? rowsPerChunk : Math.min(rowsPerChunk, hiddenFlushRows);
+      if (rows.length >= limit) {
         try {
           flush(false, null, nowMs, false);
         } catch (err) {

@@ -145,16 +145,25 @@ _REASON_MAX = 300
 # status and the dashboard's reason text carrying the detail.
 NO_QA_STATUS = "skipped: no_qa_record"
 
-# Control characters, as the schema counts them (C0 plus DEL).
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Control characters, as the schema counts them: C0 plus DEL, and the C1
+# range (U+0080-U+009F), which a UTF-8 terminal reads as escape-sequence
+# introducers just like ESC.
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 # Also refused by every text field in the schema: zero-width and bidi format
 # characters (which hide or reorder text, and let "www." slip past the
-# no-links rule as "w\u200bww."), the line/paragraph separators, the BOM,
-# and unpaired UTF-16 surrogates (which Python's str can hold -- a pasted
-# broken emoji, a filename decoded with surrogateescape -- but which no
-# UTF-8 encoder accepts, so one would fail the comm message or, stored
+# no-links rule as "w\u200bww." or, with a soft hyphen, "w\u00adww."), the
+# line/paragraph separators, the BOM, the Arabic letter mark, the Mongolian
+# vowel separator, the interlinear annotation characters and the two
+# noncharacters at the end of the BMP, the tag block (invisible copies of
+# ASCII), and unpaired UTF-16 surrogates (which Python's str can hold -- a
+# pasted broken emoji, a filename decoded with surrogateescape -- but which
+# no UTF-8 encoder accepts, so one would fail the comm message or, stored
 # escaped, the pull script's CSV). Dropped, like control characters.
-_FORMAT_RE = re.compile(r"[\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff\ud800-\udfff]")
+# Variation selectors stay: they are part of ordinary emoji.
+_FORMAT_RE = re.compile(
+    r"[\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff\ud800-\udfff"
+    r"\u00ad\u061c\u180e\ufff9-\ufffb\ufffe\uffff\U000e0000-\U000e007f]"
+)
 # What the schema's no-URL rule matches: "://" or "www." anywhere.
 _URL_MARK_RE = re.compile(r"://|www\.", re.IGNORECASE)
 # For redacting a URL out of a skip reason (an HTTP error from the Gaia query
@@ -237,7 +246,7 @@ def clean_comment(text):
     """
     raw = "" if text is None else str(text)
     comment = raw.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
-    comment = re.sub(r"[\x00-\x09\x0b-\x1f\x7f]", "", comment)
+    comment = re.sub(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]", "", comment)
     comment = _FORMAT_RE.sub("", comment)
     if _URL_MARK_RE.search(comment):
         return "", (

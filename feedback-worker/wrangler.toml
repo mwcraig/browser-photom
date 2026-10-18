@@ -6,8 +6,12 @@ name = "browser-photom-feedback"
 main = "src/index.js"
 compatibility_date = "2026-08-01"
 
-# Only POST /report on the workers.dev hostname; no custom domain.
+# Only POST /report on the workers.dev hostname; no custom domain. No
+# per-version preview URLs either: with them, an uploaded version keeps
+# answering at <version>-browser-photom-feedback.<sub>.workers.dev even
+# after workers.dev is switched off to pause the endpoint.
 workers_dev = true
+preview_urls = false
 
 # Workers Logs off, explicitly: the stored object is the only record of a
 # request (docs/feedback-deploy.md §1, "No IP address"), and this must not

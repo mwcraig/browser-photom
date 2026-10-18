@@ -712,11 +712,13 @@ class PhotometryDashboard:
         # `on_frame(dashboard, name, ok, reason, elapsed_s)` once per frame
         # the run counts, after the counters move and before its file_done
         # goes out; `on_end(dashboard, outcome)` once when the run ends:
-        # "done" before run_done goes out, "cancelled" on the Stop button's
-        # cancel, "failed" on a cancel the front end sent with a reason (its
-        # upload loop died: an `error` reply, a read error, a timeout). Both are
-        # called through `_call_hook`, so a hook that raises cannot touch
-        # the run: reporting must never cost a frame.
+        # "done" before run_done goes out, "failed" on a cancel the front
+        # end sent with a reason (its upload loop died: an `error` reply, a
+        # read error, a timeout), "cancelled" on a bare cancel (nothing in
+        # the front end sends one today -- there is no Stop button -- so it
+        # is the fallback for a cancel without a reason). Both are called
+        # through `_call_hook`, so a hook that raises cannot touch the run:
+        # reporting must never cost a frame.
         self.on_frame = on_frame
         self.on_end = on_end
 
@@ -1007,11 +1009,12 @@ class PhotometryDashboard:
         self.assembler.reset()
         self.phase = "cancelled"
         self._push_runs()
-        # The Stop button's cancel is bare; the front end's own error paths
-        # (a kernel `error` reply, a file that would not read, a watchdog
-        # timeout) send one with a `reason`. The run panel reads the same
-        # either way, but a tester report must tell the two apart: a run
-        # that died is "failed", not something the tester stopped.
+        # Every cancel the front end sends today carries a `reason` (a
+        # kernel `error` reply, a file that would not read, a watchdog
+        # timeout): the run died, and a tester report says "failed". A bare
+        # cancel -- none is sent now; there is no Stop button -- would be
+        # the tester's own doing and reads as "cancelled". The run panel
+        # shows "Stopped" either way.
         reason = content.get("reason") if isinstance(content, dict) else None
         self._call_hook(self.on_end, "failed" if reason else "cancelled")
         self._changed()

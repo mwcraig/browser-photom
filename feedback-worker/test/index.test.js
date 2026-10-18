@@ -148,6 +148,16 @@ describe("schema rejections", () => {
     "non-finite stand-in": chunk({ rows: [{ file: "a.fits", status: "ok", fwhm: 1e13 }] }),
     "unknown outcome": chunk({ run: { n_total: 1, n_processed: 1, n_skipped: 0, outcome: "crashed" } }),
     "schema_version 2": chunk({ schema_version: 2 }),
+    // Fifth round: C1 controls (a UTF-8 terminal reads U+009B as CSI, like
+    // ESC), the format characters the first class missed, and a negative
+    // elapsed_s (the dashboard never sends one; the schema now says so).
+    "C1 control in reason": chunk({ rows: [{ file: "a.fits", status: "ok", reason: "\x9b2Jcleared" }] }),
+    "C1 control in file name": chunk({ rows: [{ file: "a\x85.fits", status: "ok" }] }),
+    "soft hyphen hiding www.": chunk({ comment: "see w\u00adww.example.com" }),
+    "Arabic letter mark in comment": chunk({ comment: "a\u061cb" }),
+    "tag character in file name": chunk({ rows: [{ file: "a\u{e0041}.fits", status: "ok" }] }),
+    "noncharacter in reason": chunk({ rows: [{ file: "a.fits", status: "ok", reason: "x\uffffy" }] }),
+    "negative elapsed_s": chunk({ rows: [{ file: "a.fits", status: "ok", elapsed_s: -1 }] }),
   };
   for (const [name, body] of Object.entries(cases)) {
     it(`400 for ${name}`, async () => {
@@ -224,6 +234,23 @@ describe("size cap", () => {
   it("413 through the full worker for an oversized body", async () => {
     const res = await post(" ".repeat(MAX_BODY_BYTES) + "{}");
     expect(res.status).toBe(413);
+  });
+
+  it("400 with CORS headers when the body stream fails mid-read", async () => {
+    // A client that goes away mid-body: the stream errors, and the answer
+    // is a controlled 400 with the CORS headers, not the runtime's 500.
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("{\"schema_version\":1,"));
+        controller.error(new TypeError("network error"));
+      },
+    });
+    const res = await handleReport(new Request(URL_, {
+      method: "POST", headers: { "Content-Type": "text/plain", Origin: ORIGIN }, body, duplex: "half",
+    }), env);
+    expect(res.status).toBe(400);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ORIGIN);
+    expect(await listKeys()).toHaveLength(0);
   });
 
   it("accepts a body of exactly 64 KB", async () => {

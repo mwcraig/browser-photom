@@ -254,7 +254,10 @@ def test_zero_byte_files_get_rows_too(view):
     assert rows[0]["row"]["reason"] == "empty file (0 bytes)"
 
 
-def test_a_cancel_ends_the_report_as_cancelled(view):
+def test_a_bare_cancel_is_the_fallback_outcome_cancelled(view):
+    # No front end sends a bare cancel today (there is no Stop button; every
+    # cancel dropzone.js sends carries a reason and ends as "failed"), so
+    # this is the kernel's fallback for a reasonless one, not a real path.
     fill(view)
     view.report_opt_in.value = True
     manifest(view, "a.fit", "b.fit")
@@ -516,7 +519,7 @@ def test_a_failing_report_end_still_closes_the_pages_report(view):
 def test_the_consent_names_everything_a_chunk_carries(view):
     text = view.report_consent.value
     for phrase in ("observer code", "rounded to the nearest", "names of your image files",
-                   "reason", "header value", "counts and timing", "whether it finished",
+                   "reason", "header value", "counts and timing", "how it ended",
                    "background", "dashboard\n  version", "country", "when the report\n  arrived",
                    "IP address", "30 days"):
         assert phrase in text, phrase
@@ -596,3 +599,63 @@ def test_the_preview_of_a_long_run_is_only_the_first_chunks_rows(view):
     assert len(chunk["rows"]) == ROWS_PER_CHUNK
     assert chunk["final"] is False and chunk["run"]["outcome"] == "running"
     assert chunk["run"]["n_processed"] == ROWS_PER_CHUNK + 1  # the run's latest counters
+
+
+# -- fifth review round --------------------------------------------------------
+
+
+def test_the_preview_never_shows_the_report_id(view):
+    # The id is what lets someone else post chunks under this run's report,
+    # and previews get screenshotted into help requests. The chunk itself
+    # (what tests validate) keeps it; only the rendering masks it.
+    fill(view)
+    view.report_opt_in.value = True
+    view._toggle_preview()
+    before = view.preview_chunk()
+    assert before["report_id"] not in view.report_preview.value
+    assert "not shown" in view.report_preview.value
+    manifest(view, "a.fit")
+    upload(view, "a.fit")
+    sent_id = reports(view)[0]["header"]["report_id"]
+    assert sent_id == before["report_id"]
+    assert sent_id not in view.report_preview.value
+    assert "not shown" in view.report_preview.value
+    assert '"obscode": "LGEB"' in view.report_preview.value   # the rest is there
+
+
+def test_the_preview_of_a_run_that_died_before_any_frame_says_so(view):
+    fill(view)
+    view.report_opt_in.value = True
+    manifest(view, "a.fit", "b.fit")
+    receive(view, {"type": "cancel", "reason": "timeout"})
+    view._toggle_preview()
+    chunk = assert_valid(view.preview_chunk())
+    assert chunk["rows"] == [] and chunk["final"] is True
+    assert chunk["run"]["outcome"] == "failed"
+    assert "ended before any frame" in view.report_preview.value
+    assert "next run" not in view.report_preview.value
+    assert "SITELAT" not in view.report_preview.value      # the pre-run note is not for this
+
+
+def test_the_preview_after_a_guard_closed_report_shows_report_error_not_done(view):
+    fill(view)
+    view.report_opt_in.value = True
+    real_send = view.drop_zone.send
+
+    def send(content, buffers=None):
+        if content.get("type") == "report_row":
+            raise RuntimeError("comm closed")
+        real_send(content, buffers)
+
+    view.drop_zone.send = send
+    manifest(view, "a.fit", "b.fit")
+    upload(view, "a.fit")
+    upload(view, "b.fit")
+    assert view.dashboard.phase == "done"
+    assert [c.get("outcome") for c in reports(view) if c["type"] == "report_end"] == ["report_error"]
+    chunk = assert_valid(view.preview_chunk())
+    assert chunk["final"] is True and chunk["run"]["outcome"] == "report_error"
+    # The next run starts clean.
+    view.drop_zone.send = real_send
+    manifest(view, "c.fit")
+    assert view.preview_chunk()["run"]["outcome"] == "running"

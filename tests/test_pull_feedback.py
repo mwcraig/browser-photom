@@ -282,8 +282,14 @@ def test_wrong_type_rows_and_run_are_flagged_not_fatal(pf, validator):
     merged = pf.merge_report(RID, items, validator)
     assert [c["seq"] for c in merged["invalid_chunks"]] == [1]
     assert merged["n_rows"] == 1
-    assert merged["run"] == "done"
-    assert "outcome=None" in pf.summary_line(merged)
+    # The header comes from the last chunk that carries a well-formed one,
+    # so the flagged chunk's bare-string run does not replace chunk 0's.
+    assert merged["run"] == {"n_total": 3, "n_processed": 1, "n_skipped": 0, "outcome": "running"}
+    assert "outcome=running" in pf.summary_line(merged)
+    # With nothing better, the odd value is kept and the summary copes.
+    alone = pf.merge_report(RID, items[1:], validator)
+    assert alone["run"] == "done"
+    assert "outcome=None" in pf.summary_line(alone)
 
 
 def test_unknown_then_known_header_fields_are_not_conflicts(pf, validator):
@@ -454,14 +460,16 @@ def test_the_header_comes_from_the_last_readable_chunk(pf, validator):
 
 
 def test_objects_the_lifecycle_rule_should_have_removed_are_reported(pf, tmp_path, capsys, monkeypatch):
-    from datetime import date
+    from datetime import datetime
 
-    class FixedDate(date):
+    class FixedDatetime(datetime):
         @classmethod
-        def today(cls):
-            return cls(2026, 12, 15)
+        def now(cls, tz=None):
+            # The key's day is UTC, so the comparison date is UTC too.
+            assert tz is not None
+            return cls(2026, 12, 15, 1, 0, tzinfo=tz)
 
-    monkeypatch.setattr(pf, "date", FixedDate)
+    monkeypatch.setattr(pf, "datetime", FixedDatetime)
     keys = [key(0, "2026-11-13"), key(0, "2026-11-14"), key(0, "2026-12-14", "b" * 32)]
     # 31 days back is allowed (the rule runs daily); 32 is not.
     assert pf.stale_keys(keys) == [key(0, "2026-11-13")]
@@ -476,3 +484,129 @@ def test_the_failed_outcome_is_in_the_schema(validator):
     assert list(validator.iter_errors(
         chunk(0, [], final=True, run={"n_total": 1, "n_processed": 0, "n_skipped": 0,
                                        "outcome": "failed"}))) == []
+
+
+# -- fifth review round --------------------------------------------------------
+
+
+def test_csv_escapes_characters_a_terminal_would_act_on(pf, tmp_path):
+    # Rows a chunk stored under an older schema could hold: a C1 CSI that
+    # clears an xterm screen, a bidi override, a tag character (invisible
+    # ASCII), a soft hyphen hiding "www.". None reach the CSV raw, and the
+    # formula guard still applies to the escaped string.
+    rows = [{"seq": 0, "file": "\x9b2J\x9bHcleared.fits", "status": "ok",
+             "reason": "w\u00adww.evil \u202eabc \U000e0041"},
+            {"seq": 1, "file": "\t=HYPERLINK(\"x\")", "status": "ok", "reason": "fine"}]
+    path = tmp_path / "r.csv"
+    pf.write_csv(rows, path)
+    text = path.read_text(encoding="utf-8")
+    assert "\x9b" not in text and "\u202e" not in text and "\U000e0041" not in text
+    with open(path, newline="", encoding="utf-8") as fh:
+        got = list(csv.DictReader(fh))
+    assert got[0]["file"] == "\\u009b2J\\u009bHcleared.fits"
+    assert got[0]["reason"] == "w\\u00adww.evil \\u202eabc \\U000e0041"
+    # The tab is escaped, which also means it no longer counts as a formula
+    # prefix: "\u0009=..." is text to a spreadsheet.
+    assert got[1]["file"] == "\\u0009=HYPERLINK(\"x\")"
+    assert pf.csv_cell("ünïcödé ✓ 😀 中文") == "ünïcödé ✓ 😀 中文"   # printable stays
+
+
+def test_csv_column_names_from_a_flagged_chunk_are_neutralised_too(pf, tmp_path):
+    rows = [{"seq": 0, "file": "a.fits", "status": "ok", "=HYPERLINK(\"x\")": 1, "a\x1bb": 2}]
+    path = tmp_path / "r.csv"
+    pf.write_csv(rows, path)
+    with open(path, newline="", encoding="utf-8") as fh:
+        header = next(csv.reader(fh))
+    assert "'=HYPERLINK(\"x\")" in header and "a\\u001bb" in header
+    assert "=HYPERLINK(\"x\")" not in header
+
+
+def test_the_missing_seq_list_in_a_summary_is_capped(pf, validator):
+    merged = pf.merge_report(RID, [(key(999), stored(chunk(999, [ROW_OK], final=True)))], validator)
+    line = pf.summary_line(merged)
+    assert "missing seq 0,1,2,3,4 +994 more" in line
+    assert len(line) < 300
+    short = pf.merge_report(RID, [(key(0), stored(chunk(0, [ROW_OK]))),
+                                  (key(3), stored(chunk(3, [], final=True)))], validator)
+    assert "missing seq 1,2]" in pf.summary_line(short)
+
+
+def test_duplicate_copies_with_different_bodies_are_flagged_loudly(pf, validator):
+    # A retry that landed after UTC midnight is byte-identical: a quiet
+    # "dup/unreadable". Two different bodies for one seq are someone else
+    # posting under the report_id, or tampering: DUP-DIFFERS.
+    same = [(key(0), stored(chunk(0, [ROW_OK]))),
+            (key(0, "2026-11-06"), stored(chunk(0, [ROW_OK]), received_at="2026-11-06T00:00:01Z")),
+            (key(1, "2026-11-06"), stored(chunk(1, [], final=True)))]
+    merged = pf.merge_report(RID, same, validator)
+    assert merged["duplicate_keys"] == [key(0, "2026-11-06")]
+    assert merged["differing_duplicates"] == []
+    assert "DUP-DIFFERS" not in pf.summary_line(merged)
+    forged = [(key(0), stored(chunk(0, [ROW_OK]))),
+              (key(0, "2026-11-06"), stored(chunk(0, [ROW_SKIP], comment="garbage"),
+                                           received_at="2026-11-06T00:00:01Z"))]
+    merged = pf.merge_report(RID, forged, validator)
+    assert merged["differing_duplicates"] == [key(0, "2026-11-06")]
+    assert "DUP-DIFFERS" in pf.summary_line(merged)
+    assert merged["comment"] == ""          # the earliest copy is the one kept
+
+
+def test_the_header_is_not_taken_from_a_chunk_without_one(pf, validator):
+    items = [(key(0), stored(chunk(0, [ROW_OK], comment="kept"))),
+             (key(1), stored({"seq": 1, "rows": []}))]
+    merged = pf.merge_report(RID, items, validator)
+    assert merged["obscode"] == "CMW" and merged["comment"] == "kept"
+    assert merged["run"]["n_total"] == 3
+    assert [c["seq"] for c in merged["invalid_chunks"]] == [1]
+
+
+def test_a_flood_stops_the_pull_before_anything_is_fetched(pf, tmp_path):
+    objects = {key(0, rid=f"{i:032x}"): b"{}" for i in range(6)}
+    objects[key(1, "2026-11-06", rid=f"{0:032x}")] = b"{}"
+    client = FakeS3(objects)
+    with pytest.raises(SystemExit) as info:
+        pf.download(client, "bkt", tmp_path, max_objects=5)
+    message = str(info.value)
+    assert "7 objects" in message and "--report-id" in message
+    assert "2026-11-05: 6" in message and "2026-11-06: 1" in message
+    assert client.gets == [] and not list(tmp_path.rglob("*.json"))
+    # 0 lifts the limit; the default is generous for testers, tight for a flood.
+    assert pf.download(client, "bkt", tmp_path, max_objects=0) == (7, 7, 0)
+    assert pf.MAX_OBJECTS >= 10_000
+
+
+def test_report_ids_select_known_runs_out_of_a_flooded_bucket(pf, tmp_path):
+    mine, junk = "a" * 32, "b" * 32
+    objects = {key(0, rid=mine): json.dumps(stored(chunk(0, [ROW_OK], report_id=mine))).encode(),
+               key(1, "2026-11-06", rid=mine): json.dumps(
+                   stored(chunk(1, [], final=True, report_id=mine))).encode(),
+               key(0, rid=junk): json.dumps(stored(chunk(0, [ROW_SKIP], report_id=junk))).encode()}
+    client = FakeS3(objects)
+    # The id filter applies before the cap: 3 listed, 2 selected, cap 2.
+    assert pf.download(client, "bkt", tmp_path / "raw", report_ids=[mine], max_objects=2) == (2, 2, 0)
+    assert sorted(client.gets) == sorted([key(0, rid=mine), key(1, "2026-11-06", rid=mine)])
+    # Mirror the junk too, then check the merge side filters as well.
+    pf.download(client, "bkt", tmp_path / "raw")
+    merged = pf.merge_all(tmp_path / "raw", tmp_path, report_ids=[mine])
+    assert [m["report_id"] for m in merged] == [mine]
+    assert not (tmp_path / f"{junk}.json").exists()
+    with pytest.raises(SystemExit):
+        pf.main(["bkt", "--offline", "--out", str(tmp_path), "--report-id", "not-hex"])
+
+
+def test_a_negative_elapsed_s_is_refused_by_the_schema(validator):
+    bad = chunk(0, [{**ROW_OK, "elapsed_s": -1e12}])
+    assert any(list(e.path) == ["rows", 0, "elapsed_s"] for e in validator.iter_errors(bad))
+    assert list(validator.iter_errors(chunk(0, [{**ROW_OK, "elapsed_s": 0}]))) == []
+
+
+@pytest.mark.parametrize("field, text", [
+    ("comment", "cleared\x9b2J"),                 # C1 control
+    ("comment", "see w\u00adww.example.com"),     # soft hyphen hiding www.
+    ("reason", "x\u061cy"),                       # Arabic letter mark
+    ("file", "a\U000e0041.fits"),                 # tag character
+    ("file", "a\uffff.fits"),                     # noncharacter
+])
+def test_the_schema_refuses_c1_and_the_remaining_invisible_characters(validator, field, text):
+    bad = chunk(0, [{**ROW_OK, field: text}]) if field != "comment" else chunk(0, [ROW_OK], comment=text)
+    assert list(validator.iter_errors(bad)) != []

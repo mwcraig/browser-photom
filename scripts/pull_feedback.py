@@ -49,7 +49,7 @@ import os
 import re
 import sys
 from collections import Counter
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -143,6 +143,7 @@ def merge_report(report_id, stored, validator=None):
     """
     by_seq = {}
     duplicates = []
+    differing = []
     unreadable = []
 
     def rank(key_record):
@@ -166,6 +167,10 @@ def merge_report(report_id, stored, validator=None):
             keep, drop = sorted([by_seq[seq], (key, record)], key=rank)
             by_seq[seq] = keep
             duplicates.append(drop[0])
+            kept_report, dropped_report = keep[1].get("report"), drop[1].get("report")
+            if (isinstance(kept_report, dict) and isinstance(dropped_report, dict)
+                    and kept_report != dropped_report):
+                differing.append(drop[0])
         else:
             by_seq[seq] = (key, record)
 
@@ -188,9 +193,12 @@ def merge_report(report_id, stored, validator=None):
         for row in chunk_rows if isinstance(chunk_rows, list) else []:
             rows.append({"seq": seq, **row} if isinstance(row, dict) else {"seq": seq})
 
-    # Header fields from the highest-seq chunk that could be read: an
-    # unreadable final chunk must not blank out what the earlier ones say.
-    latest = next((r for r in reversed(reports) if r), {})
+    # Header fields from the highest-seq chunk that carries a header: an
+    # unreadable final chunk, or a flagged one that is just {"seq": 3,
+    # "rows": []}, must not blank out what the earlier ones say.
+    latest = next((r for r in reversed(reports)
+                   if r.get("report_id") and isinstance(r.get("run"), dict)),
+                  next((r for r in reversed(reports) if r), {}))
     conflicts = [f for f in STABLE_FIELDS if _header_values(reports, f) > 1]
     received = sorted(str(rec.get("received_at")) for _, rec in chunks
                       if rec.get("received_at"))
@@ -210,6 +218,7 @@ def merge_report(report_id, stored, validator=None):
         "seqs": seqs,
         "missing_seqs": missing,
         "duplicate_keys": sorted(duplicates),
+        "differing_duplicates": sorted(differing),
         "unreadable_keys": sorted(unreadable),
         "header_conflicts": conflicts,
         "invalid_chunks": invalid,
@@ -230,17 +239,30 @@ def csv_columns(rows, schema=None):
     return known + extra
 
 
+def _escape_char(ch):
+    code = ord(ch)
+    return f"\\u{code:04x}" if code < 0x10000 else f"\\U{code:08x}"
+
+
 def csv_cell(value):
-    """A value as it goes in the CSV: None blank, numbers as they are, and a
-    string that a spreadsheet would read as a formula (leading ``=``, ``+``,
-    ``-``, ``@``, tab or CR, after any whitespace) prefixed with ``'`` so it
-    stays text. The strings come from an open endpoint; the schema bounds
-    them but does not stop ``=HYPERLINK(...)`` as a file name or reason. The
-    merged JSON keeps the original."""
+    """A value as it goes in the CSV: None blank, numbers as they are, and
+    a string made safe to open or ``cat``: any character that is not
+    printable (a control or escape-sequence byte, a zero-width or bidi
+    format character, a tag character) is written as its ``\\uXXXX`` escape,
+    and a string a spreadsheet would read as a formula (leading ``=``,
+    ``+``, ``-``, ``@``, tab or CR, after any whitespace) is prefixed with
+    ``'`` so it stays text. The strings come from an open endpoint; the
+    schema bounds them (and refuses those characters, for a chunk the
+    current worker accepted) but does not stop ``=HYPERLINK(...)`` as a
+    file name or reason, and a chunk stored under an older schema may hold
+    anything. The merged JSON keeps the original, ASCII-escaped."""
     if value is None:
         return ""
-    if isinstance(value, str) and value.lstrip()[:1] in ("=", "+", "-", "@", "\t", "\r"):
-        return "'" + value
+    if isinstance(value, str):
+        if not value.isprintable():
+            value = "".join(ch if ch.isprintable() else _escape_char(ch) for ch in value)
+        if value.lstrip()[:1] in ("=", "+", "-", "@"):
+            return "'" + value
     return value
 
 
@@ -251,7 +273,9 @@ def write_csv(rows, path, schema=None):
     # refused them) is written escaped rather than raising mid-pull.
     with open(path, "w", newline="", encoding="utf-8", errors="backslashreplace") as fh:
         writer = csv.DictWriter(fh, fieldnames=columns, restval="")
-        writer.writeheader()
+        # The column names too: the extra ones come from a flagged chunk's
+        # row keys, so they are as untrusted as any cell.
+        writer.writerow({c: csv_cell(c) for c in columns})
         for row in rows:
             writer.writerow({k: csv_cell(v) for k, v in row.items()})
 
@@ -262,6 +286,13 @@ def status_tally(rows):
     return " ".join(f"{s}={n}" for s, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
+def _seq_list(seqs, show=5):
+    """``"0,1,2,3,4 +994 more"``: a client can make the gap list 999 long
+    with one chunk at seq 999, and the line must stay a line."""
+    text = ",".join(map(str, seqs[:show]))
+    return text if len(seqs) <= show else f"{text} +{len(seqs) - show} more"
+
+
 def summary_line(merged):
     flags = []
     if merged["invalid_chunks"]:
@@ -269,9 +300,15 @@ def summary_line(merged):
     if not merged["final_received"]:
         flags.append("no-final")
     if merged["missing_seqs"]:
-        flags.append(f"missing seq {','.join(map(str, merged['missing_seqs']))}")
+        flags.append(f"missing seq {_seq_list(merged['missing_seqs'])}")
     if merged["header_conflicts"]:
         flags.append(f"conflict {','.join(merged['header_conflicts'])}")
+    if merged.get("differing_duplicates"):
+        # Two stored copies of one seq with different bodies: the dashboard
+        # never does that (its retries are byte-identical), so either the
+        # tester's page and someone who learned the report_id both posted,
+        # or a chunk was tampered with. Trust nothing in this report.
+        flags.append("DUP-DIFFERS")
     if merged["duplicate_keys"] or merged["unreadable_keys"]:
         flags.append("dup/unreadable")
     if merged.get("final_seqs") and merged["final_seqs"] != merged["seqs"][-1:]:
@@ -315,19 +352,22 @@ def select_keys(keys, since=None):
 
 def stale_keys(keys, today=None, retention_days=RETENTION_DAYS):
     """Keys whose day is more than ``retention_days`` + 1 days ago -- objects
-    the bucket's lifecycle rule should have deleted by now."""
-    today = date.today() if today is None else today
+    the bucket's lifecycle rule should have deleted by now. The key's day is
+    the worker's UTC date, so ``today`` is UTC too (a local date east of
+    UTC could flag an object still inside R2's day of lifecycle lag), and
+    the extra day is that lag."""
+    today = datetime.now(timezone.utc).date() if today is None else today
     cutoff = (today - timedelta(days=retention_days + 1)).isoformat()
     return [k for k in keys_since(keys) if parse_key(k)[0] < cutoff]
 
 
-def load_raw(raw_dir, since=None):
+def load_raw(raw_dir, since=None, report_ids=None):
     """``{report_id: [(key, record), ...]}`` from a mirrored ``raw/`` tree.
 
     ``since`` selects whole reports, not chunks: a report is in if any of
     its chunks arrived on or after that day, and then all of its chunks
     are, so a run that crossed UTC midnight is not cut in two (`download`
-    mirrors from the day before for the same reason).
+    selects by the same rule). ``report_ids`` narrows to those reports.
 
     A file that is not JSON is kept as ``{"unparseable": <error>}`` so the
     merge flags it instead of the script stopping.
@@ -348,17 +388,19 @@ def load_raw(raw_dir, since=None):
     if since is not None:
         grouped = {rid: items for rid, items in grouped.items()
                    if keys_since([k for k, _ in items], since)}
+    if report_ids is not None:
+        grouped = {rid: items for rid, items in grouped.items() if rid in set(report_ids)}
     return grouped
 
 
-def merge_all(raw_dir, out_dir, since=None, schema=None):
+def merge_all(raw_dir, out_dir, since=None, schema=None, report_ids=None):
     """Merge every report under ``raw_dir`` into ``out_dir``; return the merged docs."""
     schema = load_schema() if schema is None else schema
     validator = make_validator(schema)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     merged_docs = []
-    for report_id, stored in sorted(load_raw(raw_dir, since).items()):
+    for report_id, stored in sorted(load_raw(raw_dir, since, report_ids).items()):
         try:
             merged = merge_report(report_id, stored, validator)
             (out_dir / f"{report_id}.json").write_text(json.dumps(merged, indent=1) + "\n")
@@ -376,7 +418,8 @@ def failed_merge(report_id, stored, exc):
     return {
         "report_id": report_id, "obscode": None, "comment": None, "run": None,
         "n_rows": 0, "rows": [], "seqs": [], "missing_seqs": [], "final_seqs": [],
-        "final_received": False, "duplicate_keys": [], "unreadable_keys": [],
+        "final_received": False, "duplicate_keys": [], "differing_duplicates": [],
+        "unreadable_keys": [],
         "header_conflicts": [], "invalid_chunks": [],
         "first_received_at": None, "last_received_at": None, "countries": [],
         "keys": sorted(k for k, _ in stored),
@@ -409,7 +452,15 @@ def r2_client(environ=None):
     )
 
 
-def download(client, bucket, raw_dir, since=None):
+# More objects than this selected for one pull is not testers, it is a
+# flood (a tester's 350-frame run is ~15 objects; 60 a minute from one
+# address for a day is 86,400), and mirroring it would fill the disk and
+# the merge would write two files per fake report. --max-objects changes
+# it; 0 lifts it.
+MAX_OBJECTS = 20_000
+
+
+def download(client, bucket, raw_dir, since=None, report_ids=None, max_objects=MAX_OBJECTS):
     """Mirror report objects into ``raw_dir``; return (n selected, n fetched,
     n failed).
 
@@ -417,8 +468,11 @@ def download(client, bucket, raw_dir, since=None):
     request per thousand), then with ``since`` only the objects of reports
     that have a chunk on or after that day are fetched -- all of their
     objects, so a run that crossed UTC midnight or sat suspended for days
-    comes whole, and `load_raw` selects by the same rule. Each file is
-    written whole or not at all (to a ``.part`` name, then renamed), so an
+    comes whole, and `load_raw` selects by the same rule. ``report_ids``
+    narrows the selection to those reports (the way to pull known testers'
+    runs out of a flooded bucket). More than ``max_objects`` selected
+    raises SystemExit before anything is fetched. Each file is written
+    whole or not at all (to a ``.part`` name, then renamed), so an
     interrupted pull never leaves a truncated file that the next pull would
     skip as "already here". A get that fails (an object the lifecycle rule
     deleted between the list and the get, a 5xx boto gave up on) is
@@ -438,6 +492,18 @@ def download(client, bucket, raw_dir, since=None):
               "rule is missing or not working (docs/feedback-deploy.md step 3)",
               file=sys.stderr)
     keys = select_keys(listed, since)
+    if report_ids is not None:
+        wanted = set(report_ids)
+        keys = [k for k in keys if parse_key(k)[1] in wanted]
+    if max_objects and len(keys) > max_objects:
+        by_day = Counter(parse_key(k)[0] for k in keys)
+        days = ", ".join(f"{d}: {n}" for d, n in sorted(by_day.items()))
+        raise SystemExit(
+            f"{len(keys)} objects selected in {bucket}, more than --max-objects "
+            f"{max_objects}; that is a flood, not testers (per day: {days}). "
+            "Pull known runs with --report-id, raise --max-objects, or see "
+            "docs/feedback-deploy.md section 10 for purging the bucket."
+        )
     fetched = failed = 0
     for key in keys:
         dest = raw_dir / key
@@ -466,20 +532,29 @@ def main(argv=None):
                         help="local directory (default: ./feedback-reports)")
     parser.add_argument("--offline", action="store_true",
                         help="do not contact R2; re-merge <out>/raw only")
+    parser.add_argument("--report-id", action="append", metavar="HEX32", dest="report_ids",
+                        help="only this report (repeatable); the way to pull known "
+                             "testers' runs out of a flooded bucket")
+    parser.add_argument("--max-objects", type=int, default=MAX_OBJECTS, metavar="N",
+                        help=f"refuse to mirror more than N objects (default {MAX_OBJECTS}; "
+                             "0 = no limit)")
     args = parser.parse_args(argv)
     if args.since:
         try:
             date.fromisoformat(args.since)
         except ValueError:
             parser.error("--since must be a real YYYY-MM-DD date")
+    if args.report_ids and not all(re.fullmatch(r"[0-9a-f]{32}", r) for r in args.report_ids):
+        parser.error("--report-id must be 32 lowercase hex characters")
 
     raw_dir = args.out / "raw"
     if not args.offline:
-        n_listed, n_fetched, n_failed = download(r2_client(), args.bucket, raw_dir, args.since)
+        n_listed, n_fetched, n_failed = download(
+            r2_client(), args.bucket, raw_dir, args.since, args.report_ids, args.max_objects)
         print(f"{n_listed} objects in {args.bucket}"
               f"{' since ' + args.since if args.since else ''}; fetched {n_fetched} new"
               + (f"; {n_failed} could not be fetched" if n_failed else ""))
-    merged = merge_all(raw_dir, args.out, args.since)
+    merged = merge_all(raw_dir, args.out, args.since, report_ids=args.report_ids)
     for doc in merged:
         print(summary_line(doc))
     n_invalid = sum(1 for m in merged if m["invalid_chunks"])

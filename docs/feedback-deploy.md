@@ -304,9 +304,10 @@ Flags in `[...]` mark anything to look at:
   claiming `done` or another end state), `counts-decrease` (`n_processed`
   or `n_skipped` smaller than in an earlier chunk), `rows!=counts` (a whole
   report whose rows do not add up to the final header's processed +
-  skipped; not checked when a seq is missing, the final is not last, or a
-  chunk's rows could not be read, since each of those explains a shortfall
-  and gets its own flag). Each chunk validated on its own at the worker; this is the
+  skipped; a shortfall is not checked when the final is missing or not
+  last, a seq is missing, or a chunk's rows could not be read, since each
+  of those loses rows and gets its own flag; a surplus is always checked,
+  since lost rows never make one). Each chunk validated on its own at the worker; this is the
   cross-chunk check, and the one that catches a copy swapped in under a
   known report_id on the same UTC day, which `DUP-DIFFERS` cannot (see the
   maintainers' section). Like `DUP-DIFFERS`: trust nothing in the report.

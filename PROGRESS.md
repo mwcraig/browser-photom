@@ -1476,11 +1476,28 @@ default run only matches one row per chunk and the "honest" case in the
 final-not-last test was not honest (passed because it asserted another
 flag), fixed; each of the four consistency flags is now exercised alone;
 unreadable and non-list rows are shown not to trip `rows!=counts`; eight
-malformed `run` headers (string, int, list, bool/str/float counts, empty)
+malformed `run` headers (string, int, null, list, bool/str/float counts, empty)
 are shown to flag or skip without raising. Not changed: a single row over
 the body cap is dropped and its empty chunk still consumes a seq, which
 would read as `rows!=counts`; the schema bounds every row field, so no
 real row reaches the cap.
+
+Eighth round (two fresh reviewers on the round-7 diff). No code bug. One
+over-suppression: an unreadable chunk can only lose rows, so it explains a
+shortfall but not a surplus, and `rows!=counts` now still fires when the
+rows exceed the final counts whatever the chunks' state. The test
+fixture's default header was still only consistent for one row in every
+chunk, so `chunk(N, [], final=True)` was inconsistent and the "quiet
+byte-identical retry" case was in fact `INCONSISTENT`; the default now
+counts one row per earlier chunk plus this one's, and the quiet case
+asserts no inconsistencies. The malformed-header test pins the exact flags
+per case (a final with no terminal outcome is `final-not-terminal`, as it
+should be) and that each is `INVALID`. Wording: the burst that could pass
+60 POSTs a minute needs a run doing no work per frame in a visible tab,
+since every row's file is uploaded first and the page filters 0-byte files
+(the kernel's manifest-time rows are for other front ends); a hidden
+350-frame run takes over an hour at background rates, not 20 minutes;
+the worst-case row is ~3 KB, not ~2 KB; §9 says what a surplus does.
 Tests: 461 pytest, 94 node, 69 worker.
 
 Done 2026-10-18: the `FEEDBACK_URL` repository variable is set, the worker

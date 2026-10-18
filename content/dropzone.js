@@ -424,9 +424,12 @@ export const REPORT_HIDDEN_FLUSH_ROWS = 5;
 // the worker's 60-a-minute limit inside a minute and lose rows to 429s.
 // Spaced like this a hidden run sends at most 30 short chunks a minute.
 // The 25-row cap still applies on top and is not spaced, so a run that
-// produces rows faster than 25 a second (a manifest of unreadable files
-// failing in one burst) can still exceed 60 POSTs a minute and lose the
-// overflow to 429s; frames that are actually uploaded never arrive that fast.
+// produces rows faster than 25 a second can still exceed 60 POSTs a minute
+// and lose the overflow to 429s. Every row needs its file uploaded first
+// (the page filters 0-byte files before the manifest goes out), so that
+// takes a run doing no work per frame (the setup-failure latch, tiny
+// unreadable files) in a visible tab; hidden, the throttling keeps even
+// such a run under it.
 export const REPORT_HIDDEN_FLUSH_MIN_MS = 2000;
 
 // The browser's budget for keepalive requests: fetch(keepalive) bodies and
@@ -698,7 +701,7 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
       // The buffer is kept to what one body can carry, so a pagehide flush
       // is a single beacon: beacons and keepalive fetches share one 64 KB
       // in-flight budget per page, and two bodies queued back to back on
-      // pagehide would lose the second. Rows are at most ~2 KB (4-byte
+      // pagehide would lose the second. Rows are at most ~3 KB (4-byte
       // characters throughout) so this only ever triggers on hostile-size
       // input; reportBodies' split stays as the fallback (a header that
       // grew by a long comment between here and the flush).
@@ -716,7 +719,8 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
       // hide() sent what was there when the tab went dark, and this keeps
       // the window after it to a few rows, at most one short chunk every
       // REPORT_HIDDEN_FLUSH_MIN_MS. A 350-frame run hidden throughout at
-      // background frame rates is ~70 POSTs over 20 minutes instead of
+      // background frame rates (12-14 s a frame, over an hour in all) is
+      // ~70 POSTs, one per 5 frames, instead of
       // ~15; one whose frames fail several a second goes out 25 rows at a
       // time, so neither passes the worker's 60-a-minute limit (only a
       // burst above 25 rows a second could, see REPORT_HIDDEN_FLUSH_MIN_MS).

@@ -263,18 +263,19 @@ def _inconsistencies(seqs, reports, final_seqs, missing, n_rows):
             prev = counts
     # One row per frame, and the counters are updated before each header is
     # built, so at the final chunk rows == processed + skipped. Checked only
-    # for a whole report whose every chunk's rows could be read: a gap, a
-    # truncated mirror copy or a flagged chunk with something else under
-    # "rows" explains a shortfall by itself (those are reported in their
-    # own right) and must not read as a substitution.
-    if (final_seqs and final_seqs == seqs[-1:] and not missing and reports
-            and all(isinstance(r.get("rows"), list) for r in reports)):
+    # for a whole report: a gap explains a shortfall by itself. So does a
+    # chunk whose rows could not be read (a truncated mirror copy, or a
+    # flagged chunk with something else under "rows"; the worker's schema
+    # requires a list, so such a chunk is INVALID in its own right), but
+    # only a shortfall: lost rows never make a surplus.
+    if final_seqs and final_seqs == seqs[-1:] and not missing and reports:
         last = reports[-1].get("run")
+        all_read = all(isinstance(r.get("rows"), list) for r in reports)
         if isinstance(last, dict):
             counts = tuple(last.get(f) for f in ("n_processed", "n_skipped"))
-            if (all(isinstance(c, int) and not isinstance(c, bool) for c in counts)
-                    and sum(counts) != n_rows):
-                found.add("rows!=counts")
+            if all(isinstance(c, int) and not isinstance(c, bool) for c in counts):
+                if n_rows > sum(counts) or (all_read and n_rows < sum(counts)):
+                    found.add("rows!=counts")
     return sorted(found)
 
 

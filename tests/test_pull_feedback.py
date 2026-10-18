@@ -33,14 +33,15 @@ def validator(pf):
 
 
 def chunk(seq, rows, *, final=False, comment="", **over):
-    # The default run says seq+1 frames processed, which matches one row
-    # per chunk; a test that asserts on "inconsistencies" with other row
-    # counts passes its own consistent run.
+    # The default run counts one row in every earlier chunk plus this one's,
+    # so a report built from single-row chunks and an empty or single-row
+    # final is consistent; a test with other shapes passes its own run.
     report = {
         "schema_version": 1, "report_id": RID, "seq": seq, "final": final,
         "build": "bandaid-d6ba44a.browser-photom-1854672", "qa_schema": 3,
         "obscode": "CMW", "site_lat": 47, "site_lon": -96, "comment": comment,
-        "run": {"n_total": 3, "n_processed": seq + 1, "n_skipped": 0,
+        "run": {"n_total": 3, "n_processed": seq + (len(rows) if isinstance(rows, list) else 0),
+                "n_skipped": 0,
                 "outcome": "done" if final else "running"},
         "rows": rows,
     }
@@ -549,7 +550,9 @@ def test_duplicate_copies_with_different_bodies_are_flagged_loudly(pf, validator
     merged = pf.merge_report(RID, same, validator)
     assert merged["duplicate_keys"] == [key(0, "2026-11-06")]
     assert merged["differing_duplicates"] == []
+    assert merged["inconsistencies"] == []
     assert "DUP-DIFFERS" not in pf.summary_line(merged)
+    assert "INCONSISTENT" not in pf.summary_line(merged)
     forged = [(key(0), stored(chunk(0, [ROW_OK]))),
               (key(0, "2026-11-06"), stored(chunk(0, [ROW_SKIP], comment="garbage"),
                                            received_at="2026-11-06T00:00:01Z"))]
@@ -716,24 +719,34 @@ def test_a_chunk_whose_rows_could_not_be_read_does_not_read_as_a_substitution(pf
     assert merged["inconsistencies"] == []
     # Same for a flagged chunk with something other than a list under rows.
     items[1] = (key(1), stored(chunk(1, "not rows", run=_run(2))))
-    assert pf.merge_report(RID, items, validator)["inconsistencies"] == []
+    merged = pf.merge_report(RID, items, validator)
+    assert merged["inconsistencies"] == []
+    assert [c["seq"] for c in merged["invalid_chunks"]] == [1]
+    # An unreadable chunk can only lose rows, so a surplus is still flagged.
+    items[0] = (key(0), stored(chunk(0, [ROW_OK] * 5, run=_run(5))))
+    items[1] = (key(1), stored(chunk(1, "not rows", run=_run(5))))
+    items[2] = (key(2), stored(chunk(2, [ROW_OK], final=True, run=_run(5, outcome="done"))))
+    assert pf.merge_report(RID, items, validator)["inconsistencies"] == ["rows!=counts"]
     # The honest counterpart, every row readable and one short, is flagged.
+    items[0] = (key(0), stored(chunk(0, [ROW_OK], run=_run(1))))
     items[1] = (key(1), stored(chunk(1, [], run=_run(2))))
+    items[2] = (key(2), stored(chunk(2, [ROW_OK], final=True, run=_run(3, outcome="done"))))
     assert pf.merge_report(RID, items, validator)["inconsistencies"] == ["rows!=counts"]
 
 
-@pytest.mark.parametrize("run", [
-    "done", 7, None, ["done"],
-    {"n_processed": "2", "n_skipped": None, "outcome": "done"},
-    {"n_processed": True, "n_skipped": False, "outcome": ["done"]},
-    {"n_processed": 2.0, "n_skipped": 0, "outcome": {"a": 1}},
-    {},
+@pytest.mark.parametrize("run, flags", [
+    ("done", []), (7, []), (None, []), (["done"], []),
+    ({"n_processed": "2", "n_skipped": None, "outcome": "done"}, []),
+    # Counts that are not ints skip the count checks; a final whose outcome
+    # is not a terminal one is still a final that is not terminal.
+    ({"n_processed": True, "n_skipped": False, "outcome": ["done"]}, ["final-not-terminal"]),
+    ({"n_processed": 2.0, "n_skipped": 0, "outcome": {"a": 1}}, ["final-not-terminal"]),
+    ({}, ["final-not-terminal"]),
 ], ids=["str", "int", "none", "list", "str-counts", "bool-counts", "float-counts", "empty"])
-def test_malformed_run_headers_are_flagged_or_skipped_never_raised(pf, validator, run):
+def test_malformed_run_headers_are_flagged_or_skipped_never_raised(pf, validator, run, flags):
     items = [(key(0), stored(chunk(0, [ROW_OK]))),
              (key(1), stored(chunk(1, [ROW_OK], final=True, run=run)))]
     merged = pf.merge_report(RID, items, validator)
-    assert isinstance(merged["inconsistencies"], list)
-    assert "rows!=counts" not in merged["inconsistencies"]
-    assert "counts-decrease" not in merged["inconsistencies"]
+    assert merged["inconsistencies"] == flags
+    assert [c["seq"] for c in merged["invalid_chunks"]] == [1]
     assert isinstance(pf.summary_line(merged), str)

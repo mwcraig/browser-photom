@@ -182,7 +182,7 @@ your account. Changing the limit needs a redeploy (`npx wrangler deploy`).
 
 Cloudflare's counters are per data centre and approximate by design. They
 are a brake on a runaway or hostile client, not an exact quota. Rate Limiting
-bindings need Wrangler 4.36 or later. The pinned Wrangler is 4.146.0.
+bindings need Wrangler 4.36 or later. The pinned Wrangler is 4.151.1.
 
 ## 6. Deploy
 
@@ -463,6 +463,12 @@ change:
   rejected by the running worker until it is redeployed. Redeploy before
   the Pages build that ships the matching dashboard, or the first reports
   under the new schema come back `no-final`.
-- Pinned versions (exact, all released at least two weeks before
-  2026-10-16): `@cfworker/json-schema` 4.1.1, `wrangler` 4.146.0, `vitest`
-  4.1.11, `@cloudflare/vitest-pool-workers` 0.22.0.
+- Pinned versions (exact): `@cfworker/json-schema` 4.1.1, `wrangler`
+  4.151.1 (bumped 2026-10-18 for the `sharp`/`undici` advisories in
+  miniflare; dev-only, nothing of it ships in the worker), `vitest` 4.1.11,
+  `@cloudflare/vitest-pool-workers` 0.22.0. `npm audit` still lists those
+  advisories against the pool's own nested `wrangler` and `miniflare`
+  (its latest, 0.23.0, pins wrangler 4.124 and an August miniflare); that
+  clears only when Cloudflare releases a pool built on a fixed miniflare.
+  Never `npm audit fix --force`: it downgrades the pool to a breaking
+  version.

@@ -1523,6 +1523,7 @@ the 30-day deletion promise in the consent text is backed.
 Still owed on the backend: nothing. The worker, bucket, lifecycle rule,
 billing notification and repository variable are all in place; merging
 the PR is what turns reporting on for testers.
-Untested: the `pagehide` beacon path in a real browser. Bump Wrangler past
-4.148 (npm audit, dev-only) once 4.149.0 is two weeks old (after
-2026-10-22).
+Untested: the `pagehide` beacon path in a real browser. Wrangler bumped to
+4.151.1 on 2026-10-18 (the two-week wait was caution, not a requirement);
+the audit's remaining lines are the vitest pool's nested wrangler and
+miniflare, which only a new pool release clears.

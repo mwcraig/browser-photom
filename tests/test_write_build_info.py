@@ -44,6 +44,8 @@ def test_a_good_url_passes_both_checks(wbi):
     "https://user:pw@x.workers.dev/report",                          # userinfo
     "https://x.workers.dev/re port",                                 # whitespace
     "https://x.workers.dev/re\x7fport",                              # control character
+    "https://x.workers.dev/re\x9bport",                              # C1 control (CSI)
+    "https://x.workers.dev/re\x85port",                              # C1 control (NEL)
     "https://x.workers.dev/re\nport",
     "ftp://x.workers.dev/report",
     "x.workers.dev/report",
@@ -52,6 +54,17 @@ def test_everything_the_kernel_would_refuse_fails_the_build(wbi, bad):
     with pytest.raises(ValueError):
         wbi.feedback_url_from_env({wbi.FEEDBACK_URL_ENV: bad})
     assert endpoint_url(bad) == ""
+
+
+@pytest.mark.parametrize("code", list(range(0x20)) + list(range(0x7F, 0xA0)))
+def test_every_control_character_is_refused_by_both_checks(wbi, code):
+    # Copilot (PR #16, 2026-10-18): the kernel's class grew to C1 in the fifth
+    # round and this check did not follow, so a URL with U+009B built fine and
+    # was silently disabled by the kernel. Whole class, both sides.
+    url = f"https://x.workers.dev/re{chr(code)}port"
+    with pytest.raises(ValueError):
+        wbi.feedback_url_from_env({wbi.FEEDBACK_URL_ENV: url})
+    assert endpoint_url(url) == ""
 
 
 def test_localhost_http_is_for_a_developers_machine_only(wbi):

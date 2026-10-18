@@ -1450,7 +1450,12 @@ reporting models on one page is not a supported case); a manifest accepted
 mid-run (only a twice-rendered widget racing the hide) gives a second
 `report_start`, which the page resolves by closing the first report as
 `cancelled`; `no-final` has several causes besides a dead tab, now listed.
-Tests: 381 pytest, 94 node, 69 worker.
+Copilot's pass on 6924242 (16:14Z) found the same hidden-tab rate problem
+(already fixed above) and one real miss: `write_build_info.py`'s control
+class stayed at C0+DEL when the kernel's grew to C1 in the fifth round, so
+a URL with U+009B built fine and was silently disabled by the kernel.
+Aligned, with a parity test over the whole class on both sides.
+Tests: 428 pytest, 94 node, 69 worker.
 
 Done 2026-10-18: the `FEEDBACK_URL` repository variable is set, the worker
 is redeployed (again after e862930, though that commit changed nothing the

@@ -85,7 +85,10 @@ def feedback_url_from_env(environ=None):
     value = environ.get(FEEDBACK_URL_ENV, "").strip()
     if not value:
         return ""
-    if not re.fullmatch(LOCAL_OR_HTTPS_URL, value) or re.search(r"[\x00-\x1f\x7f]", value):
+    # The same control class as feedback_report._CONTROL_RE: C0, DEL and C1
+    # (U+0080-009F; `\S` lets most of C1 through, and a UTF-8 terminal reads
+    # U+009B as an escape introducer).
+    if not re.fullmatch(LOCAL_OR_HTTPS_URL, value) or re.search(r"[\x00-\x1f\x7f-\x9f]", value):
         raise ValueError(
             f"{FEEDBACK_URL_ENV}={value!r} is not an https URL (without "
             "credentials); unset it to build without tester reporting"

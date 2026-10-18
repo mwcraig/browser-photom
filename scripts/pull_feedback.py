@@ -263,8 +263,12 @@ def _inconsistencies(seqs, reports, final_seqs, missing, n_rows):
             prev = counts
     # One row per frame, and the counters are updated before each header is
     # built, so at the final chunk rows == processed + skipped. Checked only
-    # for a whole report: a gap explains a shortfall by itself.
-    if final_seqs and final_seqs == seqs[-1:] and not missing and reports:
+    # for a whole report whose every chunk's rows could be read: a gap, a
+    # truncated mirror copy or a flagged chunk with something else under
+    # "rows" explains a shortfall by itself (those are reported in their
+    # own right) and must not read as a substitution.
+    if (final_seqs and final_seqs == seqs[-1:] and not missing and reports
+            and all(isinstance(r.get("rows"), list) for r in reports)):
         last = reports[-1].get("run")
         if isinstance(last, dict):
             counts = tuple(last.get(f) for f in ("n_processed", "n_skipped"))

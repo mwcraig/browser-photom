@@ -33,6 +33,9 @@ def validator(pf):
 
 
 def chunk(seq, rows, *, final=False, comment="", **over):
+    # The default run says seq+1 frames processed, which matches one row
+    # per chunk; a test that asserts on "inconsistencies" with other row
+    # counts passes its own consistent run.
     report = {
         "schema_version": 1, "report_id": RID, "seq": seq, "final": final,
         "build": "bandaid-d6ba44a.browser-photom-1854672", "qa_schema": 3,
@@ -421,8 +424,12 @@ def test_a_final_chunk_that_is_not_the_last_is_flagged(pf, validator):
     assert merged["final_seqs"] == [0] and merged["final_received"] is True
     assert "final-not-last" in pf.summary_line(merged)
     honest = pf.merge_report(RID, [(key(0), stored(chunk(0, [ROW_OK]))),
-                                   (key(1), stored(chunk(1, [], final=True)))], validator)
+                                   (key(1), stored(chunk(1, [], final=True,
+                                                         run={"n_total": 1, "n_processed": 1,
+                                                              "n_skipped": 0, "outcome": "done"})))],
+                             validator)
     assert "final-not-last" not in pf.summary_line(honest)
+    assert honest["inconsistencies"] == []
 
 
 def test_download_writes_whole_files_and_skips_a_failing_get(pf, tmp_path, capsys):
@@ -673,3 +680,60 @@ def test_the_earliest_received_copy_wins_whatever_the_listing_order(pf, validato
     assert merged["duplicate_keys"] == [key(0, "2026-11-06")]
     assert merged["differing_duplicates"] == [key(0, "2026-11-06")]
     assert "DUP-DIFFERS" in pf.summary_line(merged)
+
+
+def _run(processed, skipped=0, outcome="running"):
+    return {"n_total": 3, "n_processed": processed, "n_skipped": skipped, "outcome": outcome}
+
+
+@pytest.mark.parametrize("items_flag", [
+    ([(0, [ROW_OK], False, _run(1)), (1, [ROW_OK], True, _run(2, outcome="running"))],
+     "final-not-terminal"),
+    ([(0, [ROW_OK], False, _run(1, outcome="done")), (1, [ROW_OK], True, _run(2, outcome="done"))],
+     "terminal-before-final"),
+    ([(0, [ROW_OK], False, _run(1)), (1, [ROW_OK], False, _run(0, 1)),
+      (2, [ROW_OK], True, _run(2, 1, outcome="done"))],
+     "counts-decrease"),
+    ([(0, [ROW_OK], False, _run(1)), (1, [ROW_OK], True, _run(3, outcome="done"))],
+     "rows!=counts"),
+], ids=["final-not-terminal", "terminal-before-final", "counts-decrease", "rows!=counts"])
+def test_each_inconsistency_flag_fires_on_its_own(pf, validator, items_flag):
+    items, flag = items_flag
+    stored_items = [(key(seq), stored(chunk(seq, rows, final=final, run=run)))
+                    for seq, rows, final, run in items]
+    assert pf.merge_report(RID, stored_items, validator)["inconsistencies"] == [flag]
+
+
+def test_a_chunk_whose_rows_could_not_be_read_does_not_read_as_a_substitution(pf, validator):
+    # seq 1 is a truncated mirror file: its key still parses, so it is kept
+    # (and flagged INVALID), but its rows are unknown, not zero.
+    items = [(key(0), stored(chunk(0, [ROW_OK], run=_run(1)))),
+             (key(1), {"received_at": "2026-11-05T03:00:01.000Z", "country": "US"}),
+             (key(2), stored(chunk(2, [ROW_OK], final=True, run=_run(3, outcome="done"))))]
+    merged = pf.merge_report(RID, items, validator)
+    assert merged["seqs"] == [0, 1, 2] and merged["missing_seqs"] == []
+    assert [c["seq"] for c in merged["invalid_chunks"]] == [1]
+    assert merged["inconsistencies"] == []
+    # Same for a flagged chunk with something other than a list under rows.
+    items[1] = (key(1), stored(chunk(1, "not rows", run=_run(2))))
+    assert pf.merge_report(RID, items, validator)["inconsistencies"] == []
+    # The honest counterpart, every row readable and one short, is flagged.
+    items[1] = (key(1), stored(chunk(1, [], run=_run(2))))
+    assert pf.merge_report(RID, items, validator)["inconsistencies"] == ["rows!=counts"]
+
+
+@pytest.mark.parametrize("run", [
+    "done", 7, None, ["done"],
+    {"n_processed": "2", "n_skipped": None, "outcome": "done"},
+    {"n_processed": True, "n_skipped": False, "outcome": ["done"]},
+    {"n_processed": 2.0, "n_skipped": 0, "outcome": {"a": 1}},
+    {},
+], ids=["str", "int", "none", "list", "str-counts", "bool-counts", "float-counts", "empty"])
+def test_malformed_run_headers_are_flagged_or_skipped_never_raised(pf, validator, run):
+    items = [(key(0), stored(chunk(0, [ROW_OK]))),
+             (key(1), stored(chunk(1, [ROW_OK], final=True, run=run)))]
+    merged = pf.merge_report(RID, items, validator)
+    assert isinstance(merged["inconsistencies"], list)
+    assert "rows!=counts" not in merged["inconsistencies"]
+    assert "counts-decrease" not in merged["inconsistencies"]
+    assert isinstance(pf.summary_line(merged), str)

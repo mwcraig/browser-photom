@@ -861,9 +861,10 @@ body those rows could become, a final chunk with the longest outcome), when
 the tab is hidden with rows buffered (a background tab can be frozen or
 discarded with no `pagehide` at all) and every 5 rows, at most once every
 2 s, for as long as it stays hidden, which is the dashboard's normal case
-(the spacing keeps a run whose frames all fail at once, the kind of run a
-report is most wanted from, under the worker's 60-a-minute limit: 30 short
-chunks a minute at most, and the 25-row cap above that), and the final chunk at
+(the spacing keeps a run whose frames fail several a second, the kind of
+run a report is most wanted from, under the worker's 60-a-minute limit: 30
+short chunks a minute at most; the 25-row cap above that is not spaced, so
+only a burst above 25 rows a second could exceed the limit), and the final chunk at
 the run's end (`outcome` `done` or `failed`; `cancelled` is the page
 closing a report itself, see below). A keepalive POST the browser refuses
 is retried without keepalive, and its share of the budget is released

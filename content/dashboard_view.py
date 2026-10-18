@@ -553,8 +553,10 @@ class DashboardView:
         qa = self._pending_qa.pop(name, None)
         if self._run_report_id is not None and self._report_id is None:
             # A reported run whose report the guard has closed: the run goes
-            # on, but the preview shows the run as it was sent, so the rows
-            # after the close stay out of it.
+            # on, but the preview's rows stay as they were sent, so the rows
+            # after the close stay out of it. (Its header is still built live
+            # by _report_header, so its counts keep following the run; the
+            # page's final chunk carries the last header it was sent.)
             return
         row = clean_row(qa, name=name, reason=None if ok else reason, elapsed_s=elapsed)
         if self._report_id is not None:

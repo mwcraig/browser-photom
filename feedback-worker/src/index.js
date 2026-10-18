@@ -168,9 +168,11 @@ export async function handleReport(request, env) {
   // replaced after the fact. The key includes the UTC day, so the pull
   // script sees two copies of one seq, and flags them if they differ, only
   // when the second landed on another day; a second body for the same key
-  // on the same day is answered 204 here and never stored. The pull
-  // script's cross-chunk consistency checks (counters, outcomes, rows vs
-  // counts) are what catch a same-day substitution.
+  // on the same day is answered 204 here and not stored, unless it arrived
+  // inside the head-then-put window above, where the last put lands and the
+  // pull script sees one copy. A same-day substitution shows up, if at all,
+  // through the pull script's cross-chunk consistency checks (counters,
+  // outcomes, rows vs counts): one that keeps them plausible passes.
   // (R2's conditional put, onlyIf: { etagDoesNotMatch: "*" },
   // would close the race window; it is not used until its behaviour on the
   // real service, not just Miniflare, has been checked.)

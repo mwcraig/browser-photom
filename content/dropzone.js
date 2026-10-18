@@ -422,8 +422,11 @@ export const REPORT_HIDDEN_FLUSH_ROWS = 5;
 // at once (a pipeline setup that did not work, a folder bandaid cannot
 // read) arrive several a second, and 5-row chunks at that rate would pass
 // the worker's 60-a-minute limit inside a minute and lose rows to 429s.
-// Spaced like this a hidden run sends at most 30 short chunks a minute;
-// the 25-row cap still applies on top, so a fast run goes out 25 at a time.
+// Spaced like this a hidden run sends at most 30 short chunks a minute.
+// The 25-row cap still applies on top and is not spaced, so a run that
+// produces rows faster than 25 a second (a manifest of unreadable files
+// failing in one burst) can still exceed 60 POSTs a minute and lose the
+// overflow to 429s; frames that are actually uploaded never arrive that fast.
 export const REPORT_HIDDEN_FLUSH_MIN_MS = 2000;
 
 // The browser's budget for keepalive requests: fetch(keepalive) bodies and
@@ -714,8 +717,9 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
       // the window after it to a few rows, at most one short chunk every
       // REPORT_HIDDEN_FLUSH_MIN_MS. A 350-frame run hidden throughout at
       // background frame rates is ~70 POSTs over 20 minutes instead of
-      // ~15; one whose frames fail at once still goes out 25 rows at a
-      // time, so neither passes the worker's 60-a-minute limit.
+      // ~15; one whose frames fail several a second goes out 25 rows at a
+      // time, so neither passes the worker's 60-a-minute limit (only a
+      // burst above 25 rows a second could, see REPORT_HIDDEN_FLUSH_MIN_MS).
       const shortDue = hiddenAt !== null && rows.length >= hiddenFlushRows
         && nowMs - lastFlushMs >= hiddenFlushMinMs;
       if (rows.length >= rowsPerChunk || shortDue) {

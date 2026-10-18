@@ -1455,7 +1455,33 @@ Copilot's pass on 6924242 (16:14Z) found the same hidden-tab rate problem
 class stayed at C0+DEL when the kernel's grew to C1 in the fifth round, so
 a URL with U+009B built fine and was silently disabled by the kernel.
 Aligned, with a parity test over the whole class on both sides.
-Tests: 448 pytest, 94 node, 69 worker.
+
+Seventh round (two fresh reviewers on the diff since 6924242 only). One
+likely bug in the pull script: a kept chunk whose body could not be read (a
+truncated mirror file whose key still parses, or a flagged chunk with
+something other than a list under `rows`) counted as zero rows, so an
+otherwise complete report was flagged `INCONSISTENT rows!=counts`, which
+§9 says to read as a substitution. `rows!=counts` is now checked only when
+every kept chunk's rows were readable; the unreadable chunk already has its
+own `INVALID` flag. Three comments overclaimed and were reworded: the
+hidden-flush spacing bounds the 5-row chunks to 30 a minute but the 25-row
+cap is not spaced, so only a burst above 25 rows a second (a manifest of
+unreadable files failing in one go) could still exceed 60 POSTs a minute;
+the worker's "a same-day second body is never stored" ignored the
+head-then-put window it describes four lines earlier, where the last put
+lands; and the guard-closed preview keeps the rows as sent but builds its
+header live, so its counts keep following the run while the page's final
+chunk carries the last header it was sent. Tests: the `chunk()` fixture's
+default run only matches one row per chunk and the "honest" case in the
+final-not-last test was not honest (passed because it asserted another
+flag), fixed; each of the four consistency flags is now exercised alone;
+unreadable and non-list rows are shown not to trip `rows!=counts`; eight
+malformed `run` headers (string, int, list, bool/str/float counts, empty)
+are shown to flag or skip without raising. Not changed: a single row over
+the body cap is dropped and its empty chunk still consumes a seq, which
+would read as `rows!=counts`; the schema bounds every row field, so no
+real row reaches the cap.
+Tests: 461 pytest, 94 node, 69 worker.
 
 Done 2026-10-18: the `FEEDBACK_URL` repository variable is set, the worker
 is redeployed (again after e862930, though that commit changed nothing the

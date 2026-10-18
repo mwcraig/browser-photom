@@ -304,7 +304,9 @@ Flags in `[...]` mark anything to look at:
   claiming `done` or another end state), `counts-decrease` (`n_processed`
   or `n_skipped` smaller than in an earlier chunk), `rows!=counts` (a whole
   report whose rows do not add up to the final header's processed +
-  skipped). Each chunk validated on its own at the worker; this is the
+  skipped; not checked when a seq is missing, the final is not last, or a
+  chunk's rows could not be read, since each of those explains a shortfall
+  and gets its own flag). Each chunk validated on its own at the worker; this is the
   cross-chunk check, and the one that catches a copy swapped in under a
   known report_id on the same UTC day, which `DUP-DIFFERS` cannot (see the
   maintainers' section). Like `DUP-DIFFERS`: trust nothing in the report.
@@ -433,7 +435,8 @@ change:
   the pull script flags the report `DUP-DIFFERS`. Two copies exist only
   when the second landed under another UTC day's prefix: the key includes
   the day, so a second body for the same key on the same day gets a `204`
-  and is never stored, and the merge never sees it. A same-day substitution
+  and is not stored (except one landing inside the head-then-put window,
+  where the last put wins and the merge sees a single copy). A same-day substitution
   shows up, if at all, through the pull script's cross-chunk consistency
   checks (`INCONSISTENT`, section 9). R2's conditional put
   (`onlyIf: { etagDoesNotMatch: "*" }`) would close the window and save the

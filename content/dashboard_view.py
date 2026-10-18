@@ -426,6 +426,9 @@ class DashboardView:
             # observer code): these rows never went anywhere.
             caption = ("What the first report of the last run would have been "
                        "(nothing was sent):")
+        elif not chunk["rows"] and self._run_outcome == "report_error":
+            caption = ("The only report of this run (reporting stopped before any "
+                       "frame's row was sent; the run itself was unaffected):")
         elif not chunk["rows"] and self._run_outcome is not None:
             caption = "The only report of this run (it ended before any frame ran):"
         else:
@@ -548,14 +551,20 @@ class DashboardView:
 
     def _report_frame_unguarded(self, name, ok, reason, elapsed):
         qa = self._pending_qa.pop(name, None)
+        if self._run_report_id is not None and self._report_id is None:
+            # A reported run whose report the guard has closed: the run goes
+            # on, but the preview shows the run as it was sent, so the rows
+            # after the close stay out of it.
+            return
         row = clean_row(qa, name=name, reason=None if ok else reason, elapsed_s=elapsed)
-        self._report_rows.append(row)
         if self._report_id is not None:
             self._report_send({
                 "type": "report_row",
                 "row": row,
                 "header": self._report_header(self._report_id),
             })
+        # After the send, so a row whose send raised is not previewed as sent.
+        self._report_rows.append(row)
 
     def _report_end(self, _dashboard, outcome):
         # Unless the guard already closed this run's report as report_error:
@@ -643,8 +652,12 @@ class DashboardView:
         # (which the manifest's zero-byte-skip path can produce), silently
         # swallowing the new run's first skip lines.
         self._seen_skips = 0
-        self._processor.reset()
+        # The report's run-scoped reset first: if the processor's reset
+        # raised before it, the run would die (the dashboard replies
+        # `error`) with the previous run's id, rows and status line still
+        # standing in for this one.
         self._report_guard(self._report_start)
+        self._processor.reset()
 
     def _build_processor(self):
         # LazyProcessor's factory: called at most once, on the first dropped

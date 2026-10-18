@@ -165,8 +165,13 @@ export async function handleReport(request, env) {
   // can verify: anyone who learns a run's id (the dashboard does not show
   // it) can post chunks under it, and the worker cannot tell them from the
   // tester's. What it guarantees is only that an existing object is never
-  // replaced after the fact; the pull script flags same-id copies whose
-  // bodies differ. (R2's conditional put, onlyIf: { etagDoesNotMatch: "*" },
+  // replaced after the fact. The key includes the UTC day, so the pull
+  // script sees two copies of one seq, and flags them if they differ, only
+  // when the second landed on another day; a second body for the same key
+  // on the same day is answered 204 here and never stored. The pull
+  // script's cross-chunk consistency checks (counters, outcomes, rows vs
+  // counts) are what catch a same-day substitution.
+  // (R2's conditional put, onlyIf: { etagDoesNotMatch: "*" },
   // would close the race window; it is not used until its behaviour on the
   // real service, not just Miniflare, has been checked.)
   try {

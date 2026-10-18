@@ -720,8 +720,132 @@ def test_the_preview_after_a_guard_closed_report_shows_report_error_not_done(vie
     assert view.dashboard.phase == "done"
     assert [c.get("outcome") for c in reports(view) if c["type"] == "report_end"] == ["report_error"]
     chunk = assert_valid(view.preview_chunk())
+    # No row was ever sent (the first send raised), so none is previewed as
+    # sent, and the caption says why the report is empty.
+    assert chunk["rows"] == []
+    view.report_preview_button.click()
+    assert "reporting stopped" in view.report_preview.value
+    assert "before any frame ran" not in view.report_preview.value
     assert chunk["final"] is True and chunk["run"]["outcome"] == "report_error"
     # The next run starts clean.
     view.drop_zone.send = real_send
     manifest(view, "c.fit")
     assert view.preview_chunk()["run"]["outcome"] == "running"
+
+
+# -- streaming review (PR #16, round 6) ---------------------------------------
+
+
+def test_a_reporting_failure_on_every_frame_is_logged_once(view, monkeypatch):
+    # The earlier "logged once" tests break the first message, after which
+    # nothing can fail again; this breaks every frame's row.
+    import dashboard_view as dv
+    fill(view)
+    view.report_opt_in.value = True
+
+    def broken(*_args, **_kw):
+        raise RuntimeError("row broke")
+
+    monkeypatch.setattr(dv, "clean_row", broken)
+    manifest(view, "a.fit", "b.fit", "c.fit")
+    for name in ("a.fit", "b.fit", "c.fit"):
+        upload(view, name)
+    assert view.dashboard.phase == "done"
+    assert view.dashboard.state.processed == 3
+    assert sum("Tester report stopped" in line for line in view._log) == 1
+    assert [(c["type"], c.get("outcome")) for c in reports(view)] == [
+        ("report_start", None), ("report_end", "report_error")]
+    assert view.preview_chunk()["rows"] == []
+
+
+def test_the_reports_run_state_is_fresh_even_if_the_processor_reset_raises(tmp_path):
+    # Not the `view` fixture: this run dies with an `error` reply on purpose.
+    view = make_view(tmp_path)
+    fill(view)
+    view.report_opt_in.value = True
+    manifest(view, "a.fit")
+    upload(view, "a.fit")
+    status(view, 1, 0)
+    first = view._run_report_id
+    assert "1 report sent" in view.report_status.value
+
+    def boom():
+        raise RuntimeError("reset failed")
+
+    view._processor.reset = boom
+    manifest(view, "b.fit")
+    assert [c["type"] for c in view.sent if c["type"] == "error"]
+    # The new run's report was opened before the reset raised, and nothing
+    # of run 1 stands in for run 2.
+    assert view._run_report_id not in (None, first)
+    assert view.report_status.value == ""
+    assert [c["type"] for c in reports(view)][-1] == "report_start"
+    # The page's cancel (with the error as its reason) closes it as failed.
+    receive(view, {"type": "cancel", "reason": "RuntimeError: reset failed"})
+    assert [(c["type"], c.get("outcome")) for c in reports(view)][-1] == ("report_end", "failed")
+
+
+def test_a_raise_in_push_runs_still_ends_the_report(tmp_path, monkeypatch):
+    # phase -> done, then _push_runs globs the results directory. If that
+    # raised before the end hook, the report stayed open with no report_end.
+    view = make_view(tmp_path)
+    fill(view)
+    view.report_opt_in.value = True
+
+    def boom():
+        raise OSError("glob failed")
+
+    monkeypatch.setattr(view.dashboard, "_push_runs", boom)
+    manifest(view, "a.fit")
+    upload(view, "a.fit")
+    assert view.dashboard.phase == "done"
+    assert [(c["type"], c.get("outcome")) for c in reports(view)] == [
+        ("report_start", None), ("report_row", None), ("report_end", "done")]
+    assert [c["type"] for c in view.sent if c["type"] == "error"]
+
+
+def test_a_whole_runs_chunks_merge_with_no_inconsistencies(view):
+    # End to end: the kernel's rows and headers, chunked the way the page
+    # does it, through the pull script's merge. The cross-chunk checks the
+    # merge makes (counters never decrease, rows == processed + skipped at
+    # the final, "running" until the final) must hold for an honest run.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "pull_feedback", Path(__file__).resolve().parent.parent / "scripts" / "pull_feedback.py")
+    pf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pf)
+
+    fill(view)
+    view.report_opt_in.value = True
+    names = [f"f{i:03d}.fit" for i in range(ROWS_PER_CHUNK + 2)]
+    manifest(view, *names[:-1], folder="night3")
+    # One 0-byte frame too: skipped from the manifest, counted and rowed.
+    receive(view, {"type": "manifest", "folder": "night3",
+                   "files": [{"name": n, "size": 4} for n in names[:-1]]
+                   + [{"name": names[-1], "size": 0}]})
+    for n in names[:-1]:
+        upload(view, n)
+    assert view.dashboard.phase == "done"
+    msgs = reports(view)
+    rows = [(m["row"], m["header"]) for m in msgs if m["type"] == "report_row"]
+    end = [m for m in msgs if m["type"] == "report_end"][-1]
+    assert len(rows) == len(names)
+    # Chunk as the page does: every ROWS_PER_CHUNK rows, header of the newest
+    # row; the final chunk with the end's header and outcome.
+    stored, seq = [], 0
+    for start in range(0, len(rows), ROWS_PER_CHUNK):
+        batch = rows[start:start + ROWS_PER_CHUNK]
+        is_last = start + ROWS_PER_CHUNK >= len(rows)
+        header = end["header"] if is_last else batch[-1][1]
+        chunk = build_chunk(header, [r for r, _ in batch], seq=seq, final=is_last,
+                            outcome=end["outcome"] if is_last else None)
+        key = f"reports/2026-11-05/{header['report_id']}/{seq}.json"
+        stored.append((key, {"received_at": f"2026-11-05T03:00:{seq:02d}.000Z",
+                             "country": "US", "report": json.loads(chunk_json(chunk))}))
+        seq += 1
+    merged = pf.merge_report(stored[0][1]["report"]["report_id"], stored, pf.make_validator())
+    assert merged["inconsistencies"] == []
+    assert merged["invalid_chunks"] == []
+    assert merged["n_rows"] == len(names)
+    assert merged["run"]["n_processed"] + merged["run"]["n_skipped"] == len(names)
+    assert "[" not in pf.summary_line(merged)

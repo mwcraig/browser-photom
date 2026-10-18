@@ -169,9 +169,12 @@ Each IPv4 address, or each IPv6 /64 (an IPv6 host usually has a whole /64
 to pick addresses from, so keying on the full address would make the limit
 void for it), may make 60 POSTs per 60 seconds. Over that, it gets `429`. A
 350-frame run sends about 15 chunks in total, normally over many minutes,
-but a run whose pipeline setup failed sends all 15 within seconds, and a
-tester who drops the folder again right away makes about 30 in a minute. 60
-covers that and several testers behind one shared address (a club
+or about 70 over the same minutes if the tab stays hidden throughout (the
+page flushes every 5 rows while hidden). A run whose pipeline setup failed
+sends its rows within seconds: 15 chunks visible, and hidden at most one
+short chunk every 2 s (the page spaces them; 30 a minute), so a tester who
+drops the folder again right away makes about 30 to 45 in a minute. 60
+covers that and a couple of testers behind one shared address (a club
 observatory, say). The page does not retry a `429`, so a limit that bites
 loses those rows for good; err high. `period` can only be 10 or 60.
 `namespace_id` can be any integer string not used by another limiter in
@@ -268,7 +271,8 @@ has a chunk on or after that day, so a run that straddled UTC midnight
 comes whole. Already-downloaded objects are skipped. A `WARNING` on stderr
 about objects older than 30 days means the lifecycle rule from step 3 is
 not doing its job. More than 20,000 objects selected (`--max-objects`; a
-tester's run is ~15) stops the pull before anything is fetched: that is a
+tester's run is ~15 objects, ~70 if the tab stayed hidden) stops the pull
+before anything is fetched: that is a
 flood, and `--report-id <hex>` (repeatable) pulls the runs you know about
 out of it. It writes
 `feedback-reports/<report_id>.json` and `.csv` and prints one line per
@@ -285,9 +289,25 @@ Flags in `[...]` mark anything to look at:
   the pull script could not read is listed under `unreadable_keys` or
   `invalid_chunks`, and a readable duplicate of the same seq wins over it).
   The chunk is kept, not dropped.
-- `no-final`: the tab died before the last chunk.
+- `no-final`: the last chunk never arrived. Usually the tab was discarded
+  with the run still going (a hidden tab under memory pressure); also a
+  final POST the worker refused (`429` at the rate limit, `503` on storage
+  trouble, `400` from a schema the worker has not been redeployed for), a
+  run past the 999-chunk ceiling, or a final sent without keepalive (the
+  budget was spent) that died with the tab. Look at the status the tester
+  saw before blaming their tab.
 - `final-not-last`: a chunk marked final is not the highest seq, or more
   than one is. The dashboard never does this; a crafted client might.
+- `INCONSISTENT ...`: the chunks contradict each other in a way the
+  dashboard never produces: `final-not-terminal` (a final chunk whose
+  outcome is still `running`), `terminal-before-final` (a non-final chunk
+  claiming `done` or another end state), `counts-decrease` (`n_processed`
+  or `n_skipped` smaller than in an earlier chunk), `rows!=counts` (a whole
+  report whose rows do not add up to the final header's processed +
+  skipped). Each chunk validated on its own at the worker; this is the
+  cross-chunk check, and the one that catches a copy swapped in under a
+  known report_id on the same UTC day, which `DUP-DIFFERS` cannot (see the
+  maintainers' section). Like `DUP-DIFFERS`: trust nothing in the report.
 - `MERGE-ERROR ...`: merging or writing that one report raised. It gets this
   line and no files; every other report still goes through.
 - `missing seq`: a chunk was lost or refused.
@@ -410,8 +430,12 @@ change:
   tell them from the tester's, which is why the dashboard's preview masks
   it. What the worker guarantees is only that an existing object is never
   replaced after the fact; when two copies of one `(report_id, seq)` differ
-  (a copy under another day's prefix), the pull script flags the report
-  `DUP-DIFFERS`. R2's conditional put
+  the pull script flags the report `DUP-DIFFERS`. Two copies exist only
+  when the second landed under another UTC day's prefix: the key includes
+  the day, so a second body for the same key on the same day gets a `204`
+  and is never stored, and the merge never sees it. A same-day substitution
+  shows up, if at all, through the pull script's cross-chunk consistency
+  checks (`INCONSISTENT`, section 9). R2's conditional put
   (`onlyIf: { etagDoesNotMatch: "*" }`) would close the window and save the
   `head`; Miniflare honours it, but check it against the real service
   before switching. A retry that lands after UTC midnight goes under the

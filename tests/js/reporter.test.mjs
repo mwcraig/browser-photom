@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   KEEPALIVE_QUOTA_BYTES,
+  REPORT_HIDDEN_FLUSH_MIN_MS,
   REPORT_HIDDEN_FLUSH_ROWS,
   REPORT_MAX_BYTES,
   REPORT_ROWS_PER_CHUNK,
@@ -390,32 +391,37 @@ test('pagehide into the back/forward cache flushes the buffer and keeps the repo
 test('the buffer is flushed by bytes so a pagehide needs only one beacon', async () => {
   const fetchFn = fakeFetch();
   const beaconFn = fakeBeacon();
-  // One row plus the header is ~400 bytes; two rows would not fit. The cap
-  // is set to exactly what one row costs as the *pagehide* beacon (final,
-  // outcome page_closed, a 10-digit hidden_ms), with no slack, and the tab
-  // is hidden throughout: the early flush must size the buffer the way the
-  // beacon will be built, or the beacon splits in two and the second is lost.
-  const oneRow = JSON.stringify(buildReportChunk(header(), [row(0)], 0, true, 'page_closed', 1_000_000_000));
-  const maxBytes = new TextEncoder().encode(oneRow).length;
+  // Two rows fit the cap as an ordinary non-final chunk but not as the
+  // pagehide beacon (final, outcome page_closed, a 10-digit hidden_ms):
+  // the cap sits between the two sizes. The early flush must size the
+  // buffer the way the beacon will be built, or the beacon splits in two
+  // and the second is lost; sized as the plain chunk, both rows would stay
+  // buffered and this test fails.
+  const bytes = (s) => new TextEncoder().encode(s).length;
+  const two = [row(0), row(1)];
+  const plain = bytes(JSON.stringify(buildReportChunk(header(), two, 0, false, null, null)));
+  const asBeacon = bytes(JSON.stringify(buildReportChunk(header(), two, 0, true, 'page_closed', 1_000_000_000)));
+  assert.ok(plain < asBeacon);
+  const maxBytes = asBeacon - 1;
   const r = makeReporter({ fetchFn, beaconFn, maxBytes });
   r.start(URL, header(), 0, true);
   r.row(row(0), header(), 0);
   await settle();
   assert.equal(fetchFn.calls.length, 0);          // fits: nothing sent yet
-  r.row(row(1), header(), 0);                     // would not fit: row 0 goes first
-  r.row(row(2), header(), 0);
+  r.row(row(1), header(), 0);                     // fits as a chunk, not as the beacon: row 0 goes first
   await settle();
-  assert.equal(fetchFn.calls.length, 2);
-  assert.deepEqual(fetchFn.calls.map((c) => c.chunk.rows.map((x) => x.file)), [['f0.fit'], ['f1.fit']]);
+  assert.equal(fetchFn.calls.length, 1);
+  assert.deepEqual(fetchFn.calls[0].chunk.rows.map((x) => x.file), ['f0.fit']);
   r.pageClosed(10, false);
   assert.equal(beaconFn.calls.length, 1);
-  assert.deepEqual(beaconFn.calls[0].chunk.rows.map((x) => x.file), ['f2.fit']);
-  assert.equal(beaconFn.calls[0].chunk.seq, 2);
+  assert.deepEqual(beaconFn.calls[0].chunk.rows.map((x) => x.file), ['f1.fit']);
+  assert.ok(beaconFn.calls[0].bytes <= maxBytes);
+  assert.equal(beaconFn.calls[0].chunk.seq, 1);
   assert.equal(beaconFn.calls[0].chunk.run.outcome, 'page_closed');
   assert.equal(beaconFn.calls[0].chunk.run.hidden_ms, 10);
   assert.ok(new TextEncoder().encode(JSON.stringify(beaconFn.calls[0].chunk)).length <= maxBytes);
   await settle();
-  assert.deepEqual(r.counts(), { sent: 3, failed: 0 });
+  assert.deepEqual(r.counts(), { sent: 2, failed: 0 });   // one POST, one beacon
 });
 
 test('hidden time is clamped to the schema maximum', async () => {
@@ -579,7 +585,7 @@ test('a keepalive POST that is refused and retried does not free another POST\'s
 
 test('while the tab is hidden the buffer is flushed every few rows', async () => {
   const fetchFn = fakeFetch();
-  const r = makeReporter({ fetchFn, beaconFn: fakeBeacon(), rowsPerChunk: 25, hiddenFlushRows: 5 });
+  const r = makeReporter({ fetchFn, beaconFn: fakeBeacon(), rowsPerChunk: 25, hiddenFlushRows: 5, hiddenFlushMinMs: 2000 });
   r.start(URL, header(), 0, false);
   for (let i = 0; i < 7; i++) r.row(row(i), null, i);
   await settle();
@@ -587,21 +593,71 @@ test('while the tab is hidden the buffer is flushed every few rows', async () =>
   r.hide(100);                                // the 7 go out now
   await settle();
   assert.equal(fetchFn.calls.length, 1);
-  for (let i = 7; i < 16; i++) r.row(row(i), null, 100 + i);
+  // 9 more rows while hidden, one every half second: a POST at the 5th
+  // (2.5 s after the last flush), 4 still buffered.
+  for (let i = 7; i < 16; i++) r.row(row(i), null, 100 + (i - 6) * 500);
   await settle();
-  // 9 more rows while hidden: a POST at the 5th, 4 still buffered.
   assert.equal(fetchFn.calls.length, 2);
   assert.deepEqual(fetchFn.calls[1].chunk.rows.map((x) => x.file), ['f7.fit', 'f8.fit', 'f9.fit', 'f10.fit', 'f11.fit']);
-  r.show(200);
-  for (let i = 16; i < 30; i++) r.row(row(i), null, 200 + i);
+  r.show(5000);
+  for (let i = 16; i < 30; i++) r.row(row(i), null, 5000 + i);
   await settle();
   // Visible again: back to 25 per POST, so the 4 + 14 = 18 wait.
   assert.equal(fetchFn.calls.length, 2);
-  r.end('done', null, 300);
+  r.end('done', null, 6000);
   await settle();
   assert.equal(fetchFn.calls.length, 3);
   assert.equal(fetchFn.calls[2].chunk.rows.length, 18);
   assert.equal(fetchFn.calls[2].chunk.final, true);
   // The default is a few rows, and never more than a visible chunk.
   assert.ok(REPORT_HIDDEN_FLUSH_ROWS >= 1 && REPORT_HIDDEN_FLUSH_ROWS < REPORT_ROWS_PER_CHUNK);
+});
+
+// -- streaming review (PR #16, round 6) --------------------------------------
+
+test('short hidden flushes are spaced at least 2 s apart, so fast-failing frames cannot trip the rate limit', async () => {
+  assert.equal(REPORT_HIDDEN_FLUSH_MIN_MS, 2000);
+  const fetchFn = fakeFetch();
+  const r = makeReporter({ fetchFn, beaconFn: fakeBeacon(), rowsPerChunk: 25, hiddenFlushRows: 5, hiddenFlushMinMs: 2000 });
+  r.start(URL, header(), 0, true);          // hidden from the start
+  // Ten frames a second: a pipeline setup that failed skips every frame at
+  // once. 5-row chunks at that rate would be 120 POSTs a minute, twice the
+  // worker's limit; spaced 2 s apart it is 30 a minute at most, whatever
+  // the frame rate (one chunk at t=2000 with the 21 rows so far, one at
+  // t=4000 with the next 20), and the 25-row cap still applies above that.
+  for (let i = 0; i < 60; i++) r.row(row(i), null, i * 100);
+  await settle();
+  assert.deepEqual(fetchFn.calls.map((c) => c.chunk.rows.length), [21, 20]);
+  // Back at background frame rates (one every 3.4 s): the 19 buffered rows
+  // plus the next go out as soon as 2 s have passed, then the 5-row
+  // cadence returns (4 more rows: still buffered).
+  for (let i = 60; i < 65; i++) r.row(row(i), null, 6000 + (i - 60) * 3400);
+  await settle();
+  assert.deepEqual(fetchFn.calls.map((c) => c.chunk.rows.length), [21, 20, 20]);
+});
+
+test('a persisted pagehide with nothing buffered sends nothing', async () => {
+  const fetchFn = fakeFetch();
+  const beaconFn = fakeBeacon();
+  const r = makeReporter({ fetchFn, beaconFn });
+  r.start(URL, header(), 0, false);
+  for (let i = 0; i < 3; i++) r.row(row(i), null, 0);
+  r.hide(10);                  // the 3 rows go out as a keepalive POST
+  await settle();
+  assert.equal(fetchFn.calls.length, 1);
+  r.pageClosed(20, true);      // bfcache entry with an empty buffer: no empty chunk
+  r.pageClosed(30, true);
+  assert.equal(beaconFn.calls.length, 0);
+  r.show(40);
+  r.row(row(3), null, 50);
+  r.pageClosed(60, true);      // a row buffered: beaconed as a non-final chunk
+  assert.equal(beaconFn.calls.length, 1);
+  assert.equal(beaconFn.calls[0].chunk.seq, 1);
+  assert.equal(beaconFn.calls[0].chunk.final, false);
+  r.pageClosed(70, false);     // the real close: the final chunk goes even when empty
+  assert.equal(beaconFn.calls.length, 2);
+  assert.equal(beaconFn.calls[1].chunk.seq, 2);
+  assert.equal(beaconFn.calls[1].chunk.final, true);
+  assert.equal(beaconFn.calls[1].chunk.run.outcome, 'page_closed');
+  assert.equal(r.isActive(), false);
 });

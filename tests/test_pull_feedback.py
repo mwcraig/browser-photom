@@ -144,8 +144,9 @@ def test_wrapper_problems(pf, validator):
 def test_summary_line(pf, validator):
     rows = [ROW_OK, ROW_OK, ROW_SKIP]
     comment = "word " * 30 + "\nsecond line"
-    merged = pf.merge_report(RID, [(key(0), stored(chunk(0, rows, final=True, comment=comment)))],
-                             validator)
+    run = {"n_total": 3, "n_processed": 2, "n_skipped": 1, "outcome": "done"}
+    merged = pf.merge_report(RID, [(key(0), stored(chunk(0, rows, final=True, comment=comment,
+                                                          run=run)))], validator)
     line = pf.summary_line(merged)
     assert "\n" not in line
     assert line.startswith("01234567 CMW rows=3 outcome=done ok=2 skipped: NoWCS=1 |")
@@ -610,3 +611,65 @@ def test_a_negative_elapsed_s_is_refused_by_the_schema(validator):
 def test_the_schema_refuses_c1_and_the_remaining_invisible_characters(validator, field, text):
     bad = chunk(0, [{**ROW_OK, field: text}]) if field != "comment" else chunk(0, [ROW_OK], comment=text)
     assert list(validator.iter_errors(bad)) != []
+
+
+# -- streaming review (PR #16, round 6) ---------------------------------------
+
+
+def test_an_honest_report_has_no_inconsistencies(pf, validator):
+    items = [(key(0), stored(chunk(0, [ROW_OK]))),
+             (key(1), stored(chunk(1, [ROW_SKIP], run={"n_total": 3, "n_processed": 1,
+                                                        "n_skipped": 1, "outcome": "running"}))),
+             (key(2), stored(chunk(2, [ROW_OK], final=True,
+                                   run={"n_total": 3, "n_processed": 2, "n_skipped": 1,
+                                        "outcome": "page_closed"})))]
+    merged = pf.merge_report(RID, items, validator)
+    assert merged["inconsistencies"] == []
+    assert "INCONSISTENT" not in pf.summary_line(merged)
+    # A report with a gap is not held to rows == counts: the gap says it all.
+    gappy = pf.merge_report(RID, [items[0], items[2]], validator)
+    assert gappy["inconsistencies"] == []
+    # Nor one still running (no final yet) or with a header-less chunk.
+    running = pf.merge_report(RID, items[:2] + [(key(2), stored({"seq": 2, "rows": []}))], validator)
+    assert running["inconsistencies"] == []
+
+
+def test_chunks_that_contradict_each_other_are_flagged(pf, validator):
+    # The worker checks each chunk alone, so a chunk swapped in under a
+    # known report_id on the same UTC day (which head-then-put cannot see)
+    # or a crafted client shows only across chunks: a final that says
+    # "running", a non-final claiming "done", counters that go backwards,
+    # and a final whose counters do not add up to the rows.
+    items = [(key(0), stored(chunk(0, [ROW_OK, ROW_OK],
+                                   run={"n_total": 3, "n_processed": 2, "n_skipped": 0,
+                                        "outcome": "done"}))),
+             (key(1), stored(chunk(1, [ROW_OK], final=True,
+                                   run={"n_total": 3, "n_processed": 0, "n_skipped": 0,
+                                        "outcome": "running"})))]
+    merged = pf.merge_report(RID, items, validator)
+    assert merged["inconsistencies"] == [
+        "counts-decrease", "final-not-terminal", "rows!=counts", "terminal-before-final"]
+    assert "INCONSISTENT counts-decrease,final-not-terminal" in pf.summary_line(merged)
+    # The quiet substitution: a clean-looking final whose rows do not match.
+    swapped = [(key(0), stored(chunk(0, [ROW_OK]))),
+               (key(1), stored(chunk(1, [], final=True,
+                                     run={"n_total": 3, "n_processed": 3, "n_skipped": 0,
+                                          "outcome": "done"})))]
+    merged = pf.merge_report(RID, swapped, validator)
+    assert merged["inconsistencies"] == ["rows!=counts"]
+    assert pf.failed_merge(RID, swapped, RuntimeError("x"))["inconsistencies"] == []
+
+
+def test_the_earliest_received_copy_wins_whatever_the_listing_order(pf, validator):
+    # Every other duplicate test lists the earlier copy first, which a
+    # "first seen wins" regression would also pass. Here the later copy
+    # (next UTC day, different body) is listed first.
+    later = (key(0, "2026-11-06"), stored(chunk(0, [ROW_SKIP], comment="later"),
+                                         received_at="2026-11-06T00:00:01.000Z"))
+    earlier = (key(0), stored(chunk(0, [ROW_OK], comment="earlier")))
+    merged = pf.merge_report(RID, [later, earlier], validator)
+    assert merged["comment"] == "earlier"
+    assert [r["status"] for r in merged["rows"]] == ["ok"]
+    assert merged["duplicate_keys"] == [key(0, "2026-11-06")]
+    assert merged["differing_duplicates"] == [key(0, "2026-11-06")]
+    assert "DUP-DIFFERS" in pf.summary_line(merged)

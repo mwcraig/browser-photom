@@ -1417,6 +1417,41 @@ reports: none delivered so far, the report server refused them (HTTP
 feedback." in amber; a mixed run reads "2 reports sent; 1 report could not
 be delivered, …". Tests: 374 pytest, 92 node, 69 worker.
 
+Sixth round (three fresh reviewers on the streaming mechanics only: the
+page-side reporter, the worker and merge, the kernel-side producer).
+Nothing high. Fixed: while hidden, the 5-row flushes are now at least 2 s
+apart (`REPORT_HIDDEN_FLUSH_MIN_MS`), because a run whose frames all fail
+at once in a hidden tab sent ~70 POSTs in under a minute and the worker's
+60-a-minute limit would have dropped the rest for good, which was exactly
+the run a report is most wanted from (30 short chunks a minute at most now,
+and the 25-row cap above that; no worker change); a `pagehide` with
+`persisted` and nothing buffered no longer beacons an empty chunk per
+back/forward-cache entry; the merge gains cross-chunk consistency checks
+(`INCONSISTENT final-not-terminal / terminal-before-final /
+counts-decrease / rows!=counts`), which is the only thing that can catch a
+chunk swapped in under a known report_id on the *same* UTC day (the
+worker's head-then-put keeps the first copy of a key and answers 204 to
+the second, so `DUP-DIFFERS` only ever fires across midnight; comment and
+docs corrected); the dashboard calls the end hook before `_push_runs` in
+both `_finish_if_done` and `_on_cancel`, so a raise in the glob cannot
+leave a report open with no `report_end`; the view's run-scoped report
+reset runs before the processor reset; rows after a guard-closed report
+stay out of the preview (its caption now says reporting stopped); the
+`fits()` test now sits the cap between the plain and the beacon size of
+two rows so it fails if the worst-case sizing is lost; the earliest-copy
+rule is pinned with the later copy listed first; the once-per-run log
+latch is exercised with a row that fails every frame; and an end-to-end
+test chunks a real run's rows as the page does and merges them clean.
+Documented, not changed: a Cloudflare-generated refusal (Free-plan lockout,
+error 1101) has no CORS headers, so the page sees a rejected fetch, retries
+once and reports "could not be reached" rather than the status; the
+keepalive budget is tracked per drop-zone model, not per page (two
+reporting models on one page is not a supported case); a manifest accepted
+mid-run (only a twice-rendered widget racing the hide) gives a second
+`report_start`, which the page resolves by closing the first report as
+`cancelled`; `no-final` has several causes besides a dead tab, now listed.
+Tests: 381 pytest, 94 node, 69 worker.
+
 Done 2026-10-18: the `FEEDBACK_URL` repository variable is set, the worker
 is redeployed (again after e862930, though that commit changed nothing the
 worker runs), the account stays on Workers Free for now, the R2 billing

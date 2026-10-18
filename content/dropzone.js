@@ -414,8 +414,17 @@ export function makeTabWatch() {
 export const REPORT_ROWS_PER_CHUNK = 25;
 
 // Rows per POST while the tab is hidden, where the browser may freeze or
-// discard the page with no pagehide and take the buffer with it.
+// discard the page with no pagehide and take the buffer with it (subject to
+// the spacing below).
 export const REPORT_HIDDEN_FLUSH_ROWS = 5;
+
+// Minimum spacing between those short hidden-tab flushes. Frames that fail
+// at once (a pipeline setup that did not work, a folder bandaid cannot
+// read) arrive several a second, and 5-row chunks at that rate would pass
+// the worker's 60-a-minute limit inside a minute and lose rows to 429s.
+// Spaced like this a hidden run sends at most 30 short chunks a minute;
+// the 25-row cap still applies on top, so a fast run goes out 25 at a time.
+export const REPORT_HIDDEN_FLUSH_MIN_MS = 2000;
 
 // The browser's budget for keepalive requests: fetch(keepalive) bodies and
 // sendBeacon payloads in flight at once share 64 KiB per page, and one that
@@ -516,7 +525,7 @@ export function reportBodies(header, rows, seq, final, outcome, hiddenMs, maxByt
  * no answer at all), so the status line can say whether the server is
  * refusing reports or cannot be reached. Nothing here throws.
  */
-export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPORT_ROWS_PER_CHUNK, hiddenFlushRows = REPORT_HIDDEN_FLUSH_ROWS, maxBytes = REPORT_MAX_BYTES, quotaBytes = KEEPALIVE_QUOTA_BYTES } = {}) {
+export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPORT_ROWS_PER_CHUNK, hiddenFlushRows = REPORT_HIDDEN_FLUSH_ROWS, hiddenFlushMinMs = REPORT_HIDDEN_FLUSH_MIN_MS, maxBytes = REPORT_MAX_BYTES, quotaBytes = KEEPALIVE_QUOTA_BYTES } = {}) {
   let url = '';
   let header = null;
   let active = false;
@@ -524,6 +533,7 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
   let seq = 0;
   let hiddenTotal = 0;
   let hiddenAt = null;
+  let lastFlushMs = -Infinity;
   let sent = 0;
   let failed = 0;
   // Which run the counts belong to: a POST settles whenever the network
@@ -623,6 +633,7 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
   function flush(final, outcome, nowMs, viaBeacon) {
     const batch = rows;
     rows = [];
+    if (typeof nowMs === 'number') lastFlushMs = nowMs;
     if (!url || !header) return;
     const bodies = reportBodies(header, batch, seq, final, outcome, hiddenMs(nowMs), maxBytes);
     for (const { seq: s, body } of bodies) {
@@ -668,6 +679,7 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
       seq = 0;
       hiddenTotal = 0;
       hiddenAt = hiddenNow ? nowMs : null;
+      lastFlushMs = typeof nowMs === 'number' ? nowMs : -Infinity;
       // The status line reads "N reports sent" for *this* run (the view
       // clears it at each start), so the counts start over too, and a POST
       // of the previous run still in flight settles into nothing.
@@ -699,11 +711,14 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
       // the background) and the one the browser may freeze or discard
       // without a pagehide, so while hidden the buffer is kept short:
       // hide() sent what was there when the tab went dark, and this keeps
-      // the window after it to a few rows. A 350-frame run hidden
-      // throughout is ~70 POSTs instead of ~15, well inside the worker's
-      // 60-a-minute limit at background frame rates and the seq ceiling.
-      const limit = hiddenAt === null ? rowsPerChunk : Math.min(rowsPerChunk, hiddenFlushRows);
-      if (rows.length >= limit) {
+      // the window after it to a few rows, at most one short chunk every
+      // REPORT_HIDDEN_FLUSH_MIN_MS. A 350-frame run hidden throughout at
+      // background frame rates is ~70 POSTs over 20 minutes instead of
+      // ~15; one whose frames fail at once still goes out 25 rows at a
+      // time, so neither passes the worker's 60-a-minute limit.
+      const shortDue = hiddenAt !== null && rows.length >= hiddenFlushRows
+        && nowMs - lastFlushMs >= hiddenFlushMinMs;
+      if (rows.length >= rowsPerChunk || shortDue) {
         try {
           flush(false, null, nowMs, false);
         } catch (err) {
@@ -727,7 +742,10 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
       // the page is evicted instead, the report simply has no final chunk,
       // which the pull script flags as "no-final".
       if (persisted) {
-        if (!active) return;
+        // Nothing buffered (hide() usually ran first and sent it): no
+        // empty chunk, which would cost a seq, an object and a rate-limit
+        // slot for every back/forward-cache entry.
+        if (!active || rows.length === 0) return;
         try {
           flush(false, null, nowMs, true);
         } catch (err) {

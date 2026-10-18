@@ -955,8 +955,13 @@ class PhotometryDashboard:
     def _finish_if_done(self):
         if self.state.finished and self.phase == "running":
             self.phase = "done"
-            self._push_runs()
+            # The end hook before _push_runs: the hook is fenced, the glob
+            # in _push_runs is not, and a raise there must not leave a
+            # tester report open with no report_end (the page would close
+            # it as `cancelled` at the next drop, a finished run stored
+            # with the wrong outcome).
             self._call_hook(self.on_end, "done")
+            self._push_runs()
             self._send(self.drop_zone, {"type": "run_done"})
 
     def _push_runs(self):
@@ -1008,15 +1013,16 @@ class PhotometryDashboard:
         # frame runs to completion inside its own handler.
         self.assembler.reset()
         self.phase = "cancelled"
-        self._push_runs()
         # Every cancel the front end sends today carries a `reason` (a
         # kernel `error` reply, a file that would not read, a watchdog
         # timeout): the run died, and a tester report says "failed". A bare
         # cancel -- none is sent now; there is no Stop button -- would be
         # the tester's own doing and reads as "cancelled". The run panel
-        # shows "Stopped" either way.
+        # shows "Stopped" either way. The hook goes before _push_runs for
+        # the reason given in _finish_if_done.
         reason = content.get("reason") if isinstance(content, dict) else None
         self._call_hook(self.on_end, "failed" if reason else "cancelled")
+        self._push_runs()
         self._changed()
 
     def _on_hidden_episode(self, content):

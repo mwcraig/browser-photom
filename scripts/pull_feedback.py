@@ -205,6 +205,7 @@ def merge_report(report_id, stored, validator=None):
     countries = sorted({rec.get("country") for _, rec in chunks if rec.get("country")})
     final_seqs = [s for s, r in zip(seqs, reports) if r.get("final") is True]
     missing = sorted(set(range(seqs[-1] + 1)) - set(seqs)) if seqs else []
+    inconsistencies = _inconsistencies(seqs, reports, final_seqs, missing, len(rows))
 
     return {
         "report_id": report_id,
@@ -221,6 +222,7 @@ def merge_report(report_id, stored, validator=None):
         "differing_duplicates": sorted(differing),
         "unreadable_keys": sorted(unreadable),
         "header_conflicts": conflicts,
+        "inconsistencies": inconsistencies,
         "invalid_chunks": invalid,
         "first_received_at": received[0] if received else None,
         "last_received_at": received[-1] if received else None,
@@ -228,6 +230,48 @@ def merge_report(report_id, stored, validator=None):
         "n_rows": len(rows),
         "rows": rows,
     }
+
+
+# The outcomes the page puts on a final chunk; every other chunk says
+# "running" (the kernel's headers always do; the page overrides it only on
+# the final).
+TERMINAL_OUTCOMES = ("done", "cancelled", "failed", "report_error", "page_closed")
+
+
+def _inconsistencies(seqs, reports, final_seqs, missing, n_rows):
+    """What the dashboard's own chunks always satisfy, checked across the
+    whole report. The worker validates each chunk on its own, so a chunk
+    that contradicts the others only shows up here: a crafted client, or a
+    copy swapped in under a known report_id on the same UTC day, which the
+    worker's head-then-put cannot see (it keeps the first copy of a key and
+    answers 204 to the second)."""
+    found = set()
+    prev = None
+    for report in reports:
+        run = report.get("run")
+        if not isinstance(run, dict):
+            continue
+        outcome, final = run.get("outcome"), report.get("final") is True
+        if final and outcome not in TERMINAL_OUTCOMES:
+            found.add("final-not-terminal")
+        if not final and outcome in TERMINAL_OUTCOMES:
+            found.add("terminal-before-final")
+        counts = tuple(run.get(f) for f in ("n_processed", "n_skipped"))
+        if all(isinstance(c, int) and not isinstance(c, bool) for c in counts):
+            if prev is not None and any(c < p for c, p in zip(counts, prev)):
+                found.add("counts-decrease")
+            prev = counts
+    # One row per frame, and the counters are updated before each header is
+    # built, so at the final chunk rows == processed + skipped. Checked only
+    # for a whole report: a gap explains a shortfall by itself.
+    if final_seqs and final_seqs == seqs[-1:] and not missing and reports:
+        last = reports[-1].get("run")
+        if isinstance(last, dict):
+            counts = tuple(last.get(f) for f in ("n_processed", "n_skipped"))
+            if (all(isinstance(c, int) and not isinstance(c, bool) for c in counts)
+                    and sum(counts) != n_rows):
+                found.add("rows!=counts")
+    return sorted(found)
 
 
 def csv_columns(rows, schema=None):
@@ -313,6 +357,10 @@ def summary_line(merged):
         flags.append("dup/unreadable")
     if merged.get("final_seqs") and merged["final_seqs"] != merged["seqs"][-1:]:
         flags.append("final-not-last")
+    if merged.get("inconsistencies"):
+        # The chunks contradict each other in a way the dashboard never
+        # produces (see _inconsistencies). Like DUP-DIFFERS: trust nothing.
+        flags.append("INCONSISTENT " + ",".join(merged["inconsistencies"]))
     if merged.get("merge_error"):
         flags.append(f"MERGE-ERROR {merged['merge_error']}")
     run = merged.get("run")
@@ -420,7 +468,7 @@ def failed_merge(report_id, stored, exc):
         "n_rows": 0, "rows": [], "seqs": [], "missing_seqs": [], "final_seqs": [],
         "final_received": False, "duplicate_keys": [], "differing_duplicates": [],
         "unreadable_keys": [],
-        "header_conflicts": [], "invalid_chunks": [],
+        "header_conflicts": [], "inconsistencies": [], "invalid_chunks": [],
         "first_received_at": None, "last_received_at": None, "countries": [],
         "keys": sorted(k for k, _ in stored),
         "merge_error": f"{type(exc).__name__}: {exc}"[:200],
@@ -453,9 +501,10 @@ def r2_client(environ=None):
 
 
 # More objects than this selected for one pull is not testers, it is a
-# flood (a tester's 350-frame run is ~15 objects; 60 a minute from one
-# address for a day is 86,400), and mirroring it would fill the disk and
-# the merge would write two files per fake report. --max-objects changes
+# flood (a tester's 350-frame run is ~15 objects, ~70 if the tab stayed
+# hidden throughout; 60 a minute from one address for a day is 86,400), and
+# mirroring it would fill the disk and the merge would write two files per
+# fake report. --max-objects changes
 # it; 0 lifts it.
 MAX_OBJECTS = 20_000
 

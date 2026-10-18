@@ -1402,13 +1402,16 @@ purge that works at flood scale; obscode is a claim; free text is
 untrusted input to an LLM; `wrangler logout`; deploy order. Tests: 372
 pytest, 91 node, 69 worker.
 
-Still owed: set the `FEEDBACK_URL` repository variable after merge, and
-redeploy the worker for the new rate limit, the schema (`failed` outcome,
-the extended character class, `elapsed_s >= 0`, no `user_agent`), the IPv6
-keying, the 503/400 paths, `preview_urls = false` and the explicit
-observability setting. Confirm `wrangler r2 bucket lifecycle list` shows
-`expire-30d` on `reports/` before the first tester opts in. Decide Free vs
-Paid (docs/feedback-deploy.md §11) and add the R2 billing notification.
+Done 2026-10-18: the `FEEDBACK_URL` repository variable is set, and
+`wrangler r2 bucket lifecycle list` shows `expire-30d` (enabled, prefix
+`reports/`, expire after 30 days) next to the default 7-day multipart
+abort rule, so the 30-day deletion promise in the consent text is backed.
+
+Still owed: redeploy the worker for the new rate limit, the schema
+(`failed` outcome, the extended character class, `elapsed_s >= 0`, no
+`user_agent`), the IPv6 keying, the 503/400 paths, `preview_urls = false`
+and the explicit observability setting. Decide Free vs Paid
+(docs/feedback-deploy.md §11) and add the R2 billing notification.
 Untested: the `pagehide` beacon path in a real browser. Bump Wrangler past
 4.148 (npm audit, dev-only) once 4.149.0 is two weeks old (after
 2026-10-22).

@@ -508,7 +508,13 @@ export function reportBodies(header, rows, seq, final, outcome, hiddenMs, maxByt
  * - counts(): { sent, failed } POSTs of the current run so far.
  *
  * `fetchFn(url, init)` and `beaconFn(url, body)` are injected; `onStatus`
- * gets the counts after every settled POST. Nothing here throws.
+ * gets `{ sent, failed, report_id, last_http }` after every settled POST:
+ * the counts, the id of the report they belong to (the kernel matches it
+ * against the run it is reporting, since a POST of the previous run can
+ * settle after the next has started), and the HTTP status of the most
+ * recent failed POST the server answered (null when the last failure got
+ * no answer at all), so the status line can say whether the server is
+ * refusing reports or cannot be reached. Nothing here throws.
  */
 export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPORT_ROWS_PER_CHUNK, hiddenFlushRows = REPORT_HIDDEN_FLUSH_ROWS, maxBytes = REPORT_MAX_BYTES, quotaBytes = KEEPALIVE_QUOTA_BYTES } = {}) {
   let url = '';
@@ -522,8 +528,13 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
   let failed = 0;
   // Which run the counts belong to: a POST settles whenever the network
   // lets it, and one from the previous run must not land in this run's
-  // "N reports sent" line.
+  // "N reports sent" line. The report_id goes out with every status so the
+  // kernel can tell as well: it marks the new run before this side has
+  // seen the report_start, and a count landing in that gap is the old
+  // run's.
   let run = 0;
+  let reportId = null;
+  let lastHttp = null;
   // Bytes of keepalive bodies this reporter has in flight, by its own
   // accounting (settled when the response arrives, which for a 204 is when
   // the browser lets the quota go too).
@@ -531,7 +542,7 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
 
   function status() {
     try {
-      if (onStatus) onStatus({ sent, failed });
+      if (onStatus) onStatus({ sent, failed, report_id: reportId, last_http: lastHttp });
     } catch (err) {
       // A status line is not worth an exception.
     }
@@ -543,11 +554,23 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
     return total > 0 ? total : null;
   }
 
-  function settle(ok, ofRun = run) {
+  // `http` is the status of a refused POST (the server answered), or null
+  // when there was no answer: a rejected fetch, a refused beacon, the seq
+  // ceiling.
+  function settle(ok, ofRun = run, http = null) {
     if (ofRun !== run) return;
-    if (ok) sent += 1;
-    else failed += 1;
+    if (ok) {
+      sent += 1;
+    } else {
+      failed += 1;
+      lastHttp = http;
+    }
     status();
+  }
+
+  function httpStatus(resp) {
+    const code = resp && resp.status;
+    return Number.isInteger(code) && code > 0 ? code : null;
   }
 
   function post(body) {
@@ -580,8 +603,11 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
         release();
         return attempt({ ...init, keepalive: false });
       })
-      .then((resp) => { release(); settle(Boolean(resp && resp.ok), ofRun); },
-            () => { release(); settle(false, ofRun); });
+      .then((resp) => {
+        release();
+        const ok = Boolean(resp && resp.ok);
+        settle(ok, ofRun, ok ? null : httpStatus(resp));
+      }, () => { release(); settle(false, ofRun, null); });
   }
 
   function beacon(body) {
@@ -648,6 +674,8 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
       run += 1;
       sent = 0;
       failed = 0;
+      lastHttp = null;
+      reportId = header && typeof header.report_id === 'string' ? header.report_id : null;
     },
     row(row, newHeader, nowMs) {
       if (!active) return;
@@ -762,9 +790,9 @@ function initializeDropZone({ model }) {
   const reporter = makeReporter({
     fetchFn: (url, init) => globalThis.fetch(url, init),
     beaconFn: (url, body) => navigator.sendBeacon(url, body),
-    onStatus: ({ sent, failed }) => {
+    onStatus: ({ sent, failed, report_id, last_http }) => {
       try {
-        model.send({ type: 'report_status', sent, failed });
+        model.send({ type: 'report_status', report_id, sent, failed, last_http });
       } catch (err) {
         // The comm is gone (a crashed kernel); the page still reported.
       }

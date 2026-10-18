@@ -605,15 +605,24 @@ class DashboardView:
                 return
             # The page counts per report, and settles a POST whenever the
             # network does: a count from the last reported run can land
-            # during a run that is not being reported, and must not become
-            # its status line.
-            if self._run_report_id is None:
+            # during a run that is not being reported, or during the next
+            # reported run before the page has seen its report_start (this
+            # side marks the run first). The page echoes the report_id the
+            # counts belong to; only the current run's are shown.
+            if self._run_report_id is None or content.get("report_id") != self._run_report_id:
                 return
             sent, failed = content.get("sent"), content.get("failed")
-            if not all(isinstance(n, int) and not isinstance(n, bool) and n >= 0
-                       for n in (sent, failed)):
+            if not all(_is_count(n) for n in (sent, failed)):
                 return
-            self.report_status.value = _escape(report_status_text(sent, failed))
+            last_http = content.get("last_http")
+            if not _is_count(last_http):
+                last_http = None
+            text = _escape(report_status_text(sent, failed, last_http))
+            if failed:
+                # Amber, so a tester whose reports are being refused sees
+                # it without reading the whole panel.
+                text = f'<span style="color:var(--jp-warn-color0,#9a6700)">{text}</span>'
+            self.report_status.value = text
         except Exception:  # noqa: BLE001 - a status line is not worth a raise
             pass
 
@@ -748,17 +757,33 @@ class DashboardView:
         _show(self.drop_zone, phase != "running")
 
 
-def report_status_text(sent, failed):
-    """The run panel's one-line report status."""
-    parts = []
+def report_status_text(sent, failed, last_http=None):
+    """The run panel's one-line report status.
+
+    `last_http` is the HTTP status of the most recent POST the server
+    refused, or None when the last failure got no answer (network down,
+    endpoint gone). Reports are best effort, so a failure is always paired
+    with the fact that the photometry itself is fine.
+    """
+    if not sent and not failed:
+        return ""
+
+    def n(k):
+        return f"{k} report{'' if k == 1 else 's'}"
+
+    if not failed:
+        return f"Diagnostic reports: {n(sent)} sent."
+    why = (f"the report server refused {'it' if failed == 1 else 'them'} (HTTP {last_http})"
+           if last_http else "the report server could not be reached")
     if sent:
-        parts.append(f"{sent} report{'' if sent == 1 else 's'} sent")
-    if failed:
-        parts.append(
-            f"{failed} report{'' if failed == 1 else 's'} failed to send — "
-            "your run is unaffected"
-        )
-    return ("Diagnostic reports: " + "; ".join(parts) + ".") if parts else ""
+        return (f"Diagnostic reports: {n(sent)} sent; {n(failed)} could not be delivered, "
+                f"{why}. Your photometry is unaffected.")
+    return (f"Diagnostic reports: none delivered so far, {why}. "
+            "Your photometry is unaffected; thank you for trying to send feedback.")
+
+
+def _is_count(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _show(widget, visible):

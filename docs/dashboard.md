@@ -180,7 +180,7 @@ everything happens inside `PhotometryDashboard.handle_message`.
 | `zip_error` | kernel → JS | `{type, reason}` | none | `results/` is missing or has no `.star` files yet, or `run` names an unknown run |
 | `hidden_episode` | JS → kernel | `{type, hidden_ms, frames}` | none | the tab has become visible again after being hidden during a run: how long it was hidden and how many `file_done`s arrived meanwhile. Accepted in **any** phase, because the run usually finishes while the user is away; feeds the run panel's banner only (`PhotometryDashboard._on_hidden_episode`; §4) |
 | `report_start` / `report_row` / `report_end` | kernel → JS | `{type, header}`, plus `row` / `outcome` | none | opt-in tester reports (§11): a reported run's start, one row per frame (sent before that frame's `file_done`), and its end (`outcome` `done`, before `run_done`; `failed` when the front end's cancel carried a `reason`; `cancelled` only for a bare cancel, which nothing sends today). Handled by the drop zone model's `initialize`-level reporter, never by the upload loop |
-| `report_status` | JS → kernel | `{type, sent, failed}` | none | the page's POST counts, for the run panel's status line; handled by the view's own `on_msg` listener, ignored by `PhotometryDashboard` |
+| `report_status` | JS → kernel | `{type, report_id, sent, failed, last_http}` | none | the page's POST counts for the report `report_id`, plus the HTTP status of the last refused POST (null when the last failure got no answer), for the run panel's status line; handled by the view's own `on_msg` listener, ignored by `PhotometryDashboard` |
 | `hidden_episode_error` | kernel → JS | `{type, reason}` | none | the `hidden_episode` handler raised. Deliberately **not** `error`: the front end treats `error` as fatal and cancels the run, and a banner is not worth a run. The front end ignores this type like any other it isn't waiting for |
 
 Two validation layers run before any of that starts. `_on_manifest` refuses a
@@ -876,12 +876,19 @@ reloads; a `pagehide` with `persisted` (the page entering the back/forward
 cache, from which it may return with the run still going) instead beacons
 the buffered rows as an ordinary chunk and keeps the report open. The
 sent/failed counts behind the status line are per run: a POST of the
-previous run settling late counts for nobody. Bodies are plain strings
-(`text/plain`, so no CORS preflight), split by rows if ever over the cap.
-Every failure is
-swallowed and counted; the run panel shows "3 reports sent" or "1 report
-failed to send — your run is unaffected" from the page's `report_status`
-messages. A run long enough to pass the schema's `seq` ceiling (999 chunks)
+previous run settling late counts for nobody on the page, and each
+`report_status` carries its `report_id` so the kernel, which marks the new
+run before the page has seen its `report_start`, can drop a late count too.
+Bodies are plain strings (`text/plain`, so no CORS preflight), split by
+rows if ever over the cap. Every failure is swallowed and counted; the run
+panel shows "Diagnostic reports: 3 reports sent." or, in amber, "2 reports
+sent; 1 report could not be delivered, the report server refused it (HTTP
+429). Your photometry is unaffected." and, when nothing has got through,
+"none delivered so far, the report server could not be reached. Your
+photometry is unaffected; thank you for trying to send feedback." The
+status carries the HTTP status of the last refused POST, so the tester can
+tell a rate limit or a quota lockout (429, 503) from a dead endpoint. A run
+long enough to pass the schema's `seq` ceiling (999 chunks)
 stops sending, and every body that would have gone out counts as failed.
 If the widget model is disposed with a report open (a kernel restart), the
 page closes it as `cancelled` first. On the kernel side every reporting
@@ -889,8 +896,8 @@ entry point is guarded: an exception is logged once ("Tester report stopped
 …; the run is unaffected"), turns reporting off for the rest of that run,
 and closes the page's report with outcome `report_error` (not `cancelled`:
 the run goes on, and the stored report must not read as if the tester
-stopped it). A `report_status` that arrives while no run is being reported
-is ignored. The obscode and the form's site are snapshotted when a reported
+stopped it). A `report_status` that arrives while no run is being reported,
+or whose `report_id` is not the run's, is ignored. The obscode and the form's site are snapshotted when a reported
 run starts, so every chunk of the run is attributed the same way (the form
 is hidden during a run anyway; the comment stays live). The kernel's pattern
 guards use `fullmatch`, because Python's `$` matches before a trailing

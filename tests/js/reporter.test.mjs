@@ -142,7 +142,8 @@ test('the reporter posts a chunk every REPORT_ROWS_PER_CHUNK rows, then a final 
   assert.equal(last.run.outcome, 'done');
   assert.equal(last.rows.length, 3);
   assert.equal(last.comment, 'later', 'the newest header wins');
-  assert.deepEqual(statuses[statuses.length - 1], { sent: 2, failed: 0 });
+  assert.deepEqual(statuses[statuses.length - 1],
+    { sent: 2, failed: 0, report_id: '0123456789abcdef0123456789abcdef', last_http: null });
   assert.equal(r.isActive(), false);
 });
 
@@ -210,7 +211,37 @@ test('a failed POST is counted, retried once without keepalive, and never throws
   await settle();
   assert.equal(fetchFn.calls.length, 2);
   assert.equal(fetchFn.calls[1].init.keepalive, false);
-  assert.deepEqual(statuses, [{ sent: 0, failed: 1 }]);
+  assert.deepEqual(statuses, [{ sent: 0, failed: 1, report_id: '0123456789abcdef0123456789abcdef', last_http: null }]);
+});
+
+test('the status carries the HTTP status of the last refused POST, or null without an answer', async () => {
+  // 429 (rate limit), then a network failure, then 503, then a success:
+  // the kernel's line says "refused (HTTP 503)" at the end, not "could not
+  // be reached", and a success does not erase why the others failed.
+  const results = [{ ok: false, status: 429 }, new TypeError('offline'), new TypeError('offline'),
+                   { ok: false, status: 503 }, { ok: true, status: 204 }];
+  const fetchFn = (url, init) => {
+    const r = results.shift();
+    return r instanceof Error ? Promise.reject(r) : Promise.resolve(r);
+  };
+  const statuses = [];
+  const r = makeReporter({ fetchFn, beaconFn: fakeBeacon(), onStatus: (s) => statuses.push(s) });
+  r.start(URL, header({ report_id: 'a'.repeat(32) }), 0, false);
+  // One chunk at a time, so each POST (and the offline one's retry) takes
+  // the result meant for it.
+  for (let chunk = 0; chunk < 4; chunk++) {
+    for (let i = 0; i < REPORT_ROWS_PER_CHUNK; i++) r.row(row(i), null, 0);
+    await settle();
+  }
+  assert.deepEqual(statuses.map((s) => [s.failed, s.last_http]),
+    [[1, 429], [2, null], [3, 503], [3, 503]]);
+  assert.equal(statuses.at(-1).sent, 1);
+  assert.equal(statuses.at(-1).report_id, 'a'.repeat(32));
+  // A new run starts clean.
+  r.start(URL, header({ report_id: 'b'.repeat(32) }), 0, false);
+  r.end('done', null, 0);
+  await settle();
+  assert.deepEqual(statuses.at(-1), { sent: 0, failed: 1, report_id: 'b'.repeat(32), last_http: null });
 });
 
 test('a fetch that throws synchronously, or a beacon that throws, is swallowed', async () => {
@@ -325,7 +356,7 @@ test('sent/failed counts start over with each run', async () => {
   r.start(URL, header(), 0, false);
   r.end('done', null, 0);               // 1 failed
   await settle();
-  assert.deepEqual(statuses.at(-1), { sent: 0, failed: 1 });
+  assert.deepEqual(statuses.at(-1), { sent: 0, failed: 1, report_id: '0123456789abcdef0123456789abcdef', last_http: null });
   r.start(URL, header({ report_id: 'f'.repeat(32) }), 0, false);
   r.row(row(0), null, 0);
   r.end('done', null, 0);

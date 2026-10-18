@@ -332,28 +332,73 @@ def test_a_failing_send_is_logged_once_and_the_run_finishes(view):
 # -- the status line ---------------------------------------------------------
 
 
+def status(view, sent, failed, report_id=None, **extra):
+    # The page echoes the report_id the counts belong to; by default the
+    # run the view is reporting now.
+    rid = view._run_report_id if report_id is None else report_id
+    receive(view, {"type": "report_status", "report_id": rid,
+                   "sent": sent, "failed": failed, **extra})
+
+
 def test_the_pages_report_status_feeds_the_status_line(view):
     fill(view)
     view.report_opt_in.value = True
     manifest(view, "a.fit")
-    receive(view, {"type": "report_status", "sent": 3, "failed": 0})
+    status(view, 3, 0)
     assert view.report_status.value == "Diagnostic reports: 3 reports sent."
-    receive(view, {"type": "report_status", "sent": 3, "failed": 1})
-    assert "1 report failed to send — your run is unaffected" in view.report_status.value
+    status(view, 3, 1, last_http=429)
+    assert ("1 report could not be delivered, the report server refused it (HTTP 429). "
+            "Your photometry is unaffected." in view.report_status.value)
+    assert view.report_status.value.startswith("<span style=")
 
 
 def test_a_malformed_report_status_is_ignored(view):
-    receive(view, {"type": "report_status", "sent": "3", "failed": None})
-    receive(view, {"type": "report_status", "sent": True, "failed": 0})
+    fill(view)
+    view.report_opt_in.value = True
+    manifest(view, "a.fit")
+    status(view, "3", None)
+    status(view, True, 0)
+    receive(view, {"type": "report_status", "sent": 1, "failed": 0})  # no report_id
     assert view.report_status.value == ""
+    # A nonsense last_http is dropped, not shown.
+    status(view, 0, 1, last_http="503")
+    assert "could not be reached" in view.report_status.value
+    status(view, 0, 1, last_http=True)
+    assert "could not be reached" in view.report_status.value
 
 
 def test_report_status_text():
     assert report_status_text(0, 0) == ""
     assert report_status_text(1, 0) == "Diagnostic reports: 1 report sent."
-    assert report_status_text(0, 2) == (
-        "Diagnostic reports: 2 reports failed to send — your run is unaffected."
+    assert report_status_text(2, 1, 429) == (
+        "Diagnostic reports: 2 reports sent; 1 report could not be delivered, "
+        "the report server refused it (HTTP 429). Your photometry is unaffected."
     )
+    assert report_status_text(2, 2, None) == (
+        "Diagnostic reports: 2 reports sent; 2 reports could not be delivered, "
+        "the report server could not be reached. Your photometry is unaffected."
+    )
+    assert report_status_text(0, 2, 503) == (
+        "Diagnostic reports: none delivered so far, the report server refused them "
+        "(HTTP 503). Your photometry is unaffected; thank you for trying to send feedback."
+    )
+
+
+def test_when_nothing_gets_through_the_tester_is_told_and_thanked(view):
+    # The endpoint is down (worker deleted, quota lockout, rate limit):
+    # the tester must see that the photometry is fine and the report is
+    # not, in amber, without hunting for it.
+    fill(view)
+    view.report_opt_in.value = True
+    manifest(view, "a.fit")
+    status(view, 0, 3, last_http=503)
+    text = view.report_status.value
+    assert "none delivered so far" in text and "HTTP 503" in text
+    assert "thank you for trying" in text and "Your photometry is unaffected" in text
+    assert "jp-warn-color0" in text
+    # Back to plain once everything goes through.
+    status(view, 3, 0)
+    assert view.report_status.value == "Diagnostic reports: 3 reports sent."
 
 
 # -- review fixes (PR #16) ---------------------------------------------------
@@ -467,17 +512,38 @@ def test_an_unreported_run_does_not_inherit_the_last_runs_status_line(view):
     view.report_opt_in.value = True
     manifest(view, "a.fit")
     upload(view, "a.fit")
-    receive(view, {"type": "report_status", "sent": 2, "failed": 0})
+    status(view, 2, 0)
     assert "2 reports sent" in view.report_status.value
+    first = view._run_report_id
     view.report_opt_in.value = False
     manifest(view, "b.fit")
     assert view.report_status.value == ""
     # A count from run 1's last POST, settling only now, is not run 2's either.
-    receive(view, {"type": "report_status", "sent": 3, "failed": 0})
+    status(view, 3, 0, report_id=first)
     assert view.report_status.value == ""
     upload(view, "b.fit")
-    receive(view, {"type": "report_status", "sent": 3, "failed": 1})
+    status(view, 3, 1, report_id=first)
     assert view.report_status.value == ""
+
+
+def test_a_late_count_from_the_previous_run_is_not_the_next_reported_runs(view):
+    # Copilot (PR #16, 2026-10-18): the kernel marks the new run and sends
+    # report_start; a POST of the previous run can settle before the page
+    # has processed that report_start, and its count arrives here while a
+    # run is being reported. The echoed report_id tells the two apart.
+    fill(view)
+    view.report_opt_in.value = True
+    manifest(view, "a.fit")
+    upload(view, "a.fit")
+    status(view, 2, 0)
+    first = view._run_report_id
+    manifest(view, "b.fit")
+    second = view._run_report_id
+    assert second != first and view.report_status.value == ""
+    status(view, 3, 0, report_id=first)      # run 1's final chunk, late
+    assert view.report_status.value == ""
+    status(view, 1, 0, report_id=second)
+    assert view.report_status.value == "Diagnostic reports: 1 report sent."
 
 
 def test_the_status_line_survives_until_the_next_run_starts(view):
@@ -487,7 +553,7 @@ def test_the_status_line_survives_until_the_next_run_starts(view):
     manifest(view, "a.fit")
     upload(view, "a.fit")
     assert view.dashboard.phase == "done"
-    receive(view, {"type": "report_status", "sent": 1, "failed": 0})
+    status(view, 1, 0)
     assert "1 report sent" in view.report_status.value
 
 

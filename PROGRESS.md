@@ -1402,16 +1402,28 @@ purge that works at flood scale; obscode is a claim; free text is
 untrusted input to an LLM; `wrangler logout`; deploy order. Tests: 372
 pytest, 91 node, 69 worker.
 
-Done 2026-10-18: the `FEEDBACK_URL` repository variable is set, and
-`wrangler r2 bucket lifecycle list` shows `expire-30d` (enabled, prefix
-`reports/`, expire after 30 days) next to the default 7-day multipart
-abort rule, so the 30-day deletion promise in the consent text is backed.
+Copilot's 2026-10-18 pass (on 6c56a6d) had two items: the double release,
+already fixed in cdebf91, and a real ordering gap in the status line. The
+kernel marks the new run and clears the line before the page has processed
+its `report_start`, so a POST of the previous run settling in that gap
+wrote stale counts into the new run's line. Every `report_status` now
+carries the `report_id` its counts belong to and the kernel shows only the
+current run's. The same message carries `last_http`, the HTTP status of
+the last refused POST (null when the last failure got no answer), and the
+status line, Matt's ask, now tells a tester whose reports are being
+refused what happened and that the photometry is fine: "Diagnostic
+reports: none delivered so far, the report server refused them (HTTP
+503). Your photometry is unaffected; thank you for trying to send
+feedback." in amber; a mixed run reads "2 reports sent; 1 report could not
+be delivered, …". Tests: 374 pytest, 92 node, 69 worker.
 
-Still owed: redeploy the worker for the new rate limit, the schema
-(`failed` outcome, the extended character class, `elapsed_s >= 0`, no
-`user_agent`), the IPv6 keying, the 503/400 paths, `preview_urls = false`
-and the explicit observability setting. Decide Free vs Paid
-(docs/feedback-deploy.md §11) and add the R2 billing notification.
+Done 2026-10-18: the `FEEDBACK_URL` repository variable is set, the worker
+is redeployed, the account stays on Workers Free for now, and `wrangler r2
+bucket lifecycle list` shows `expire-30d` (enabled, prefix `reports/`,
+expire after 30 days) next to the default 7-day multipart abort rule, so
+the 30-day deletion promise in the consent text is backed.
+
+Still owed: the R2 billing notification (docs/feedback-deploy.md §11).
 Untested: the `pagehide` beacon path in a real browser. Bump Wrangler past
 4.148 (npm audit, dev-only) once 4.149.0 is two weeks old (after
 2026-10-22).

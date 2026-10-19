@@ -59,9 +59,10 @@ photometry_dashboard.ipynb          two code lines (see below)
     -> dashboard_view.DashboardView              ipywidgets shell
          .drop_zone   = dropzone.DropZone()      (anywidget)
          .zip_widget  = dropzone.ZipDownload()   (anywidget)
+         .report_opt_in = dropzone.ConsentCheckbox() (anywidget; §11)
          .dashboard   = photom_dashboard.PhotometryDashboard(...)
               process_frame = self._process_frame   (injected; see below)
-    -> DropZone/ZipDownload._esm = dropzone.js       shared front end, one ESM
+    -> DropZone/ZipDownload/ConsentCheckbox._esm = dropzone.js   shared front end, one ESM
 ```
 
 `content/photometry_dashboard.ipynb` has exactly two code lines: `import
@@ -150,10 +151,11 @@ out of that first call and is logged once; every later frame in the run
 returns `"pipeline setup failed earlier: ..."` as a skip reason instead of
 re-attempting the 39 MB weights download per frame.
 
-`dropzone.py` and `dropzone.js` are the transport. Both `DropZone` and
-`ZipDownload` are anywidget classes that share one ESM module, dispatched on a
-`_role` trait (the `render` dispatcher at the bottom of `dropzone.js`) — one JS file that both anywidget in the
-browser and `node --test` can load. `_esm` is the file's *text*, not a `Path`:
+`dropzone.py` and `dropzone.js` are the transport. `DropZone`, `ZipDownload`
+and the tester-report opt-in `ConsentCheckbox` (§11) are anywidget classes
+that share one ESM module, dispatched on a `_role` trait (the `render`
+dispatcher at the bottom of `dropzone.js`) — one JS file that both anywidget
+in the browser and `node --test` can load. `_esm` is the file's *text*, not a `Path`:
 anywidget treats a `Path` as a dev-mode hot-reload source needing `watchfiles`,
 absent in the wasm kernel (a comment in `dropzone.py` says so).
 
@@ -792,14 +794,24 @@ comment and a row's skip reason) refuse control characters and links and
 are otherwise bounded, untrusted text: nothing renders them (the preview
 escapes, the pull script writes JSON and formula-safe CSV).
 
-**What is sent.** The consent text under the box says it plainly: the
-AAVSO observer code, the site position **rounded to whole degrees**, the
+**What is sent.** The consent text says it plainly: the AAVSO observer
+code, the site position **rounded to whole degrees**, the
 image file names, and per-frame diagnostic numbers; plus the tester's
 optional comment. It also says what the server adds (the country it infers
 from the connection, never the IP) and how long things are kept: the
 server deletes reports after 30 days, and the developer keeps the copies
-downloaded for review while the dashboard is being tested. Per frame, the
-row is bandaid's own QA record
+downloaded for review while the dashboard is being tested. It is shown only
+when the tester asks for it: the opt-in box is the page's `ConsentCheckbox`
+(`dropzone.py`; `renderConsent` in `dropzone.js`), and ticking it opens a
+modal `<dialog>` carrying the text (the `consent_html` trait, the view's
+`REPORT_CONSENT`) with "Yes, send reports" and "No, don't send". The synced
+`value` turns True only on yes (`consentGiven`: the accept button's own
+`returnValue`, so Esc and decline are no and put the box back to unticked
+without touching the model); unticking needs no dialog; a browser without
+`<dialog>` gets the same text in its own confirm box. The view observes
+`value` exactly as it did the ipywidgets Checkbox this replaced. In a build
+with no endpoint the box is disabled and a note under it says reporting is
+not set up. Per frame, the row is bandaid's own QA record
 (the `on_qa(name, qa, schema_version)` hook of `make_bandaid_processor`; the
 `QA_MANIFEST_COLUMNS` of the pinned bandaid, copied as
 `feedback_report.QA_COLUMNS`), plus the dashboard's skip `reason` and the

@@ -1571,6 +1571,28 @@ block it), and tries the neighbours (24, 26, 443, 5999, 6001, ...) on the
 loopback address to show they fail some other way.
 Tests: 515 pytest, 96 node, 70 worker.
 
+PR #16 merged 2026-10-18 as 2f8c107 after Copilot's tenth pass came back
+clean; the Pages build on the merge enabled reporting against the worker
+URL (the build log's `tester reports ->` line).
+
+Consent dialog (feature/consent-dialog, Matt's first change on seeing the
+deployed page): the consent text is no longer on the form. The opt-in box
+is now a third anywidget, `ConsentCheckbox` (`_role` "consent"), rendered
+by `renderConsent` in dropzone.js: ticking it opens a modal `<dialog>`
+(same `.bp-dialog` styling as the pre-run warning, neutral top border)
+carrying `REPORT_CONSENT` as its body, "Yes, send reports" / "No, don't
+send"; the synced `value` turns True only on yes (`consentGiven`, keyed on
+the accept button's `returnValue` like `dialogChoseStart`), decline and
+Esc put the box back unticked without touching the model, unticking asks
+nothing, and a browser without `<dialog>` gets the text in its own confirm
+box. The view observes `value`/`disabled` exactly as it did the ipywidgets
+Checkbox, so nothing downstream changed; the no-endpoint build shows a
+`report_unavailable` note under the disabled box instead. Not exercised in
+a real browser from here: the dialog itself (node has no DOM; the pure
+decision helper is tested), so a local `build-dash` run should tick, decline,
+tick, accept, and untick once before merge.
+Tests: 516 pytest, 97 node, 70 worker.
+
 Done 2026-10-18: the `FEEDBACK_URL` repository variable is set, the worker
 is redeployed (again after e862930, though that commit changed nothing the
 worker runs), the account stays on Workers Free for now, the R2 billing

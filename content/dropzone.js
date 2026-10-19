@@ -1,8 +1,9 @@
 // anywidget front end for the drag-and-drop photometry dashboard.
 //
-// Two widget classes share this one module, dispatched on the `_role`
+// Three widget classes share this one module, dispatched on the `_role`
 // model trait: the folder drop zone that streams FITS frames to the
-// kernel, and a "download zip" button. Plain ESM, no build step, no
+// kernel, a "download zip" button, and the tester-report opt-in box that
+// confirms in a dialog before it ticks. Plain ESM, no build step, no
 // module-level DOM access, so this file can be imported directly by
 // `node --test` as well as by anywidget in the browser.
 
@@ -1772,14 +1773,126 @@ function renderZip({ model, el }) {
   };
 }
 
+/**
+ * Whether the consent dialog closed via its accept button. As with
+ * dialogChoseStart, only that button's own value counts: the decline
+ * button, Esc (returnValue undefined) and a close with no value are all no.
+ */
+export function consentGiven(returnValue) {
+  return returnValue === 'accept';
+}
+
+// The tester-report opt-in (docs/dashboard.md §11; `ConsentCheckbox` in
+// dropzone.py). An ipywidgets Checkbox cannot open a dialog, so the box is
+// built here: ticking it opens a modal carrying the consent text (the
+// `consent_html` trait, the dashboard's own REPORT_CONSENT) and the synced
+// `value` only becomes true when the tester confirms. Anything else --
+// decline, Esc -- puts the box back to unticked without touching the model.
+// Unticking needs no confirmation. Without <dialog> support the browser's
+// own confirm box carries the same text, so the question is always asked.
+function renderConsent({ model, el }) {
+  el.innerHTML = '';
+
+  const label = document.createElement('label');
+  label.className = 'bp-consent';
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  const text = document.createElement('span');
+  label.appendChild(box);
+  label.appendChild(text);
+  el.appendChild(label);
+
+  // Appended to `el` so it is connected before showModal() (see the
+  // pre-run dialog in renderDropZone for the same reasoning).
+  const dialog = document.createElement('dialog');
+  dialog.className = 'bp-dialog bp-consent-dialog';
+  const form = document.createElement('form');
+  form.method = 'dialog';
+  const heading = document.createElement('h3');
+  const body = document.createElement('div');
+  const id = `bp-consent-${Math.random().toString(36).slice(2, 10)}`;
+  heading.id = `${id}-title`;
+  body.id = `${id}-body`;
+  dialog.setAttribute('aria-labelledby', heading.id);
+  dialog.setAttribute('aria-describedby', body.id);
+  const actions = document.createElement('div');
+  actions.className = 'bp-dialog-actions';
+  const accept = document.createElement('button');
+  accept.type = 'submit';
+  accept.value = 'accept';
+  accept.className = 'bp-btn primary';
+  accept.autofocus = true;
+  accept.textContent = 'Yes, send reports';
+  const decline = document.createElement('button');
+  decline.type = 'submit';
+  decline.value = 'decline';
+  decline.className = 'bp-btn secondary';
+  decline.textContent = 'No, don’t send';
+  actions.appendChild(accept);
+  actions.appendChild(decline);
+  form.appendChild(heading);
+  form.appendChild(body);
+  form.appendChild(actions);
+  dialog.appendChild(form);
+  el.appendChild(dialog);
+
+  function paint() {
+    box.checked = model.get('value');
+    box.disabled = model.get('disabled');
+    text.textContent = model.get('label');
+    heading.textContent = model.get('heading');
+    body.innerHTML = model.get('consent_html');
+  }
+  paint();
+
+  function decide(given) {
+    if (given) {
+      model.set('value', true);
+      model.save_changes();
+    } else {
+      box.checked = false;
+    }
+  }
+
+  box.addEventListener('change', () => {
+    if (!box.checked) {
+      model.set('value', false);
+      model.save_changes();
+      return;
+    }
+    // returnValue persists across closes and is undefined after Esc, so
+    // it is cleared before every showModal().
+    dialog.returnValue = '';
+    const onClose = () => {
+      dialog.removeEventListener('close', onClose);
+      decide(consentGiven(dialog.returnValue));
+    };
+    dialog.addEventListener('close', onClose);
+    try {
+      dialog.showModal();
+    } catch (err) {
+      dialog.removeEventListener('close', onClose);
+      const plain = (body.textContent || '').replace(/\s+/g, ' ').trim();
+      decide(window.confirm(`${model.get('heading')}\n\n${plain}`));
+    }
+  });
+
+  const traits = ['value', 'disabled', 'label', 'heading', 'consent_html'];
+  for (const t of traits) model.on(`change:${t}`, paint);
+  return () => {
+    for (const t of traits) model.off(`change:${t}`, paint);
+  };
+}
+
 function render({ model, el, signal }) {
-  return model.get('_role') === 'zip'
-    ? renderZip({ model, el })
-    : renderDropZone({ model, el, signal });
+  const role = model.get('_role');
+  if (role === 'zip') return renderZip({ model, el });
+  if (role === 'consent') return renderConsent({ model, el });
+  return renderDropZone({ model, el, signal });
 }
 
 function initialize({ model }) {
-  if (model.get('_role') === 'zip') return undefined;
+  if (model.get('_role') !== 'drop') return undefined;
   return initializeDropZone({ model });
 }
 

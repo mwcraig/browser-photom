@@ -21,7 +21,7 @@ from pathlib import Path
 import ipywidgets as W
 from IPython.display import display
 
-from dropzone import DropZone, ZipDownload
+from dropzone import ConsentCheckbox, DropZone, ZipDownload
 from feedback_report import (
     ROWS_PER_CHUNK,
     build_chunk,
@@ -65,13 +65,15 @@ INSTRUCTIONS = f"""
 
 LOG_LINES = 12
 
-# The opt-in's consent text. The spec's fixed decision: say plainly that the
-# obscode and the site rounded to 1 degree go in every report, with the
+# The opt-in's consent text: the body of the dialog that opens when the box
+# is ticked (`ConsentCheckbox`; the box only ticks once the tester confirms
+# there), shown nowhere else. The spec's fixed decision: say plainly that
+# the obscode and the site rounded to 1 degree go in every report, with the
 # per-frame numbers and file names, and how long they are kept. No per-field
 # toggles; "Preview report" shows the exact JSON instead.
 REPORT_CONSENT = """
 <div style="font-size:0.9em;line-height:1.5;max-width:46em">
-  Ticking this sends a report of each run to the browser-photom developer
+  Confirming here sends a report of each run to the browser-photom developer
   while you are testing the dashboard. Every report includes your
   <b>AAVSO observer code</b>, your <b>site position rounded to the nearest
   whole degree</b>, the <b>names of your image files</b>, and
@@ -87,9 +89,11 @@ REPORT_CONSENT = """
   FITS headers themselves are sent. The server deletes reports after
   <b>30 days</b>; the developer keeps the copies downloaded for review
   while the dashboard is being tested. Your run works the same either
-  way. Use <i>Preview report</i> to see what would be sent.
+  way. Use <i>Preview report</i>, under the box, to see what would be sent.
 </div>
 """
+REPORT_HEADING = "Send diagnostic reports to the developer?"
+REPORT_LABEL = "Send diagnostic reports to the browser-photom developer"
 
 # What the preview shows in place of the run's random report_id.
 REPORT_ID_PLACEHOLDER = "(32 random hex characters, drawn when the run starts; not shown)"
@@ -256,13 +260,18 @@ class DashboardView:
         ])
 
     def _build_report_form(self):
-        self.report_opt_in = W.Checkbox(
+        # The page asks for confirmation in a dialog before `value` turns
+        # True (dropzone.py), so the consent text is not on the form.
+        self.report_opt_in = ConsentCheckbox(
             value=False,
-            description="Send diagnostic reports to the browser-photom developer",
-            indent=False,
-            layout=W.Layout(width="auto"),
+            label=REPORT_LABEL,
+            heading=REPORT_HEADING,
+            consent_html=REPORT_CONSENT,
         )
-        self.report_consent = W.HTML(REPORT_CONSENT)
+        # Why the box is greyed out, in a build with no endpoint; empty and
+        # hidden otherwise.
+        self.report_unavailable = W.HTML()
+        _show(self.report_unavailable, False)
         self.report_comment = W.Textarea(
             placeholder="Optional comment for the developer (plain text, no links)",
             layout=W.Layout(width="380px", height="5em"),
@@ -278,7 +287,7 @@ class DashboardView:
         self.report_comment.observe(lambda _c: self._refresh_report_form(), names="value")
         self.report_box = W.VBox([
             self.report_opt_in,
-            self.report_consent,
+            self.report_unavailable,
             self.report_comment,
             self.report_notes,
             self.report_preview_button,
@@ -289,7 +298,8 @@ class DashboardView:
             # No endpoint in this build: the box stays, greyed, so a tester
             # who was told to tick it can see why they cannot.
             self.report_opt_in.disabled = True
-            self.report_consent.value = REPORT_UNAVAILABLE
+            self.report_unavailable.value = REPORT_UNAVAILABLE
+            _show(self.report_unavailable, True)
             for widget in (self.report_comment, self.report_notes,
                            self.report_preview_button, self.report_preview):
                 _show(widget, False)

@@ -180,6 +180,25 @@
   gap: 0.5em;
 }
 
+/* Tester-report opt-in (docs/dashboard.md §11): a checkbox whose tick is
+   confirmed in a dialog first (renderConsent). The dialog reuses .bp-dialog
+   with a neutral top border, since it is a question, not a warning. */
+.bp-consent {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.45em;
+  cursor: pointer;
+  line-height: 1.6;
+}
+.bp-consent input:disabled + span {
+  color: var(--jp-ui-font-color3, #999);
+  cursor: default;
+}
+.bp-dialog.bp-consent-dialog {
+  max-width: 40em;
+  border-top-color: var(--jp-brand-color1, #1976d2);
+}
+
 /* One-time pointer-exit toast. On document.body, not in the widget, which
    Python hides for the whole run -- hence fixed positioning. */
 .bp-toast {

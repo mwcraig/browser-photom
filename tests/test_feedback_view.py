@@ -11,6 +11,7 @@ worker makes.
 import json
 from pathlib import Path
 
+import ipywidgets as W
 import jsonschema
 import pytest
 
@@ -86,15 +87,31 @@ def test_reporting_is_off_by_default_and_the_url_reaches_the_page(view):
     assert view.report_opt_in.value is False
     assert not view.report_opt_in.disabled
     assert view.drop_zone.feedback_url == URL
-    assert "30 days" in view.report_consent.value
-    assert "observer code" in view.report_consent.value
-    assert "rounded to the nearest" in view.report_consent.value
+    consent = view.report_opt_in.consent_html
+    assert "30 days" in consent
+    assert "observer code" in consent
+    assert "rounded to the nearest" in consent
+
+
+def test_the_consent_text_is_only_in_the_page_side_dialog(view):
+    # The box is the page's ConsentCheckbox: ticking it opens a dialog with
+    # consent_html and `value` turns True only when the tester confirms. The
+    # form itself shows none of the consent text, and the unavailable note
+    # is hidden while there is an endpoint.
+    box = view.report_opt_in
+    assert box._role == "consent"
+    assert "developer" in box.label and box.heading.endswith("?")
+    for widget in view.report_box.children:
+        if isinstance(widget, W.HTML):
+            assert "30 days" not in widget.value
+    assert not shown(view.report_unavailable) and view.report_unavailable.value == ""
 
 
 def test_without_an_endpoint_the_opt_in_is_greyed_out_with_a_note(tmp_path):
     v = make_view(tmp_path, report_url="")
     assert v.report_opt_in.disabled
-    assert "isn&rsquo;t set up" in v.report_consent.value
+    assert shown(v.report_unavailable)
+    assert "isn&rsquo;t set up" in v.report_unavailable.value
     assert not shown(v.report_comment) and not shown(v.report_preview_button)
     assert v.drop_zone.feedback_url == ""
     fill(v)
@@ -507,7 +524,7 @@ def test_a_mid_run_reporting_failure_closes_the_pages_report(view):
 
 
 def test_the_consent_text_names_the_country_and_the_server_side_30_days(view):
-    text = view.report_consent.value
+    text = view.report_opt_in.consent_html
     assert "country" in text and "IP address" in text
     assert "30 days" in text and "copies downloaded" in text
 
@@ -588,7 +605,7 @@ def test_a_failing_report_end_still_closes_the_pages_report(view):
 
 
 def test_the_consent_names_everything_a_chunk_carries(view):
-    text = view.report_consent.value
+    text = view.report_opt_in.consent_html
     for phrase in ("observer code", "rounded to the nearest", "names of your image files",
                    "reason", "header value", "counts and timing", "how it ended",
                    "background", "dashboard\n  version", "country", "when the report\n  arrived",

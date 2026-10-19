@@ -1622,3 +1622,12 @@ No change to `process_frame`, `FrameResult`, `qa_record_skipped` or the QA
 columns, so `make_bandaid_processor` and the feedback rows are untouched.
 `pixi run pytest` against the new checkout (the QA_COLUMNS test reads the
 pinned bandaid-src). Not done: a browser-versus-native rerun at this pin.
+Measured in the bandaid session (SS Leo set): the mean background raises
+`bkgd_count` by 2.3-3.9 ADU/px by channel, makes bright stars 0.4-0.6 mmag
+fainter, and drops the faint-row count 0.5-1.2 % at `min_snr=2`, with no
+frame changing status; the egain change lowers Seestar50 SNR by ~4 % at
+SNR 2-5, ~15 % at 10-20, ~25 % at 20-50 and about half above 100, so
+`.star` files from before e1919e3 are not comparable to new ones (the
+egain is in each file's metadata; err_new^2 = err_old^2 +
+tot_count*(1/0.046 - 1/0.3116) corrects the gain in place, nothing
+corrects the background).

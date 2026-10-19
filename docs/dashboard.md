@@ -119,8 +119,15 @@ Those numbers are from bandaid 33bebf5. The pin then moved to b7fb737, which
 carries bandaid PR #154: the FWHM fit that turned a 1e-6 px shift into a
 2.5 % `fwhm` change on one frame now runs to floating-point noise, and the
 155-frame rerun at that pin confirmed it (the outlier is gone and `fwhm`
-agrees to 2e-5 relative; issue #8 was closed on that result). The pin is now
-d6ba44a (PR #159, the per-frame API above), which changes no photometry. The
+agrees to 2e-5 relative; issue #8 was closed on that result). The pin moved
+to d6ba44a (PR #159, the per-frame API above), which changed no photometry,
+and then to 1775df7 (2026-10-19), which does: bandaid PR #165 takes the
+per-star background as the sigma-clipped mean of the annulus rather than the
+median, so every `bkgd_count`, flux and `sky` value shifts by a fraction of an
+ADU per pixel, and PR #163 gives the Seestar50 profile its measured red-channel
+`egain` (0.046 e-/ADU), which lowers `snr` on that instrument and can change
+which rows pass `min_snr`. Neither touches the per-frame API or the QA record.
+A browser-versus-native comparison at this pin has not been run. The
 larger browser-versus-native position difference, about
 3e-5 px from float32 rounding under numpy 2, is bandaid #155 and is in no pin
 yet. This is the one place that difference is described; README, PROGRESS and

@@ -1612,3 +1612,13 @@ Untested: the `pagehide` beacon path in a real browser. Wrangler bumped to
 4.151.1 on 2026-10-18 (the two-week wait was caution, not a requirement);
 the audit's remaining lines are the vitest pool's nested wrangler and
 miniflare, which only a new pool release clears.
+
+# bandaid pin moved to 1775df7 (2026-10-19)
+
+PR #165 (sigma-clipped annulus mean for the per-star background; moves
+every `bkgd_count`, flux and `sky` by a fraction of an ADU per pixel) and
+PR #163 (Seestar50 `egain` 0.046 e-/ADU; lower `snr` on that instrument).
+No change to `process_frame`, `FrameResult`, `qa_record_skipped` or the QA
+columns, so `make_bandaid_processor` and the feedback rows are untouched.
+`pixi run pytest` against the new checkout (the QA_COLUMNS test reads the
+pinned bandaid-src). Not done: a browser-versus-native rerun at this pin.

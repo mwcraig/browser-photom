@@ -1591,7 +1591,11 @@ Checkbox, so nothing downstream changed; the no-endpoint build shows a
 a real browser from here: the dialog itself (node has no DOM; the pure
 decision helper is tested), so a local `build-dash` run should tick, decline,
 tick, accept, and untick once before merge.
-Tests: 516 pytest, 97 node, 70 worker.
+After Matt tried it locally: the consent text is now three bullet lists
+(every report includes / the server adds / not sent, not kept) under one
+opening sentence, and the comment box is shown only while the opt-in is
+ticked (its text survives an untick; its link warning is only shown then).
+Tests: 518 pytest, 97 node, 70 worker.
 
 Done 2026-10-18: the `FEEDBACK_URL` repository variable is set, the worker
 is redeployed (again after e862930, though that commit changed nothing the

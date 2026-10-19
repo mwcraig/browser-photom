@@ -794,8 +794,9 @@ comment and a row's skip reason) refuse control characters and links and
 are otherwise bounded, untrusted text: nothing renders them (the preview
 escapes, the pull script writes JSON and formula-safe CSV).
 
-**What is sent.** The consent text says it plainly: the AAVSO observer
-code, the site position **rounded to whole degrees**, the
+**What is sent.** The consent text says it plainly, as three short bullet
+lists (what every report includes, what the server adds, what is not sent or
+not kept): the AAVSO observer code, the site position **rounded to whole degrees**, the
 image file names, and per-frame diagnostic numbers; plus the tester's
 optional comment. It also says what the server adds (the country it infers
 from the connection, never the IP) and how long things are kept: the
@@ -837,7 +838,9 @@ manifest is accepted (the box, the observer code and the comment are read
 live, as `_meta` is; the form is hidden during a run anyway). If the box is
 ticked but the observer code does not match the schema's
 `^[A-Z0-9]{1,10}$`, the form says why and nothing is sent. The comment
-rules live in one function, `feedback_report.clean_comment`: tabs and line
+rules live in one function, `feedback_report.clean_comment` (the comment
+box itself is shown only while the opt-in is ticked, keeping its text across
+an untick; its warning is likewise only shown then): tabs and line
 endings are normalised, other control characters dropped, and a comment
 with a link (`://` or `www.`) or over 2000 characters is shown a warning
 next to the box ("Links aren't accepted in comments — the frame

@@ -73,23 +73,37 @@ LOG_LINES = 12
 # toggles; "Preview report" shows the exact JSON instead.
 REPORT_CONSENT = """
 <div style="font-size:0.9em;line-height:1.5;max-width:46em">
-  Confirming here sends a report of each run to the browser-photom developer
-  while you are testing the dashboard. Every report includes your
-  <b>AAVSO observer code</b>, your <b>site position rounded to the nearest
-  whole degree</b>, the <b>names of your image files</b>, and
-  <b>per-frame diagnostic numbers</b> (star counts, FWHM, sky level,
-  plate-solve results, how long each took) and, for a skipped frame, the
-  <b>reason</b>, which can quote the header value that caused it (an
-  observation time or pointing, say). Each report also carries the run's
-  counts and timing, how it ended (finished, failed, or the tab was
-  closed), how long the tab spent in the background, and the dashboard
-  version, plus your comment below. The receiving server adds the
-  <b>country</b> it infers from your connection and when the report
-  arrived; it does not keep your IP address. No images, starlists or
-  FITS headers themselves are sent. The server deletes reports after
-  <b>30 days</b>; the developer keeps the copies downloaded for review
-  while the dashboard is being tested. Your run works the same either
-  way. Use <i>Preview report</i>, under the box, to see what would be sent.
+  <p style="margin:0 0 0.5em">Confirming here sends a report of each run to
+  the browser-photom developer while you are testing the dashboard. Your run
+  works the same either way.</p>
+  <p style="margin:0.5em 0 0.2em"><b>Every report includes</b></p>
+  <ul style="margin:0 0 0.5em;padding-left:1.4em">
+    <li>your <b>AAVSO observer code</b></li>
+    <li>your <b>site position rounded to the nearest whole degree</b></li>
+    <li>the <b>names of your image files</b></li>
+    <li><b>per-frame diagnostic numbers</b>: star counts, FWHM, sky level,
+      plate-solve results, how long each took</li>
+    <li>for a skipped frame, the <b>reason</b>, which can quote the header
+      value that caused it (an observation time or pointing, say)</li>
+    <li>the run's counts and timing, how it ended (finished, failed, or the
+      tab was closed), how long the tab spent in the background, and the
+      dashboard version</li>
+    <li>your comment, if you write one</li>
+  </ul>
+  <p style="margin:0.5em 0 0.2em"><b>The receiving server adds</b></p>
+  <ul style="margin:0 0 0.5em;padding-left:1.4em">
+    <li>the <b>country</b> it infers from your connection</li>
+    <li>when the report arrived</li>
+  </ul>
+  <p style="margin:0.5em 0 0.2em"><b>Not sent, not kept</b></p>
+  <ul style="margin:0 0 0.5em;padding-left:1.4em">
+    <li>no images, starlists or FITS headers themselves are sent</li>
+    <li>the server does not keep your IP address</li>
+    <li>the server deletes reports after <b>30 days</b>; the developer keeps
+      the copies downloaded for review while the dashboard is being tested</li>
+  </ul>
+  <p style="margin:0.5em 0 0">Use <i>Preview report</i>, under the box, to
+  see exactly what would be sent.</p>
 </div>
 """
 REPORT_HEADING = "Send diagnostic reports to the developer?"
@@ -279,6 +293,9 @@ class DashboardView:
         # Why reporting is off although ticked (an obscode the schema will
         # not take), or why the comment will be left out.
         self.report_notes = W.HTML()
+        # The comment box appears only while reporting is ticked; its text
+        # is kept across an untick/re-tick.
+        _show(self.report_comment, False)
         self.report_preview_button = W.Button(description="Preview report")
         self.report_preview_button.on_click(lambda _button: self._toggle_preview())
         self.report_preview = W.HTML()
@@ -357,12 +374,14 @@ class DashboardView:
     def _refresh_report_form(self):
         if not self._report_url:
             return
+        wanted = self.report_opt_in.value
+        _show(self.report_comment, wanted)
         notes = []
         problem = self._report_obscode_problem()
-        if self.report_opt_in.value and problem and self.observer.value.strip():
+        if wanted and problem and self.observer.value.strip():
             notes.append(problem + " Nothing will be sent until it is fixed.")
         _comment, comment_problem = clean_comment(self.report_comment.value)
-        if comment_problem:
+        if wanted and comment_problem:
             notes.append(comment_problem)
         self.report_notes.value = "".join(
             f'<div style="color:var(--jp-warn-color1,#b26a00);font-size:0.9em">'

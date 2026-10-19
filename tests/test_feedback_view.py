@@ -605,12 +605,31 @@ def test_a_failing_report_end_still_closes_the_pages_report(view):
 
 
 def test_the_consent_names_everything_a_chunk_carries(view):
-    text = view.report_opt_in.consent_html
+    text = " ".join(view.report_opt_in.consent_html.split())   # markup wraps lines
     for phrase in ("observer code", "rounded to the nearest", "names of your image files",
                    "reason", "header value", "counts and timing", "how it ended",
-                   "background", "dashboard\n  version", "country", "when the report\n  arrived",
+                   "background", "dashboard version", "country", "when the report arrived",
                    "IP address", "30 days"):
         assert phrase in text, phrase
+
+
+def test_the_consent_text_is_mostly_bullet_points(view):
+    text = view.report_opt_in.consent_html
+    assert text.count("<li>") >= 10
+    assert text.count("<ul") == 3
+
+
+def test_the_comment_box_shows_only_while_reporting_is_ticked(view):
+    assert not shown(view.report_comment)
+    view.report_comment.value = "see www.example.com"
+    assert view.report_notes.value == ""      # a hidden box raises no note
+    view.report_opt_in.value = True
+    assert shown(view.report_comment)
+    assert "Links" in view.report_notes.value
+    view.report_opt_in.value = False
+    assert not shown(view.report_comment)
+    assert view.report_notes.value == ""
+    assert view.report_comment.value == "see www.example.com"   # kept
 
 
 def test_a_cancel_with_a_reason_ends_the_report_as_failed(view):

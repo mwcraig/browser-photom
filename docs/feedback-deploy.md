@@ -62,7 +62,9 @@ something illegal or abusive into storage you own.
 - **What a report contains.** The tester agreed to send these: the AAVSO
   observer code, the site position rounded to whole degrees, file names,
   per-frame QA numbers, the build tag, and their comment. The consent text
-  also says the server adds the country it infers from the connection. There
+  (the dialog that opens when the box is ticked; the box only ticks once
+  they confirm there) also says the server adds the country it infers from
+  the connection. There
   is no user-agent field: the dashboard never sent one, and an unfilled
   string field is just more room for someone else's text.
 - **30-day expiry on the server.** An R2 lifecycle rule (step 3) deletes

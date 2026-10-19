@@ -13,6 +13,7 @@ import {
   tabWarningText,
   hiddenTitle,
   dialogChoseStart,
+  consentGiven,
   isViewportExit,
   readSkipTabWarning,
   writeSkipTabWarning,
@@ -694,6 +695,15 @@ test('tabWarningText and hiddenTitle quote the factor they are given', () => {
 test('tabWarningText asks for the tab to stay visible', () => {
   assert.match(tabWarningText(7), /visible/);
   assert.match(tabWarningText(7), /~7×/);
+});
+
+test('consentGiven is true only for the accept button: decline, Esc and no value are no', () => {
+  assert.equal(consentGiven('accept'), true);
+  assert.equal(consentGiven('decline'), false);
+  assert.equal(consentGiven(''), false);
+  assert.equal(consentGiven(undefined), false);
+  assert.equal(consentGiven('start'), false);
+  assert.equal(consentGiven('Accept'), false);
 });
 
 test('dialogChoseStart is true only for exactly "start"', () => {

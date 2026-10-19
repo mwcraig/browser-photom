@@ -223,8 +223,9 @@ environment has (anywidget is pinned there for the build).
   (setup form, running progress, done/download) that are shown and hidden rather than
   swapped in and out of `children`, so the drop zone's front end is never torn down
   mid-upload.
-- `content/dropzone.py` / `content/dropzone.js` — the two anywidgets (`DropZone`,
-  `ZipDownload`) sharing one ESM front end; the JS enumerates a dropped folder itself
+- `content/dropzone.py` / `content/dropzone.js` — the three anywidgets (`DropZone`,
+  `ZipDownload`, and the tester-report opt-in `ConsentCheckbox`, which confirms in a
+  dialog before it ticks) sharing one ESM front end; the JS enumerates a dropped folder itself
   and streams each FITS file to the kernel over the widget comm in `CHUNK_BYTES`-sized
   (1 MiB) chunks, so images never touch the contents drive — only the `.star` outputs do.
 - `content/ballet_sgemm.py` — the Ballet CNN loader (weights download/cache plus the

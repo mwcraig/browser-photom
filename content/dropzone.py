@@ -1,12 +1,12 @@
-"""The two anywidgets the dashboard is built from.
+"""The three anywidgets the dashboard is built from.
 
-Both share one ESM (`dropzone.js`) and pick their renderer off the `_role`
+All share one ESM (`dropzone.js`) and pick their renderer off the `_role`
 trait, so there is a single JS file for Node to import in `tests/js`.
 
 `_esm` is the file's *text*, not a Path: anywidget treats a Path as a
 development-mode hot-reload source, which wants `watchfiles` -- fine natively,
 absent in the wasm kernel. `_css` (dropzone.css) is loaded as text for the
-same reason, and shared between the two widgets the same way `_esm` is.
+same reason, and shared between the widgets the same way `_esm` is.
 
 anywidget itself must be installed in the JupyterLite distribution rather than
 `%pip install`ed at runtime (manzt/anywidget#534), and its version has to match
@@ -62,3 +62,26 @@ class ZipDownload(anywidget.AnyWidget):
     # Completed run names, for the run-chooser -- most recent LAST, since the
     # front end defaults the selection to the last entry.
     runs = traitlets.List(traitlets.Unicode()).tag(sync=True)
+
+
+class ConsentCheckbox(anywidget.AnyWidget):
+    """The tester-report opt-in: a checkbox that asks first.
+
+    An ipywidgets Checkbox cannot open a dialog, so the box lives in the
+    page: ticking it opens a modal with the consent text (`consent_html`,
+    the view's REPORT_CONSENT) and `value` only becomes True once the tester
+    confirms there. Declining, Esc, or a browser without <dialog> saying no
+    to its confirm box leaves the box unticked. Unticking needs no dialog.
+    The trait names match the Checkbox it replaced (`value`, `disabled`), so
+    the view observes it the same way.
+    """
+
+    _esm = _ESM
+    _css = _CSS
+    _role = traitlets.Unicode("consent").tag(sync=True)
+    value = traitlets.Bool(False).tag(sync=True)
+    disabled = traitlets.Bool(False).tag(sync=True)
+    label = traitlets.Unicode("").tag(sync=True)
+    heading = traitlets.Unicode("Send diagnostic reports?").tag(sync=True)
+    # The dialog's body. Our own markup, never tester text.
+    consent_html = traitlets.Unicode("").tag(sync=True)

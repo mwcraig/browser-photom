@@ -134,8 +134,13 @@ change at the DR2-to-DR3 level; when CDS fails it falls back to the CfA and
 IDIA VizieR mirrors, keeps error answers out of astroquery's cache, and raises
 `GaiaQueryError`, which `prepare_batch` wraps in the `BatchPrepError`
 `make_bandaid_processor` already catches. The per-frame API and the QA record
-are again unchanged. A browser-versus-native comparison has not been run at
-1775df7 or at 0378410. The larger browser-versus-native position difference,
+are again unchanged. The 155-frame LS Psc comparison was rerun at 0378410
+(2026-10-27, PROGRESS has the numbers): browser and native CLI agree as well
+as at b7fb737 (fwhm max 2e-5 relative, one row of 46k unmatched at the SNR
+edge, tot_count tail under 1 %); no comparison was run at 1775df7. The same
+rerun found that a fresh kernel build picks up twirl 0.6.0, which fails every
+plate solve on wasm32, so environment.yml now pins twirl 0.5.2. The larger
+browser-versus-native position difference,
 about 3e-5 px from float32 rounding under numpy 2, is bandaid #155 and is in
 no pin yet. This is the one place that difference is described; README, PROGRESS and
 the code comments point here. Everything in `photom_dashboard.py` above

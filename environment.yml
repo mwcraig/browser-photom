@@ -37,8 +37,14 @@ dependencies:
       - astro-image-display-api
       - ./astrowidgets-src
       # jupyterlite-xeus pip does NOT resolve dependencies — deliberately, so
-      # huggingface_hub, jax, and twirl's numpy<2 pin never enter the env
-      - twirl
+      # huggingface_hub, jax, and twirl's numpy<2 pin never enter the env.
+      # Pinned: twirl 0.6.0 (PyPI 2026-10-26) rewrote find_transform with
+      # explicit int64 index arrays (twirl/match.py:153, np.repeat of an
+      # int64 arange by int64 lengths), and on wasm32 np.intp is int32, so
+      # every plate solve raises "Cannot cast array data from dtype('int64')
+      # to dtype('int32')" and every frame is skipped. 0.5.2 is what the
+      # deployed August build had. Bump deliberately, after a browser run.
+      - twirl==0.5.2
       - ./eloy-src
       - ./bandaid-src
       - ./aavso-starlist-schema-src

@@ -1658,3 +1658,43 @@ done: a browser-versus-native rerun at this pin.
 Still open: the dashboard retries prep on every frame after a failure, so
 during an outage each frame can wait through all three servers (the
 follow-up noted in bandaid #169).
+
+# LS Psc browser-versus-native rerun at 0378410, and the twirl 0.6.0 pin (2026-10-27)
+
+Run by a subagent for PR #22. Native: bandaid CLI at 0378410 in the eloy env
+(numpy 1.26.4, `BANDAID_BALLET_BACKEND=numpy`, bandaid-src on PYTHONPATH,
+observer WCR, site_elev 300.0): 155/155 in 73.7 s, prep 793 photometry
+targets, g_cut 12.2515 (was 12.2629 at b7fb737), no Gaia fallback warning
+(CDS answered, or the astroquery cache did). Output kept as
+`~/Downloads/ls_psc_reference_star_0378410/`. Browser: `pixi run build-dash`
+at fd5b647, driven with Playwright through the installed Chrome (headful,
+folder fed to the hidden webkitdirectory input with `setInputFiles`, consent
+box disabled because FEEDBACK_URL was unset): 155/155 in 147 s, median
+0.8 s/frame, tab visible throughout. Zip kept as
+`~/Downloads/ls_psc_subset155-starlists.bandaid-0378410.browser-photom-fd5b647-dirty.twirl-0.5.2.zip`.
+
+Browser vs native at 0378410 (`ls_psc_compare_star.py`, ra/dec at 6 dp):
+unmatched rows 0 in TR/TB/L4 and 1 browser-only in TG (of 13101; SNR 2.006,
+the min_snr edge); max |dx| 6.44e-5, |dy| 6.29e-5 px (bandaid #155 float32,
+17961/45889 browser rows float32-exact vs 324 native); fwhm max 1.98e-5
+relative (012806), none above 1e-3; tot_count max 8.8e-3 (TB 035213), p999
+under 3.5e-3; count_err max 1.76e-2 (TR 012806, the only row over 1 %);
+bkgd_count max 1.2e-3; peak_count identical; no header mismatches (the
+schema_version strings differ by source clone only). As good as or better
+than the b7fb737 result. Native 0378410 vs native b7fb737 and browser
+0378410 vs browser 1775df7 both show the DR2-to-DR3 catalog change (about
+400 fewer rows per filter, roughly 70 new and 15 dropped stars per filter
+within 1 arcsec, seed positions moving up to 0.6 px) plus, native-only, the
+1775df7 background and egain shifts; fwhm identical on all 620 frame-filters
+in both.
+
+The surprise: the fresh build pulled twirl 0.6.0 (PyPI 2026-10-26), and with
+it every frame was skipped with `TypeError: Cannot cast array data from
+dtype('int64') to dtype('int32') according to the rule 'safe'` from
+`twirl.match.find_transform` (match.py:153, `np.repeat` of an int64 arange
+by int64 lengths; np.intp is int32 on wasm32), reached from
+`photometry._solve_wcs` -> `twirl.compute_wcs`. Batch prep still succeeded.
+The numbers above come from a scratch build with `twirl==0.5.2`, otherwise
+identical; environment.yml now pins that, since the Pages deploy re-solves
+the env on every merge. The eloy env still has 0.5.2, so native is unaffected
+until it is upgraded. Not filed upstream yet.

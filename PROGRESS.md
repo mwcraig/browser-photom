@@ -1843,3 +1843,15 @@ stars, truncation, edge margin) still retry on the next frame, a non-Gaia
 one resets the backoff step, and the first failure's reason keeps its
 `batch prep failed: ` shape. Tests are host-only, against a stub bandaid
 (`tests/test_bandaid_processor.py`); not yet seen in a browser run.
+
+Browser check of 5822037 (PR #23), forced failures as above: the `bandaid:`
+line for the CDS failure appeared 0.6 s after it, while CfA's request was
+still open, so the panel does update mid-fallback. A hung CfA gave
+`TimeoutError`, not `NetworkError`. A 20-frame drop with CDS and IDIA
+refused and CfA hung made 3 POSTs and took 77.7 s (cooldown started after
+71 s, frames 2-20 skipped within 0.2 s); all three refused made 15 POSTs in
+11.8 s with no cooldown, as intended. One UX bug: the view logged a
+`[skip]` line per cooldown frame, so within 0.3 s the 12-line panel held
+only "not retried" lines and the cause, the cooldown line and the
+`bandaid:` lines were gone. The view now collapses consecutive cooldown
+skips into one counted line, rewritten in place.

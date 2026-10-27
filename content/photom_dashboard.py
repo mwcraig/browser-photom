@@ -1119,6 +1119,9 @@ GAIA_RETRY_MAX_S = 600
 # one hung or answered 504; a fast failure costs nothing to retry, and the
 # next frame may find the network back.
 GAIA_SLOW_PREP_S = 10
+# How every cooldown skip reason starts; the view collapses a run of them
+# into one counted log line.
+GAIA_COOLDOWN_SKIP_PREFIX = "batch prep not retried"
 
 # One dashboard log line per bandaid warning: the panel is a 12-line ring
 # buffer, and a pyodide network error stringifies as a ~1.2 kB JSON-wrapped JS
@@ -1343,7 +1346,7 @@ def make_bandaid_processor(
                     # the cooldown, can run to 1.4 kB, and a dozen copies
                     # would push everything else out of the log panel.
                     return (
-                        f"batch prep not retried: Gaia failed "
+                        f"{GAIA_COOLDOWN_SKIP_PREFIX}: Gaia failed "
                         f"{int(now - batch['gaia_at'])}s ago (see the first "
                         f"skipped frame), next retry in "
                         f"{math.ceil(batch['gaia_until'] - now)}s"

@@ -1631,3 +1631,30 @@ SNR 2-5, ~15 % at 10-20, ~25 % at 20-50 and about half above 100, so
 egain is in each file's metadata; err_new^2 = err_old^2 +
 tot_count*(1/0.046 - 1/0.3116) corrects the gain in place, nothing
 corrects the background).
+
+# bandaid pin moved to 0378410 (2026-10-27)
+
+PR #170 (closes bandaid #169): the Gaia query is DR3 (VizieR
+`I/355/gaiadr3`, epoch J2016.0) instead of DR2, column names unchanged; it
+tries CDS, then the CfA and IDIA mirrors (10 s to connect, 60 s per read),
+logs a warning per skipped server, evicts error answers from
+astroquery's cache, and raises the new `GaiaQueryError` when every server
+fails. `prepare_batch` wraps that in `BatchPrepError` ("could not query Gaia
+for the field at (ra, dec): <cause>"), which `make_bandaid_processor`
+already catches, so no code change here. No change to `process_frame`,
+`FrameResult`, `qa_record_skipped` or the QA columns; eloy stays a056c91.
+The catalog switch can move star lists and the `g_cut` set at the
+DR2-to-DR3 level. `pixi run test` (530) and `pixi run test-js` (97) pass
+against the new checkout; neither imports bandaid, so only a browser run
+exercises the fallback. Two browser caveats, reasoned from the pyjs and
+pyodide_http sources, not yet seen in a run: pyodide_http folds the
+(10, 60) tuple into one 70 s XHR timeout per server, and a timed-out or
+CORS-blocked request surfaces as pyjs's `JsGenericError`, whose text is
+probably `{}`, so the skip reason may not say timeout versus CORS. A
+curl probe on 2026-10-27 had CfA answer 504 after 60 s with no CORS
+header (CDS and IDIA fine), so a CDS outage costs about two minutes
+before IDIA is tried; a bandaid follow-up (reorder or drop CfA). Not
+done: a browser-versus-native rerun at this pin.
+Still open: the dashboard retries prep on every frame after a failure, so
+during an outage each frame can wait through all three servers (the
+follow-up noted in bandaid #169).

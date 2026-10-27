@@ -127,10 +127,22 @@ median, so every `bkgd_count`, flux and `sky` value shifts by a fraction of an
 ADU per pixel, and PR #163 gives the Seestar50 profile its measured red-channel
 `egain` (0.046 e-/ADU), which lowers `snr` on that instrument and can change
 which rows pass `min_snr`. Neither touches the per-frame API or the QA record.
-A browser-versus-native comparison at this pin has not been run. The
-larger browser-versus-native position difference, about
-3e-5 px from float32 rounding under numpy 2, is bandaid #155 and is in no pin
-yet. This is the one place that difference is described; README, PROGRESS and
+The pin is now 0378410 (2026-10-27, bandaid PR #170, closing bandaid #169):
+the Gaia query is DR3 (VizieR `I/355/gaiadr3`, epoch J2016.0) rather than DR2,
+so the catalog stars, and with them the star lists and the `g_cut` set, can
+change at the DR2-to-DR3 level; when CDS fails it falls back to the CfA and
+IDIA VizieR mirrors, keeps error answers out of astroquery's cache, and raises
+`GaiaQueryError`, which `prepare_batch` wraps in the `BatchPrepError`
+`make_bandaid_processor` already catches. The per-frame API and the QA record
+are again unchanged. The 155-frame LS Psc comparison was rerun at 0378410
+(2026-10-27, PROGRESS has the numbers): browser and native CLI agree as well
+as at b7fb737 (fwhm max 2e-5 relative, one row of 46k unmatched at the SNR
+edge, tot_count tail under 1 %); no comparison was run at 1775df7. The same
+rerun found that a fresh kernel build picks up twirl 0.6.0, which fails every
+plate solve on wasm32, so environment.yml now pins twirl 0.5.2. The larger
+browser-versus-native position difference,
+about 3e-5 px from float32 rounding under numpy 2, is bandaid #155 and is in
+no pin yet. This is the one place that difference is described; README, PROGRESS and
 the code comments point here. Everything in `photom_dashboard.py` above
 `make_bandaid_processor` is import-free beyond the standard library
 (a rule its module docstring states), so the host test environment needs neither numpy,

@@ -1631,3 +1631,108 @@ SNR 2-5, ~15 % at 10-20, ~25 % at 20-50 and about half above 100, so
 egain is in each file's metadata; err_new^2 = err_old^2 +
 tot_count*(1/0.046 - 1/0.3116) corrects the gain in place, nothing
 corrects the background).
+
+# bandaid pin moved to 0378410 (2026-10-27)
+
+PR #170 (closes bandaid #169): the Gaia query is DR3 (VizieR
+`I/355/gaiadr3`, epoch J2016.0) instead of DR2, column names unchanged; it
+tries CDS, then the CfA and IDIA mirrors (10 s to connect, 60 s per read),
+logs a warning per skipped server, evicts error answers from
+astroquery's cache, and raises the new `GaiaQueryError` when every server
+fails. `prepare_batch` wraps that in `BatchPrepError` ("could not query Gaia
+for the field at (ra, dec): <cause>"), which `make_bandaid_processor`
+already catches, so no code change here. No change to `process_frame`,
+`FrameResult`, `qa_record_skipped` or the QA columns; eloy stays a056c91.
+The catalog switch can move star lists and the `g_cut` set at the
+DR2-to-DR3 level. `pixi run test` (530) and `pixi run test-js` (97) pass
+against the new checkout; neither imports bandaid, so only a browser run
+exercises the fallback. Two browser caveats, reasoned from the pyjs and
+pyodide_http sources, not yet seen in a run: pyodide_http folds the
+(10, 60) tuple into one 70 s XHR timeout per server, and a timed-out or
+CORS-blocked request surfaces as pyjs's `JsGenericError`, whose text is
+probably `{}`, so the skip reason may not say timeout versus CORS. A
+curl probe on 2026-10-27 had CfA answer 504 after 60 s with no CORS
+header (CDS and IDIA fine), so a CDS outage costs about two minutes
+before IDIA is tried; a bandaid follow-up (reorder or drop CfA). Not
+done: a browser-versus-native rerun at this pin.
+Still open: the dashboard retries prep on every frame after a failure, so
+during an outage each frame can wait through all three servers (the
+follow-up noted in bandaid #169).
+
+# LS Psc browser-versus-native rerun at 0378410, and the twirl 0.6.0 pin (2026-10-27)
+
+Run by a subagent for PR #22. Native: bandaid CLI at 0378410 in the eloy env
+(numpy 1.26.4, `BANDAID_BALLET_BACKEND=numpy`, bandaid-src on PYTHONPATH,
+observer WCR, site_elev 300.0): 155/155 in 73.7 s, prep 793 photometry
+targets, g_cut 12.2515 (was 12.2629 at b7fb737), no Gaia fallback warning
+(CDS answered, or the astroquery cache did). Output kept as
+`~/Downloads/ls_psc_reference_star_0378410/`. Browser: `pixi run build-dash`
+at fd5b647, driven with Playwright through the installed Chrome (headful,
+folder fed to the hidden webkitdirectory input with `setInputFiles`, consent
+box disabled because FEEDBACK_URL was unset): 155/155 in 147 s, median
+0.8 s/frame, tab visible throughout. Zip kept as
+`~/Downloads/ls_psc_subset155-starlists.bandaid-0378410.browser-photom-fd5b647-dirty.twirl-0.5.2.zip`.
+
+Browser vs native at 0378410 (`ls_psc_compare_star.py`, ra/dec at 6 dp):
+unmatched rows 0 in TR/TB/L4 and 1 browser-only in TG (of 13101; SNR 2.006,
+the min_snr edge); max |dx| 6.44e-5, |dy| 6.29e-5 px (bandaid #155 float32,
+17961/45889 browser rows float32-exact vs 324 native); fwhm max 1.98e-5
+relative (012806), none above 1e-3; tot_count max 8.8e-3 (TB 035213), p999
+under 3.5e-3; count_err max 1.76e-2 (TR 012806, the only row over 1 %);
+bkgd_count max 1.2e-3; peak_count identical; no header mismatches (the
+schema_version strings differ by source clone only). As good as or better
+than the b7fb737 result. Native 0378410 vs native b7fb737 and browser
+0378410 vs browser 1775df7 both show the DR2-to-DR3 catalog change (about
+400 fewer rows per filter, roughly 70 new and 15 dropped stars per filter
+within 1 arcsec, seed positions moving up to 0.6 px) plus, native-only, the
+1775df7 background and egain shifts; fwhm identical on all 620 frame-filters
+in both.
+
+The surprise: the fresh build pulled twirl 0.6.0 (PyPI 2026-10-26), and with
+it every frame was skipped with `TypeError: Cannot cast array data from
+dtype('int64') to dtype('int32') according to the rule 'safe'` from
+`twirl.match.find_transform` (match.py:153, `np.repeat` of an int64 arange
+by int64 lengths; np.intp is int32 on wasm32), reached from
+`photometry._solve_wcs` -> `twirl.compute_wcs`. Batch prep still succeeded.
+The numbers above come from a scratch build with `twirl==0.5.2`, otherwise
+identical; environment.yml now pins that, since the Pages deploy re-solves
+the env on every merge. The eloy env still has 0.5.2, so native is unaffected
+until it is upgraded. Not filed upstream yet.
+
+# Forced Gaia failures in the browser at 0378410 (2026-10-27)
+
+Four runs of five LS Psc frames in the twirl-0.5.2 build at this pin, Chrome
+launched with `--host-resolver-rules` so the kernel worker's XHR to a VizieR
+host is refused (127.0.0.1) or hangs (10.255.255.1); the worker's POSTs to
+`/viz-bin/votable` show in Playwright's request log, so each block was
+verified. A: CDS refused -> CfA fails after 62 s (504, no CORS header,
+`ERR_INCOMPLETE_CHUNKED_ENCODING`) -> IDIA 200 in 4 s; 5/5 ok, first
+outcome 75 s after the drop. C: CDS hung -> `ERR_TIMED_OUT` at exactly 70.0 s
+(pyodide_http folds (10, 60) into one XHR timeout) -> CfA 60 s -> IDIA; 5/5
+ok, first outcome 142 s. B: all three refused -> 5/5 skipped, prep retried
+on every frame but refused connections fail at once (~0.3 s per frame). D:
+CDS and IDIA refused, CfA live -> 5/5 skipped at ~60.5 s per frame (CfA's
+dead time, paid on every retry): 5.2 min for five frames, so a 155-frame
+night with Gaia down would spend ~2.6 h skipping. The page stayed responsive
+throughout; nothing on screen explains the 66-133 s silence between
+"Downloaded 39.2 MB." and "Batch prep done".
+
+What a tester sees: bandaid's per-server `Gaia query to %s failed, skipping
+it` warning appears nowhere (not the log panel, not the page, not the
+console), so a fallback is silent and only the final error names a server,
+and only the last one tried (IDIA), even when CfA was the one that burned
+60 s. The skip reason is `batch prep failed: could not query Gaia for the
+field at (26.0481, 12.7537): no Gaia server answered the query; tried
+vizier.cds.unistra.fr, vizier.cfa.harvard.edu, vizier.idia.ac.za; last
+error: JsGenericError: {"stack":"NetworkError: Failed to execute 'send' on
+'XMLHttpRequest': Failed to load 'https://vizier.idia.ac.za/viz-bin/votable'.
+\n at Module._apply_try_catch (...xpython.js:7:1950) ...` -- 1414 chars, a
+JSON-wrapped JS stack with page-origin URLs, not the `{}` guessed earlier.
+Refused, timed out, CORS-blocked and 504 all produce the same NetworkError
+text; only the wall-clock time tells them apart. `feedback_report._reason`
+keeps the first 300 chars, which does carry the NetworkError text but cuts
+the `[url]` redaction marker to `[ur`. Follow-ups: surface the per-server
+warnings (route bandaid's logger to the dashboard log), shorten the
+JsException str in bandaid to the DOMException message, and cap or back off
+the per-frame prep retry (the bandaid #169 follow-up). Captures are in the
+session scratchpad (gaia_A..D, drive_gaia.mjs); none are committed.

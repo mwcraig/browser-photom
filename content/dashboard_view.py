@@ -35,6 +35,7 @@ from feedback_report import (
 )
 from photom_dashboard import (
     CHUNK_BYTES,
+    GAIA_COOLDOWN_SKIP_PREFIX,
     LazyProcessor,
     SLOWDOWN_FACTOR,
     PhotometryDashboard,
@@ -132,6 +133,9 @@ class DashboardView:
         self.results_dir = results_dir
         self._meta = {}
         self._log = deque(maxlen=LOG_LINES)
+        # Frames counted in the collapsed cooldown line, if it is the
+        # panel's last line (see _log_skip).
+        self._cooldown_skips = 0
         self._seen_skips = 0
         # Tester reports (feedback_report). `report_url` overrides the
         # build's endpoint, for tests; "" disables reporting.
@@ -689,6 +693,8 @@ class DashboardView:
         # (which the manifest's zero-byte-skip path can produce), silently
         # swallowing the new run's first skip lines.
         self._seen_skips = 0
+        # A new run's cooldown skips get their own counted line.
+        self._cooldown_skips = 0
         # The report's run-scoped reset first: if the processor's reset
         # raised before it, the run would die (the dashboard replies
         # `error`) with the previous run's id, rows and status line still
@@ -726,6 +732,29 @@ class DashboardView:
         self._log.append(str(message))
         self._paint_log()
 
+    def _log_skip(self, name, reason):
+        # During a Gaia cooldown every remaining frame of a drop is skipped
+        # within a second or so; one "[skip]" line each pushed the frame that
+        # carries the cause, the cooldown line and bandaid's per-server
+        # warnings out of the 12-line panel (seen in the 2026-10-27 browser
+        # run). A run of them is one line with a count, rewritten in place;
+        # each frame's own reason is unchanged in `state.skips` and the
+        # reports.
+        if not str(reason).startswith(GAIA_COOLDOWN_SKIP_PREFIX):
+            self.log(f"[skip] {name}: {reason}")
+            return
+        if self._cooldown_skips and self._log and self._log[-1] == self._cooldown_line():
+            self._log.pop()
+        else:
+            self._cooldown_skips = 0
+        self._cooldown_skips += 1
+        self.log(self._cooldown_line())
+
+    def _cooldown_line(self):
+        n = self._cooldown_skips
+        return (f"[skip] {n} frame{'' if n == 1 else 's'} not retried: Gaia "
+                "failed, batch prep cooldown (see the first skipped frame above)")
+
     def _paint_log(self):
         rows = "<br>".join(
             _escape(line) for line in self._log
@@ -745,7 +774,7 @@ class DashboardView:
         # starlist, and the counts alone do not say which frame or why.
         # _on_new_run zeroes _seen_skips when a manifest restarts the counters.
         for name, reason in state.skips[self._seen_skips:]:
-            self.log(f"[skip] {name}: {reason}")
+            self._log_skip(name, reason)
         self._seen_skips = len(state.skips)
         self._refresh()
 

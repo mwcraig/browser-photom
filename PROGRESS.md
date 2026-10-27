@@ -1698,3 +1698,41 @@ The numbers above come from a scratch build with `twirl==0.5.2`, otherwise
 identical; environment.yml now pins that, since the Pages deploy re-solves
 the env on every merge. The eloy env still has 0.5.2, so native is unaffected
 until it is upgraded. Not filed upstream yet.
+
+# Forced Gaia failures in the browser at 0378410 (2026-10-27)
+
+Four runs of five LS Psc frames in the twirl-0.5.2 build at this pin, Chrome
+launched with `--host-resolver-rules` so the kernel worker's XHR to a VizieR
+host is refused (127.0.0.1) or hangs (10.255.255.1); the worker's POSTs to
+`/viz-bin/votable` show in Playwright's request log, so each block was
+verified. A: CDS refused -> CfA fails after 62 s (504, no CORS header,
+`ERR_INCOMPLETE_CHUNKED_ENCODING`) -> IDIA 200 in 4 s; 5/5 ok, first
+outcome 75 s after the drop. C: CDS hung -> `ERR_TIMED_OUT` at exactly 70.0 s
+(pyodide_http folds (10, 60) into one XHR timeout) -> CfA 60 s -> IDIA; 5/5
+ok, first outcome 142 s. B: all three refused -> 5/5 skipped, prep retried
+on every frame but refused connections fail at once (~0.3 s per frame). D:
+CDS and IDIA refused, CfA live -> 5/5 skipped at ~60.5 s per frame (CfA's
+dead time, paid on every retry): 5.2 min for five frames, so a 155-frame
+night with Gaia down would spend ~2.6 h skipping. The page stayed responsive
+throughout; nothing on screen explains the 66-133 s silence between
+"Downloaded 39.2 MB." and "Batch prep done".
+
+What a tester sees: bandaid's per-server `Gaia query to %s failed, skipping
+it` warning appears nowhere (not the log panel, not the page, not the
+console), so a fallback is silent and only the final error names a server,
+and only the last one tried (IDIA), even when CfA was the one that burned
+60 s. The skip reason is `batch prep failed: could not query Gaia for the
+field at (26.0481, 12.7537): no Gaia server answered the query; tried
+vizier.cds.unistra.fr, vizier.cfa.harvard.edu, vizier.idia.ac.za; last
+error: JsGenericError: {"stack":"NetworkError: Failed to execute 'send' on
+'XMLHttpRequest': Failed to load 'https://vizier.idia.ac.za/viz-bin/votable'.
+\n at Module._apply_try_catch (...xpython.js:7:1950) ...` -- 1414 chars, a
+JSON-wrapped JS stack with page-origin URLs, not the `{}` guessed earlier.
+Refused, timed out, CORS-blocked and 504 all produce the same NetworkError
+text; only the wall-clock time tells them apart. `feedback_report._reason`
+keeps the first 300 chars, which does carry the NetworkError text but cuts
+the `[url]` redaction marker to `[ur`. Follow-ups: surface the per-server
+warnings (route bandaid's logger to the dashboard log), shorten the
+JsException str in bandaid to the DOMException message, and cap or back off
+the per-frame prep retry (the bandaid #169 follow-up). Captures are in the
+session scratchpad (gaia_A..D, drive_gaia.mjs); none are committed.

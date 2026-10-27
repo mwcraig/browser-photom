@@ -21,6 +21,7 @@ photometry is injected as a `process_frame(path, name)` callable.
 from __future__ import annotations
 
 import io
+import logging
 import math
 import os
 import statistics
@@ -1102,10 +1103,106 @@ class PhotometryDashboard:
 # The real photometry (browser only)
 # --------------------------------------------------------------------------
 
+# After a batch prep that failed *slowly* because no Gaia server answered,
+# later frames skip prep for this long instead of retrying it on every frame,
+# doubling per further slow Gaia failure up to the cap. A retry is not cheap
+# when a server hangs rather than refuses: the 2026-10-27 forced-failure runs
+# (PROGRESS) measured ~60 s per retry with only CfA reachable and 142 s with
+# CDS hanging, so a 155-frame night with Gaia down spent ~2.6 h retrying.
+# In a folder drop a skipped frame costs only its upload, so the cooldown
+# outlasts the rest of the drop: at most one slow attempt per drop, and
+# re-dropping the folder (which calls `reset()`) retries at once.
+GAIA_RETRY_FIRST_S = 60
+GAIA_RETRY_MAX_S = 600
+# Only a Gaia failure that took longer than this starts a cooldown. The same
+# runs measured ~0.3 s when every server refused outright and 60-135 s when
+# one hung or answered 504; a fast failure costs nothing to retry, and the
+# next frame may find the network back.
+GAIA_SLOW_PREP_S = 10
+
+# One dashboard log line per bandaid warning: the panel is a 12-line ring
+# buffer, and a pyodide network error stringifies as a ~1.2 kB JSON-wrapped JS
+# stack that would otherwise fill it.
+BANDAID_LOG_MAX_CHARS = 160
+_BANDAID_HANDLER_NAME = "browser-photom-dashboard-log"
+
+
+def _one_line(text, limit=BANDAID_LOG_MAX_CHARS):
+    """`text`'s first line, at most `limit` characters, with an ellipsis if
+    anything was cut."""
+    text = str(text)
+    lines = text.splitlines()
+    line = lines[0].rstrip() if lines else ""
+    cut = len(lines) > 1 or len(line) > limit
+    if len(line) > limit - 1 and cut:
+        line = line[: limit - 1].rstrip()
+    return f"{line}\u2026" if cut else line
+
+
+class _BandaidLogHandler(logging.Handler):
+    """Forwards bandaid's warnings to the dashboard log, one line each.
+
+    bandaid attaches a `NullHandler` to its package logger and configures
+    nothing else, so without this its warnings -- notably the catalog's
+    "Gaia query to <server> failed, skipping it" before each VizieR
+    fallback -- reach neither the log panel nor the browser console, and a
+    fallback is a minute or two of unexplained silence.
+    """
+
+    def __init__(self, log):
+        super().__init__(level=logging.WARNING)
+        self.set_name(_BANDAID_HANDLER_NAME)
+        self.target = log
+        self.seen = set()
+
+    def emit(self, record):
+        try:
+            # A record with exc_info is bandaid reporting a frame it is also
+            # handing back to us as a skip or error result (`skipping %s` in
+            # `_warn_frame_skip`, `unexpected error on %s`), which the view
+            # already logs as a "[skip]" line; repeating it would halve what
+            # the panel can show.
+            if record.exc_info:
+                return
+            # The catalog's warnings (one per failed Gaia server, the
+            # contaminant row limit) come once per prep attempt and say
+            # something new each time. The rest can fire on every frame --
+            # field below the horizon, pointing beyond the catalog margin,
+            # dropped filters, up to three lines a frame -- so each message
+            # template is shown once per run (the processor's `reset()`
+            # clears `seen`).
+            if record.name != "bandaid.catalog":
+                key = (record.name, record.msg)
+                if key in self.seen:
+                    return
+                self.seen.add(key)
+            self.target(f"bandaid: {_one_line(record.getMessage())}")
+        except Exception:  # noqa: BLE001 - a log line must never break a frame
+            pass
+
+
+def _route_bandaid_warnings(log):
+    """Attach the one `_BandaidLogHandler` to the ``bandaid`` logger, or
+    point an existing one at `log`.
+
+    Found by name rather than class so a re-imported module (a notebook
+    re-running its setup cell) does not stack a second handler; the newest
+    processor's `log` wins, since an older one may belong to a view that is
+    gone. Propagation and the logger's level are left as bandaid set them.
+    """
+    logger = logging.getLogger("bandaid")
+    for handler in logger.handlers:
+        if handler.get_name() == _BANDAID_HANDLER_NAME:
+            handler.target = log
+            return handler
+    handler = _BandaidLogHandler(log)
+    logger.addHandler(handler)
+    return handler
+
 
 def make_bandaid_processor(
     user_meta, results_dir="results", *, log=print, cnn=None, on_prep=None,
-    on_result=None, on_qa=None, provenance=None,
+    on_result=None, on_qa=None, provenance=None, clock=time.monotonic,
 ):
     """Build the real `process_frame(path, name)` used in the browser.
 
@@ -1159,10 +1256,22 @@ def make_bandaid_processor(
     stored, and one from `on_result` or `on_qa` would do so after the frame
     is already on disk. bandaid, astropy, numpy and scipy are imported here
     rather than at module scope, so the host test environment never needs
-    them. The environment knobs themselves (warnings filter, keyring
+    them.
+
+    The environment knobs themselves (warnings filter, keyring
     backend, negative-import cache, pyodide_http, IERS settings) live in
     `env_setup.py` -- the one home shared with `watch_photometry.ipynb`'s
     cell 2.
+
+    bandaid's WARNING-level log records are forwarded to `log` as one
+    ``bandaid: ...`` line each (see `_BandaidLogHandler`). A batch prep that
+    fails because every Gaia server failed (its ``__cause__`` is bandaid's
+    `GaiaQueryError`) and took longer than `GAIA_SLOW_PREP_S` is not
+    retried on the next frame: frames inside a cooldown of
+    `GAIA_RETRY_FIRST_S`, doubling per further slow Gaia failure up to
+    `GAIA_RETRY_MAX_S`, are skipped without calling bandaid. Any other prep
+    failure is retried on the next frame. `clock` is the monotonic clock
+    the prep attempt and the cooldown are measured on, injectable for tests.
     """
     from pathlib import Path as _Path
 
@@ -1174,10 +1283,18 @@ def make_bandaid_processor(
     from bandaid import (
         BatchPrepError,
         FrameError,
+        GaiaQueryError,
         PhotometryConfig,
         prepare_batch,
         qa_record_skipped,
     )
+
+    # Here, at build time, rather than on the first `process_frame` call:
+    # nothing of bandaid's runs before this returns, so no warning is missed,
+    # and the per-frame path needs no installed-yet flag. The dashboard builds
+    # the processor once per session, so "once per processor" is once per
+    # session there; a rebuild re-targets the handler instead of adding one.
+    log_handler = _route_bandaid_warnings(log)
 
     if cnn is None:
         from ballet_sgemm import load_cnn
@@ -1195,8 +1312,17 @@ def make_bandaid_processor(
     if not callable(results_dir):
         os.makedirs(results_dir, exist_ok=True)
     # Batch prep is built from the first frame, exactly as the bandaid CLI
-    # does with the first file of a batch.
+    # does with the first file of a batch. The gaia_* keys are the retry
+    # cooldown after a slow Gaia failure: gaia_wait is the current backoff
+    # step (None until Gaia first fails slowly, cleared once Gaia answers),
+    # gaia_until the clock time before which prep is not retried (None once
+    # the cooldown is lifted), gaia_at when the last slow failure ended.
     batch = {"prep": None, "n": 0}
+
+    def clear_gaia():
+        batch.update(gaia_wait=None, gaia_until=None, gaia_at=None)
+
+    clear_gaia()
 
     def emit_qa(name, qa, schema_version):
         if on_qa is not None:
@@ -1207,12 +1333,50 @@ def make_bandaid_processor(
         # nothing to copy off the contents drive first.
         started = time.monotonic()
         if batch["prep"] is None:
+            if batch["gaia_until"] is not None:
+                now = clock()
+                if now < batch["gaia_until"]:
+                    # No prep attempt and no bandaid call: with a server
+                    # hanging, each retry blocks the kernel for a minute or
+                    # more. No QA row either, as for any prep failure.
+                    # The cause is left out: it is on the frame that started
+                    # the cooldown, can run to 1.4 kB, and a dozen copies
+                    # would push everything else out of the log panel.
+                    return (
+                        f"batch prep not retried: Gaia failed "
+                        f"{int(now - batch['gaia_at'])}s ago (see the first "
+                        f"skipped frame), next retry in "
+                        f"{math.ceil(batch['gaia_until'] - now)}s"
+                    )
+                batch["gaia_until"] = None
+                log(f"Retrying batch prep ({batch['gaia_wait']} s Gaia cooldown over).")
+            prep_started = clock()
             try:
                 batch["prep"] = prepare_batch(path, cnn=cnn, config=config)
             except BatchPrepError as exc:
-                # Fatal to *prep*, not to the run: leave it None so the next
+                # Fatal to *prep*, not to the run: leave it None so a later
                 # frame retries, rather than one bad first frame killing all.
+                # A bad frame, too few stars or a truncated catalog fails
+                # fast and the next frame may well succeed, so retry at once.
+                # Every Gaia server failing is about the network, not the
+                # frame; when that took minutes (a server hung), back off.
+                now = clock()
+                took = now - prep_started
+                if not isinstance(exc.__cause__, GaiaQueryError):
+                    # Raised after the catalog query, so Gaia answered: the
+                    # next slow Gaia failure starts the ladder over.
+                    batch["gaia_wait"] = None
+                elif took > GAIA_SLOW_PREP_S:
+                    wait = (GAIA_RETRY_FIRST_S if batch["gaia_wait"] is None
+                            else min(2 * batch["gaia_wait"], GAIA_RETRY_MAX_S))
+                    batch.update(gaia_wait=wait, gaia_until=now + wait, gaia_at=now)
+                    log(f"Gaia failed after {took:.0f} s; not retrying batch prep "
+                        f"for {wait} s (drop the folder again to retry now).")
+                # Unchanged for every cause: feedback reports and the view's
+                # "[skip]" line show the "batch prep failed: " prefix.
                 return f"batch prep failed: {exc}"
+            # No clear_gaia() here: once prep exists it is never attempted
+            # again until `reset()`, which clears the cooldown itself.
             log(f"Batch prep done: {len(batch['prep'].photometry_coords)} photometry stars.")
             if on_prep is not None:
                 on_prep(batch["prep"])
@@ -1273,6 +1437,11 @@ def make_bandaid_processor(
         # cheap when the next folder really is the same field.
         batch["prep"] = None
         batch["n"] = 0
+        # A new folder gets an immediate attempt: re-dropping is how a tester
+        # says "try again now", and it may be a different field.
+        clear_gaia()
+        # And a new run shows each once-per-run bandaid warning afresh.
+        log_handler.seen.clear()
 
     process_frame.reset = reset
     return process_frame

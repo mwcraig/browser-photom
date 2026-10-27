@@ -168,6 +168,60 @@ Two further fixes from the PR-review batch live in this same seam.
 `make_bandaid_processor` returns a `process_frame` with a `reset()` hook
 that clears the cached batch prep, so a second folder is never photometered
 against the first folder's catalog.
+
+Batch prep and its retries. Prep is built from the first frame that reaches
+the processor; a `BatchPrepError` skips that frame with the reason
+`batch prep failed: <message>` (the prefix the tester reports and the
+view's `[skip]` line show) and leaves prep unbuilt, so a later frame retries.
+How soon depends on the cause. A bad first frame, too few stars, a truncated
+catalog or the edge-margin check fails in well under a second and the next
+frame may well be fine, so the next frame retries. When the error's
+`__cause__` is bandaid's `GaiaQueryError` (every VizieR server failed), the
+problem is the network, not the frame, and a retry can cost minutes: the
+forced-failure runs of 2026-10-27 (PROGRESS) measured ~60 s per retry with
+only CfA answering (its 504 after 60 s) and 142 s with CDS hanging, against
+0.3 s when all three refuse. So a Gaia failure whose `prepare_batch` call
+took longer than `GAIA_SLOW_PREP_S` (10 s) starts a cooldown of
+`GAIA_RETRY_FIRST_S` (60 s), doubled by each further slow Gaia failure up to
+`GAIA_RETRY_MAX_S` (600 s); a fast one (every server refused) is retried on
+the next frame like any other prep failure, and a non-Gaia prep failure,
+which means Gaia answered, puts the next cooldown back at 60 s. A frame
+inside the cooldown is skipped at once, with no bandaid call and, as for any
+prep failure, no QA row, with the short reason `batch prep not retried: Gaia
+failed <n>s ago (see the first skipped frame), next retry in <m>s`; the full
+cause is only on the frame that failed, so a run of these does not push
+everything else out of the 12-line log panel. The first frame after the
+cooldown retries. The log panel gets `Gaia failed after 68 s; not retrying
+batch prep for 60 s (drop the folder again to retry now).` when a cooldown
+starts and `Retrying batch prep (60 s Gaia cooldown over).` when it is
+lifted. In a folder drop a skipped frame costs only its upload (tens of
+ms), so the cooldown outlasts the rest of the drop: a drop makes at most one
+slow attempt, the rest of its frames are skipped, and the doubling only
+matters for frames that keep arriving (the watch notebook). Dropping the
+folder again calls `reset()`, which clears the cooldown, so it retries at
+once. The clock is `time.monotonic` unless the `clock=` argument replaces it
+(the tests do).
+
+bandaid's own warnings reach the log panel. bandaid puts a `NullHandler` on
+its package logger and nothing else, so its per-server `Gaia query to <server>
+failed, skipping it` before each fallback used to appear nowhere, and a
+successful fallback was 66-133 s of silence after the weights download.
+`make_bandaid_processor` attaches one handler (`_BandaidLogHandler`, level
+WARNING) to the `bandaid` logger when it builds the processor, before any
+bandaid call; a rebuild re-targets that handler at the new `log` rather than
+adding a second. Each record becomes one `bandaid: <message>` line: the
+first line of the message, at most 160 characters with an ellipsis, since a
+pyodide network error stringifies as a ~1.2 kB JSON-wrapped JS stack on one
+line (the cut keeps the server and the `NetworkError` text). Records with
+`exc_info` are left out: those are bandaid logging a frame it also returns
+as a skip or error, which the view already logs as `[skip]`. Records from
+`bandaid.catalog` (one per failed Gaia server) are always forwarded; any
+other is forwarded only the first time its logger and message template are
+seen, until `reset()`, because the below-the-horizon, beyond-the-catalog-
+margin and dropped-filter warnings can fire on every frame, up to three
+lines a frame. A failing `log` is swallowed, and the logger's level and
+propagation are left alone.
+
 The pipeline-setup-failure latch does not live in `DashboardView` at all: it is
 a separate, tested class (`photom_dashboard.LazyProcessor`) that
 wraps a zero-arg factory and defers calling it until the first dropped frame,
@@ -779,6 +833,7 @@ module docstring; `FrameProcessor`).
 |---|---|
 | `tests/test_chunk_assembly.py` | `ChunkAssembler` (ordering, out-of-order/duplicate/mismatched-`nchunks` rejection, basename sanitization against `../` paths, binary exactness, multiple files in flight) and `FrameProcessor` (MEMFS copy removed on success, on a returned skip string, and on a raised exception) |
 | `tests/test_dashboard_flow.py` | `PhotometryDashboard`'s full message protocol end to end, via a `FakeWidget` stand-in for anywidget: manifest → chunk/ack sequencing → file_done → run_done, cancel mid-upload, zip_request/zip/zip_error, malformed and buffer-less chunk messages, a second manifest restarting a finished run, and `hidden_episode` (recorded mid-run, after `run_done` and after a cancel; the 2 s threshold; reset by a new manifest but not a refused one; dismiss; the banner's "keep this tab visible" instruction only mid-run; malformed payloads ignored with no `error`; the `_HANDLERS` row's failure reply pinned to `hidden_episode_error`; a nonpositive `slowdown_factor` refused) |
+| `tests/test_bandaid_processor.py` | `make_bandaid_processor` against stub `bandaid`, `env_setup` and `ballet_sgemm` modules in `sys.modules`: bandaid warnings forwarded to the log as one `bandaid: ` line cut to 160 characters (a JS stack included), `exc_info` records and INFO left out, non-catalog templates once per run until `reset()`, catalog warnings every time, one handler however often the processor is built, a raising `log` swallowed; a non-Gaia `BatchPrepError` retried on the next frame, a fast Gaia failure (either side of the 10 s threshold) likewise, a slow one keeping its `batch prep failed: ` reason and starting a 60 s cooldown whose frames are skipped with the short reason without calling `prepare_batch` or emitting QA, the retry after it, doubling to the 600 s cap, a non-Gaia failure resetting the step, a new drop after success and `reset()` starting over |
 | `tests/test_metadata.py` | `validate_metadata`'s required/optional field rules, numeric parsing, and lat/lon range checks |
 | `tests/test_run_state.py` | `RunState` counters — uploaded/processed/skipped/remaining bookkeeping, `finished`, and that `remaining` never goes negative |
 | `tests/test_zip.py` | `build_results_zip` — flattening to basenames, `.star`-only filtering, sorted and byte-deterministic output, and its error cases (empty/missing directory) |

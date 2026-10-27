@@ -1814,3 +1814,32 @@ down from 1414 characters of JSON stack at 0378410. `feedback_report._reason`
 redacts the URL and cuts at 300 characters, which now ends cleanly at
 "Failed to load " instead of a broken `[ur`. Captures are in the session
 scratchpad (browser_98183ca, gaia98_a, gaia98_b); none are committed.
+
+# Gaia fallback made visible; prep retries back off after a slow Gaia failure (2026-10-27)
+
+Two of the follow-ups from the forced-failure runs above, both in
+`make_bandaid_processor`. bandaid's WARNING records now reach the dashboard
+log: one handler on the `bandaid` logger (installed when the processor is
+built, re-targeted rather than stacked on a rebuild) writes each as one
+`bandaid: ...` line, first line only and cut to 160 characters, because the
+pyodide error text is a ~1.2 kB one-line JSON stack. Records carrying
+`exc_info` (bandaid's own per-frame skip and error logging) are left out,
+since the view already logs those frames as `[skip]`, and outside
+`bandaid.catalog` each message template is shown once per run (horizon,
+catalog-margin and dropped-filter warnings can fire every frame). So a
+fallback now says which server failed during what was 66-133 s of silence.
+And a `BatchPrepError` caused by `GaiaQueryError` whose prep call took over
+10 s (measured: ~0.3 s when every server refuses, 60-135 s when one hangs or
+504s) no longer retries on the next frame: later frames are skipped at once
+for 60 s, doubling per further slow Gaia failure to a 600 s cap, with the
+short reason `batch prep not retried: Gaia failed <n>s ago (see the first
+skipped frame), next retry in <m>s` and no QA row (as before for prep
+failures). In a drop a skipped frame costs only its upload, so this means
+at most one slow attempt per drop, and dropping the folder again (which
+calls `reset()`) retries at once; the log line says so. Run D's ~60.5 s per
+frame with only CfA live, ~2.6 h over a 155-frame night, becomes one ~60 s attempt.
+Fast Gaia failures and every other prep failure (bad first frame, too few
+stars, truncation, edge margin) still retry on the next frame, a non-Gaia
+one resets the backoff step, and the first failure's reason keeps its
+`batch prep failed: ` shape. Tests are host-only, against a stub bandaid
+(`tests/test_bandaid_processor.py`); not yet seen in a browser run.

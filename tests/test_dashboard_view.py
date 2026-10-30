@@ -164,9 +164,10 @@ COOLDOWN = ("batch prep not retried: Gaia failed 0s ago (see the first skipped "
             "frame), next retry in 60s")
 
 
-def collapsed(n):
+def collapsed(n, retry_in="60s"):
     return (f"[skip] {n} frame{'' if n == 1 else 's'} not retried: Gaia failed, "
-            "batch prep cooldown (see the first skipped frame above)")
+            f"batch prep cooldown, next retry in {retry_in} "
+            "(see the first skipped frame above)")
 
 
 def run_with_reasons(view, reasons):
@@ -194,6 +195,16 @@ def test_a_run_of_cooldown_skips_is_one_counted_line_below_the_cause(view):
 def test_a_single_cooldown_skip_is_counted_as_one_frame(view):
     run_with_reasons(view, [CAUSE, COOLDOWN])
     assert view._log[-1] == collapsed(1)
+
+
+def test_the_collapsed_line_carries_the_newest_frames_time_to_the_retry(view):
+    # The per-frame reasons count down; the one line the panel keeps must
+    # show the latest value, and still be recognised as its own line to
+    # rewrite once the countdown has changed it.
+    later = COOLDOWN.replace("0s ago", "17s ago").replace("in 60s", "in 43s")
+    run_with_reasons(view, [CAUSE, COOLDOWN, later])
+    assert view._log[-1] == collapsed(2, "43s")
+    assert sum("not retried" in line for line in view._log) == 1
 
 
 def test_another_skip_in_between_starts_a_new_counter(view):

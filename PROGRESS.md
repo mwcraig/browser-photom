@@ -1736,3 +1736,81 @@ warnings (route bandaid's logger to the dashboard log), shorten the
 JsException str in bandaid to the DOMException message, and cap or back off
 the per-frame prep retry (the bandaid #169 follow-up). Captures are in the
 session scratchpad (gaia_A..D, drive_gaia.mjs); none are committed.
+
+# bandaid pin moved to 98183ca (2026-10-30)
+
+98183ca is the merge of bandaid PR #172, on top of PRs #173 and #171. PR
+#171: when every VizieR server fails, the GAVO Heidelberg TAP service
+(`https://dc.g-vo.org/tap/sync`, `gaia.dr3lite`, DR3 at epoch 2016.0) is the
+last resort; its answers are cached through astroquery and failed answers
+evicted. bandaid now lists `requests` as a direct dependency; the kernel
+already has it (requests 2.34.2 from conda-forge, via astroquery), so
+environment.yml is unchanged. PR #172: the VizieR order is CDS, IDIA, CfA
+(CfA last because it flaps), and in the browser a failed request is
+described by the first line of its JavaScript error, in both the per-server
+warning and the `GaiaQueryError` text; a hung host gives `TimeoutError` at
+the 70 s cap. PR #173: the bundled Seestar50 profile has one `egain` per
+Bayer channel (TR 0.046, TG 0.076, TB 0.078 e-/ADU), each list's `egain` is
+its channel's, and L4 records the median per-star effective gain; fluxes are
+unchanged, green, blue and L4 `count_err` shrink and `snr` grows, so rows can
+cross `min_snr`. `build_photometry_table` now needs `filter_name=` for a
+per-channel gain, but nothing here calls it (the watch notebook's stage timer
+only wraps it with `*args, **kwargs`). `process_frame`, `prepare_batch`,
+`BatchPrep`, `FrameResult`, `qa_record_skipped`, `write_starlist_set` and the
+QA columns are unchanged (scripts.py and writers.py have no diff since
+0378410); eloy stays a056c91, twirl stays 0.5.2. `pixi run test` 518 passed
+(517 plus the cross-validate test, which needs `npm install` in
+feedback-worker/), `pixi run test-js` 97 passed.
+
+Browser run, `pixi run build-dash` with BROWSER_PHOTOM_FEEDBACK_URL unset
+(consent box disabled), Playwright driving the installed Chrome headful, the
+155-frame LS Psc subset, observer WCR, elevation 300.0: 155 ok, 0 skipped,
+median 0.8 s/frame, 200-210 s from drop to done (the driver polls every
+10 s). Prep took longer than at 0378410 because CDS was hanging that hour
+(curl to `vizier.cds.unistra.fr` timed out at 75 s; IDIA, CfA and GAVO
+answered in under 3 s): the kernel's CDS POST went out about 12 s after page load
+and the IDIA POST exactly 70 s later, so the 70 s cap and the new order did
+their job, silently, since this branch does not route bandaid's warnings to
+the log panel (PR #23). Each star list carries its channel's gain: TR 0.046,
+TG 0.076, TB 0.078, L4 0.0660 on the first frame. Zip kept as
+`~/Downloads/ls_psc_subset155-starlists.bandaid-98183ca.browser-photom-b2e0da3-dirty.zip`.
+
+Native CLI at 98183ca (eloy env, `BANDAID_BALLET_BACKEND=numpy`, bandaid
+from a git worktree on PYTHONPATH, the same metadata) 155/155 ok in 68 s,
+kept as `~/Downloads/ls_psc_reference_star_98183ca/`. Native 98183ca vs
+native 0378410 isolates PR #173: `tot_count`, `fwhm`, x, y, `bkgd_count` and
+`peak_count` are bit-identical on every matched row and TR is identical in
+every field; TG, TB and L4 `count_err` shrink (median -2.3 %, -3.5 %, -1.4 %,
+largest -21 % in TB on frame 012156) and `snr` grows to match; no row is
+lost, and TG gains 109 rows, TB 156, L4 62, all with snr 2.00-2.05, just
+above `min_snr`; the L4 `egain` header is 0.0649-0.0673 (155 distinct
+values); `n_good_stars` rises by 1-2 on 53 frames and `n_snr20` by 1-5 on
+79. Browser 98183ca vs native 98183ca (`ls_psc_compare_star.py` and the
+scratchpad `compare_tol.py`, ra/dec at 6 dp) is the 0378410 picture for
+rows, fwhm, positions and tot_count, with count_err a little wider: one unmatched TG row of 46k (browser only, at the SNR edge),
+fwhm max 2.0e-5 relative (frame 012806; 0 of 620 above 1e-3), |dx|, |dy|
+<= 6.4e-5 px (bandaid #155 float32), tot_count max 8.8e-3 (p99 under 5e-4),
+count_err max 1.8e-2 with two rows above 1 % (one at 0378410; the new one
+is TB on frame 041108), and the L4 `egain` header agrees to 2.5e-5 relative
+or better, median 2e-7 (it is a median over float32-rounded counts). The browser
+lists carry schema `0.1.dev73+gaddd8f13e` and the native ones
+`0.1.dev71+g84a6539e1`, because the build pulls aavso-starlist-schema main
+while the eloy env has an older install; the field set is the same.
+
+Forced failures, five LS Psc frames, Chrome `--host-resolver-rules`. (a) The
+three VizieR hosts mapped to 127.0.0.1: CDS, IDIA and CfA are refused within
+the same 0.1 s and the kernel POSTs to `dc.g-vo.org/tap/sync`, which answers
+(so it is CORS-clean); prep done 12 s after the drop with 793 photometry
+stars, the same count as through VizieR; 5/5 ok in 18 s. The GAVO star lists
+are not byte-identical to the VizieR ones: star-list ra/dec differ by at most
+6.3e-6 arcsec, which nudges x/y and the counts in their last digits; row
+counts and star sets are identical. (b) GAVO refused too: every frame is skipped
+(prep retried each frame, about 0.3 s each, 5/5 skipped 9 s after the drop),
+with the 331-character reason
+
+    batch prep failed: could not query Gaia for the field at (26.0481, 12.7537): no Gaia server answered the query; tried vizier.cds.unistra.fr, vizier.idia.ac.za, vizier.cfa.harvard.edu, dc.g-vo.org; last error: JsGenericError: NetworkError: Failed to execute 'send' on 'XMLHttpRequest': Failed to load 'https://dc.g-vo.org/tap/sync'.
+
+down from 1414 characters of JSON stack at 0378410. `feedback_report._reason`
+redacts the URL and cuts at 300 characters, which now ends cleanly at
+"Failed to load " instead of a broken `[ur`. Captures are in the session
+scratchpad (browser_98183ca, gaia98_a, gaia98_b); none are committed.

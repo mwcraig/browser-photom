@@ -13,15 +13,20 @@ version = "0.1.0"
 fetch-astrowidgets = "(test -d astrowidgets-src || git clone https://github.com/astropy/astrowidgets astrowidgets-src) && git -C astrowidgets-src pull --ff-only"
 # Full clone (not shallow) so hatch-vcs sees tags. Pinned (detached HEAD) to the
 # bandaid commit the dashboard was validated against, so a redeploy cannot
-# silently pick up whatever bandaid main is at build time. 0378410 is the
-# merge of bandaid PR #170 (closes bandaid #169): the Gaia query is DR3
-# (VizieR I/355/gaiadr3, epoch J2016.0) instead of DR2, so star lists and the
-# g_cut set can change at the DR2-to-DR3 level; it falls back from CDS to the
-# CfA and IDIA VizieR mirrors (10 s to connect, 60 s per read), keeps
-# error answers out of astroquery's cache, and raises `GaiaQueryError` when
-# every server fails, which `prepare_batch` wraps in `BatchPrepError`. It
-# also carries PR #165 (annulus mean background) and PR #163 (Seestar50
-# egain) from the previous pin, 1775df7. The API the dashboard uses is
+# silently pick up whatever bandaid main is at build time. 98183ca is the
+# merge of bandaid PR #172, on top of PRs #173 and #171. The Gaia query
+# (DR3, VizieR I/355/gaiadr3, epoch J2016.0, since PR #170 at the previous
+# pin, 0378410) tries the VizieR servers in the order CDS, IDIA, CfA (CfA
+# last because it flaps) and then, PR #171, the GAVO Heidelberg TAP service
+# (dc.g-vo.org, gaia.dr3lite) as the last resort; error answers stay out of
+# the cache and `GaiaQueryError`, which `prepare_batch` wraps in
+# `BatchPrepError`, is raised only when all four fail. In the browser a
+# failed request is described by the first line of its JavaScript error
+# (PR #172), not a ~1.2 kB JSON stack, and a hung host gives TimeoutError at
+# the 70 s cap. PR #173 gives the bundled Seestar50 profile one egain per
+# Bayer channel ({"TR": 0.046, "TG": 0.076, "TB": 0.078} e-/ADU): fluxes are
+# unchanged, green, blue and L4 count_err shrink and snr grows, so rows can
+# cross min_snr. The API the dashboard uses is
 # unchanged since d6ba44a (PR #159): `process_frame(file, prep, *,
 # user_specific_metadata, label, fail_fast)` returns a `FrameResult`
 # (outcome, per-filter tables, error, QA record) and `qa_record_skipped`
@@ -29,7 +34,7 @@ fetch-astrowidgets = "(test -d astrowidgets-src || git clone https://github.com/
 # written against those, not `process_one_image`. Move the pin deliberately,
 # together with the call in `make_bandaid_processor` (the one place this
 # repo calls bandaid; the watch notebook goes through it too).
-fetch-bandaid = "(test -d bandaid-src || git clone https://github.com/mwcraig/bandaid bandaid-src) && git -C bandaid-src fetch && git -C bandaid-src checkout 0378410"
+fetch-bandaid = "(test -d bandaid-src || git clone https://github.com/mwcraig/bandaid bandaid-src) && git -C bandaid-src fetch && git -C bandaid-src checkout 98183ca"
 # Pinned to the commit bandaid's pyproject pins (detached HEAD)
 fetch-eloy = "(test -d eloy-src || git clone https://github.com/mwcraig/eloy eloy-src) && git -C eloy-src fetch && git -C eloy-src checkout a056c91a945772e0520a89695f8fcd16fda36870"
 fetch-starlist-schema = "(test -d aavso-starlist-schema-src || git clone https://github.com/mwcraig/aavso-starlist-schema aavso-starlist-schema-src) && git -C aavso-starlist-schema-src pull --ff-only"

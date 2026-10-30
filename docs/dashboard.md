@@ -127,17 +127,33 @@ median, so every `bkgd_count`, flux and `sky` value shifts by a fraction of an
 ADU per pixel, and PR #163 gives the Seestar50 profile its measured red-channel
 `egain` (0.046 e-/ADU), which lowers `snr` on that instrument and can change
 which rows pass `min_snr`. Neither touches the per-frame API or the QA record.
-The pin is now 0378410 (2026-10-27, bandaid PR #170, closing bandaid #169):
-the Gaia query is DR3 (VizieR `I/355/gaiadr3`, epoch J2016.0) rather than DR2,
-so the catalog stars, and with them the star lists and the `g_cut` set, can
-change at the DR2-to-DR3 level; when CDS fails it falls back to the CfA and
-IDIA VizieR mirrors, keeps error answers out of astroquery's cache, and raises
+The pin then moved to 0378410 (2026-10-27, bandaid PR #170, closing bandaid
+#169): the Gaia query is DR3 (VizieR `I/355/gaiadr3`, epoch J2016.0) rather
+than DR2, so the catalog stars, and with them the star lists and the `g_cut`
+set, can change at the DR2-to-DR3 level; when CDS fails it falls back to other
+VizieR mirrors, keeps error answers out of astroquery's cache, and raises
 `GaiaQueryError`, which `prepare_batch` wraps in the `BatchPrepError`
 `make_bandaid_processor` already catches. The per-frame API and the QA record
 are again unchanged. The 155-frame LS Psc comparison was rerun at 0378410
 (2026-10-27, PROGRESS has the numbers): browser and native CLI agree as well
 as at b7fb737 (fwhm max 2e-5 relative, one row of 46k unmatched at the SNR
-edge, tot_count tail under 1 %); no comparison was run at 1775df7. The same
+edge, tot_count tail under 1 %); no comparison was run at 1775df7.
+The pin is now 98183ca (2026-10-30, bandaid PRs #171, #173 and #172). The
+VizieR order is CDS, IDIA, CfA (CfA last because it flaps), and when every
+VizieR server fails the GAVO Heidelberg TAP service (`dc.g-vo.org`,
+`gaia.dr3lite`) is the last resort, so `GaiaQueryError` names four servers.
+In the browser a failed request is described by the first line of its
+JavaScript error rather than a ~1.2 kB JSON stack, and a hung host gives
+`TimeoutError` at the 70 s cap. The Seestar50 profile now has one `egain` per
+Bayer channel (TR 0.046, TG 0.076, TB 0.078 e-/ADU; L4 records the median
+per-star effective gain, about 0.066): fluxes are unchanged, but green, blue
+and L4 `count_err` shrink and `snr` grows, so rows can cross `min_snr`. The
+per-frame API and the QA record are unchanged once more. The LS Psc
+comparison was rerun at 98183ca (2026-10-30, numbers in PROGRESS): native
+98183ca differs from native 0378410 only in TG, TB and L4 `count_err`, `snr`
+and `egain`, plus a few hundred rows gained just above `min_snr`, and browser
+and native agree at 98183ca as they did at 0378410 (count_err now has two
+rows above 1 % instead of one). The 0378410
 rerun found that a fresh kernel build picks up twirl 0.6.0, which fails every
 plate solve on wasm32, so environment.yml now pins twirl 0.5.2. The larger
 browser-versus-native position difference,

@@ -35,6 +35,7 @@ from feedback_report import (
 )
 from photom_dashboard import (
     CHUNK_BYTES,
+    GAIA_COOLDOWN_RETRY_SEP,
     GAIA_COOLDOWN_SKIP_PREFIX,
     LazyProcessor,
     SLOWDOWN_FACTOR,
@@ -133,9 +134,10 @@ class DashboardView:
         self.results_dir = results_dir
         self._meta = {}
         self._log = deque(maxlen=LOG_LINES)
-        # Frames counted in the collapsed cooldown line, if it is the
-        # panel's last line (see _log_skip).
+        # Frames counted in the collapsed cooldown line and the line as last
+        # written, if it is the panel's last line (see _log_skip).
         self._cooldown_skips = 0
+        self._cooldown_text = None
         self._seen_skips = 0
         # Tester reports (feedback_report). `report_url` overrides the
         # build's endpoint, for tests; "" disables reporting.
@@ -695,6 +697,7 @@ class DashboardView:
         self._seen_skips = 0
         # A new run's cooldown skips get their own counted line.
         self._cooldown_skips = 0
+        self._cooldown_text = None
         # The report's run-scoped reset first: if the processor's reset
         # raised before it, the run would die (the dashboard replies
         # `error`) with the previous run's id, rows and status line still
@@ -717,6 +720,7 @@ class DashboardView:
                 log=self.log,
                 on_qa=self._on_qa,
                 on_result=self._on_result,
+                retry_hint="drop the folder again to retry now",
             )
         except Exception as exc:  # noqa: BLE001 - any setup failure latches
             self.log(f"Pipeline setup failed: {type(exc).__name__}: {exc}")
@@ -737,23 +741,26 @@ class DashboardView:
         # within a second or so; one "[skip]" line each pushed the frame that
         # carries the cause, the cooldown line and bandaid's per-server
         # warnings out of the 12-line panel (seen in the 2026-10-27 browser
-        # run). A run of them is one line with a count, rewritten in place;
-        # each frame's own reason is unchanged in `state.skips` and the
-        # reports.
-        if not str(reason).startswith(GAIA_COOLDOWN_SKIP_PREFIX):
+        # run). A run of them is one line with a count and the newest
+        # frame's time to the retry, rewritten in place; each frame's own
+        # reason is unchanged in `state.skips` and the reports.
+        reason = str(reason)
+        if not reason.startswith(GAIA_COOLDOWN_SKIP_PREFIX):
             self.log(f"[skip] {name}: {reason}")
             return
-        if self._cooldown_skips and self._log and self._log[-1] == self._cooldown_line():
+        if self._cooldown_text is not None and self._log and self._log[-1] == self._cooldown_text:
             self._log.pop()
         else:
             self._cooldown_skips = 0
         self._cooldown_skips += 1
-        self.log(self._cooldown_line())
+        self._cooldown_text = self._cooldown_line(reason.rpartition(GAIA_COOLDOWN_RETRY_SEP)[2])
+        self.log(self._cooldown_text)
 
-    def _cooldown_line(self):
+    def _cooldown_line(self, retry_in):
         n = self._cooldown_skips
         return (f"[skip] {n} frame{'' if n == 1 else 's'} not retried: Gaia "
-                "failed, batch prep cooldown (see the first skipped frame above)")
+                f"failed, batch prep cooldown, next retry in {retry_in} "
+                "(see the first skipped frame above)")
 
     def _paint_log(self):
         rows = "<br>".join(

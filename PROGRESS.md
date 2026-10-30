@@ -1855,3 +1855,16 @@ refused and CfA hung made 3 POSTs and took 77.7 s (cooldown started after
 only "not retried" lines and the cause, the cooldown line and the
 `bandaid:` lines were gone. The view now collapses consecutive cooldown
 skips into one counted line, rewritten in place.
+
+Review changes (2026-10-30, after the rebase onto the 98183ca pin). A
+non-Gaia prep failure no longer resets the backoff step: in bandaid the
+instrument, too-few-stars and edge-margin failures are raised before the
+catalog query, so they say nothing about Gaia, and resetting on one let a
+single cloudy frame per window pin the backoff at 60 s. The cooldown log
+line's parenthetical is now the caller's `retry_hint=`; the watch notebook,
+which never calls `reset()`, says to re-run the cell, and a rebuilt
+processor starts the once-per-run warning set over. The line cap is 200
+characters, since at 98183ca bandaid already reduces a browser error to its
+first line and its longest real per-server line is 198 characters, which
+160 cut mid-URL; the tests use bandaid's real two-argument template. The
+collapsed `[skip]` line carries the newest frame's `next retry in <m>s`.

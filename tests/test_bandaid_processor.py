@@ -118,9 +118,18 @@ def other_failure(took=0.2):
         return exc, took
 
 
-def cooldown_line(wait, took=68):
-    return (f"Gaia failed after {took} s; not retrying batch prep for {wait} s "
-            "(drop the folder again to retry now).")
+# What bandaid 98183ca logs per failed server from the browser: the first
+# line of the JS error, which for a refused host names the failed URL.
+SERVER_WARNING = "Gaia query to %s failed, skipping it: %s"
+CFA_FAILURE = (
+    "JsGenericError: NetworkError: Failed to execute 'send' on 'XMLHttpRequest': "
+    "Failed to load 'https://vizier.cfa.harvard.edu/viz-bin/votable'."
+)
+
+
+def cooldown_line(wait, took=68, hint="drop the folder again to retry now"):
+    return (f"Gaia failed after {took} s; not retrying batch prep for {wait} s"
+            + (f" ({hint})" if hint else "") + ".")
 
 
 @pytest.fixture
@@ -149,6 +158,7 @@ def build(fake, tmp_path):
         clock = Clock()
         fake.clock = clock
         qa = []
+        kw.setdefault("retry_hint", "drop the folder again to retry now")
         proc = make_bandaid_processor(
             {}, tmp_path, log=lines.append, cnn=object(), provenance="tag",
             clock=clock, on_qa=lambda *a: qa.append(a), **kw,
@@ -165,11 +175,21 @@ def our_handlers():
 # -- bandaid's warnings in the dashboard log ---------------------------------
 
 
-def test_a_bandaid_warning_reaches_the_log_as_one_line(build):
+def test_a_bandaid_warning_reaches_the_log_whole(build):
+    # bandaid's longest real line (the CfA host has the longest name) must
+    # fit under the cap: nothing of it is cut.
     _proc, lines, _clock, _qa = build()
     logging.getLogger("bandaid.catalog").warning(
-        "Gaia query to %s failed, skipping it: %s: %s",
-        "vizier.cds.unistra.fr", "OSError", "refused\nsecond line",
+        SERVER_WARNING, "vizier.cfa.harvard.edu", CFA_FAILURE,
+    )
+    assert lines == ["bandaid: " + SERVER_WARNING % ("vizier.cfa.harvard.edu", CFA_FAILURE)]
+    assert 190 < len(lines[0]) - len("bandaid: ") <= BANDAID_LOG_MAX_CHARS
+
+
+def test_a_multi_line_warning_keeps_its_first_line_only(build):
+    _proc, lines, _clock, _qa = build()
+    logging.getLogger("bandaid.catalog").warning(
+        SERVER_WARNING, "vizier.cds.unistra.fr", "OSError: refused\nsecond line",
     )
     assert lines == [
         "bandaid: Gaia query to vizier.cds.unistra.fr failed, skipping it: "
@@ -177,17 +197,13 @@ def test_a_bandaid_warning_reaches_the_log_as_one_line(build):
     ]
 
 
-def test_a_long_js_stack_is_cut_to_the_line_limit(build):
+def test_an_over_long_warning_is_cut_to_the_line_limit(build):
     _proc, lines, _clock, _qa = build()
-    # What pyodide's JsGenericError stringifies to: one physical line of
-    # JSON whose newlines are escaped, ~1.2 kB.
-    stack = ('{"stack":"NetworkError: Failed to execute \'send\' on '
-             '\'XMLHttpRequest\': Failed to load \'https://vizier.idia.ac.za/'
-             'viz-bin/votable\'.\\n at Module._apply_try_catch '
-             + "(xpython.js:7:1950)\\n at " * 40 + '"}')
+    # Nothing bandaid says today is this long; the cap is for whatever a
+    # future version or a library below it says in one breath.
     logging.getLogger("bandaid.catalog").warning(
-        "Gaia query to %s failed, skipping it: %s: %s",
-        "vizier.cfa.harvard.edu", "JsGenericError", stack,
+        SERVER_WARNING, "vizier.cfa.harvard.edu",
+        "JsGenericError: NetworkError: " + "at Module._apply_try_catch (xpython.js:7:1950) " * 40,
     )
     [line] = lines
     body = line.removeprefix("bandaid: ")
@@ -213,10 +229,15 @@ def test_info_records_and_frame_skips_bandaid_returns_are_not_forwarded(build):
 
 def test_the_handler_is_installed_once_and_follows_the_newest_log(build):
     _p1, first, _c1, _q1 = build()
+    logging.getLogger("bandaid.photometry").warning("once per run")
     _p2, second, _c2, _q2 = build()
     assert len(our_handlers()) == 1
     logging.getLogger("bandaid").warning("hello")
-    assert first == [] and second == ["bandaid: hello"]
+    assert first == ["bandaid: once per run"] and second == ["bandaid: hello"]
+    # A rebuilt processor is a new run (the watch notebook's cell re-run, say)
+    # and its once-per-run warnings start over.
+    logging.getLogger("bandaid.photometry").warning("once per run")
+    assert second[-1] == "bandaid: once per run"
 
 
 def test_a_failing_log_callback_does_not_break_bandaid(fake, tmp_path):
@@ -247,8 +268,7 @@ def test_catalog_warnings_are_always_shown(build):
     _proc, lines, _clock, _qa = build()
     for _ in range(2):
         logging.getLogger("bandaid.catalog").warning(
-            "Gaia query to %s failed, skipping it: %s: %s",
-            "vizier.cds.unistra.fr", "OSError", "refused",
+            SERVER_WARNING, "vizier.cds.unistra.fr", "OSError: refused",
         )
     assert len(lines) == 2
 
@@ -322,9 +342,12 @@ def test_each_further_slow_gaia_failure_doubles_the_cooldown_up_to_the_cap(build
     assert len(fake.prep_calls) == 7
 
 
-def test_a_non_gaia_failure_after_a_gaia_retry_clears_the_backoff_step(build, fake):
-    # A BatchPrepError from after the catalog query means Gaia answered, so
-    # the next slow Gaia failure starts the ladder over at 60 s, not 120 s.
+def test_a_non_gaia_failure_after_a_gaia_retry_leaves_the_backoff_step_alone(build, fake):
+    # Too few stars (like the instrument and edge-margin checks) is raised
+    # before bandaid's catalog query, so it says nothing about Gaia: the next
+    # slow Gaia failure continues the ladder at 120 s rather than restarting
+    # at 60 s. Otherwise one cloudy frame per window would pin the backoff
+    # at its first step while Gaia stays down.
     proc, lines, clock, _qa = build()
     fake.prep_outcomes = [gaia_failure(), other_failure(), gaia_failure()]
     proc("a.fit", "a.fit")
@@ -333,7 +356,18 @@ def test_a_non_gaia_failure_after_a_gaia_retry_clears_the_backoff_step(build, fa
     # ...and, being fast and not Gaia, it is retried on the very next frame.
     assert proc("c.fit", "c.fit") == GAIA_REASON
     assert fake.prep_calls == ["a.fit", "b.fit", "c.fit"]
-    assert lines[-1] == cooldown_line(GAIA_RETRY_FIRST_S)
+    assert lines[-1] == cooldown_line(2 * GAIA_RETRY_FIRST_S)
+
+
+def test_the_retry_hint_is_the_callers_and_optional(build, fake):
+    proc, lines, _clock, _qa = build(retry_hint="re-run this cell to retry now")
+    fake.prep_outcomes = [gaia_failure()]
+    proc("a.fit", "a.fit")
+    assert lines[-1] == cooldown_line(GAIA_RETRY_FIRST_S, hint="re-run this cell to retry now")
+    proc, lines, _clock, _qa = build(retry_hint=None)
+    fake.prep_outcomes = [gaia_failure()]
+    proc("a.fit", "a.fit")
+    assert lines[-1] == cooldown_line(GAIA_RETRY_FIRST_S, hint=None)
 
 
 def test_a_new_drop_after_a_successful_retry_starts_again_at_the_first_step(build, fake):

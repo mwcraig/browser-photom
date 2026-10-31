@@ -155,3 +155,71 @@ def test_the_instructions_carry_the_slowdown_factor():
     assert "visible" in INSTRUCTIONS
     assert "own window" in INSTRUCTIONS
     assert "uncovered" in INSTRUCTIONS
+
+
+# -- Gaia cooldown skips in the log panel ------------------------------------
+
+CAUSE = "batch prep failed: could not query Gaia for the field at (26.0481, 12.7537): ..."
+COOLDOWN = ("batch prep not retried: Gaia failed 0s ago (see the first skipped "
+            "frame), next retry in 60s")
+
+
+def collapsed(n, retry_in="60s"):
+    return (f"[skip] {n} frame{'' if n == 1 else 's'} not retried: Gaia failed, "
+            f"batch prep cooldown, next retry in {retry_in} "
+            "(see the first skipped frame above)")
+
+
+def run_with_reasons(view, reasons):
+    """Drop len(reasons) frames; frame i is skipped with reasons[i] (None = ok)."""
+    names = [f"f{i:02d}.fit" for i in range(len(reasons))]
+    by_name = dict(zip(names, reasons))
+    view._processor = type(view._processor)(lambda: lambda p, n: by_name[n])
+    manifest(view, *names)
+    for name in names:
+        upload(view, name)
+    return names
+
+
+def test_a_run_of_cooldown_skips_is_one_counted_line_below_the_cause(view):
+    names = run_with_reasons(view, [CAUSE] + [COOLDOWN] * 19)
+    log = list(view._log)
+    assert log[-1] == collapsed(19)
+    assert log[-2] == f"[skip] {names[0]}: {CAUSE}"
+    assert sum("not retried" in line for line in log) == 1
+    # Each frame keeps its own reason for the counts and the reports.
+    reasons = [r for _n, r in view.dashboard.state.skips]
+    assert reasons == [CAUSE] + [COOLDOWN] * 19
+
+
+def test_a_single_cooldown_skip_is_counted_as_one_frame(view):
+    run_with_reasons(view, [CAUSE, COOLDOWN])
+    assert view._log[-1] == collapsed(1)
+
+
+def test_the_collapsed_line_carries_the_newest_frames_time_to_the_retry(view):
+    # The per-frame reasons count down; the one line the panel keeps must
+    # show the latest value, and still be recognised as its own line to
+    # rewrite once the countdown has changed it.
+    later = COOLDOWN.replace("0s ago", "17s ago").replace("in 60s", "in 43s")
+    run_with_reasons(view, [CAUSE, COOLDOWN, later])
+    assert view._log[-1] == collapsed(2, "43s")
+    assert sum("not retried" in line for line in view._log) == 1
+
+
+def test_another_skip_in_between_starts_a_new_counter(view):
+    names = run_with_reasons(view, [CAUSE, COOLDOWN, COOLDOWN, CAUSE, COOLDOWN])
+    log = list(view._log)
+    assert log[-4:] == [
+        f"[skip] {names[0]}: {CAUSE}",
+        collapsed(2),
+        f"[skip] {names[3]}: {CAUSE}",
+        collapsed(1),
+    ]
+
+
+def test_another_log_line_in_between_starts_a_new_counter(view):
+    run_with_reasons(view, [CAUSE, COOLDOWN])
+    view.log("bandaid: something")
+    view._log_skip("x.fit", COOLDOWN)
+    assert list(view._log)[-3:] == [collapsed(1), "bandaid: something", collapsed(1)]

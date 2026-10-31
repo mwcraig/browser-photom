@@ -1814,3 +1814,76 @@ down from 1414 characters of JSON stack at 0378410. `feedback_report._reason`
 redacts the URL and cuts at 300 characters, which now ends cleanly at
 "Failed to load " instead of a broken `[ur`. Captures are in the session
 scratchpad (browser_98183ca, gaia98_a, gaia98_b); none are committed.
+
+# Gaia fallback made visible; prep retries back off after a slow Gaia failure (2026-10-27)
+
+Two of the follow-ups from the forced-failure runs above, both in
+`make_bandaid_processor`. bandaid's WARNING records now reach the dashboard
+log: one handler on the `bandaid` logger (installed when the processor is
+built, re-targeted rather than stacked on a rebuild) writes each as one
+`bandaid: ...` line, first line only and cut to 160 characters, because the
+pyodide error text is a ~1.2 kB one-line JSON stack. Records carrying
+`exc_info` (bandaid's own per-frame skip and error logging) are left out,
+since the view already logs those frames as `[skip]`, and outside
+`bandaid.catalog` each message template is shown once per run (horizon,
+catalog-margin and dropped-filter warnings can fire every frame). So a
+fallback now says which server failed during what was 66-133 s of silence.
+And a `BatchPrepError` caused by `GaiaQueryError` whose prep call took over
+10 s (measured: ~0.3 s when every server refuses, 60-135 s when one hangs or
+504s) no longer retries on the next frame: later frames are skipped at once
+for 60 s, doubling per further slow Gaia failure to a 600 s cap, with the
+short reason `batch prep not retried: Gaia failed <n>s ago (see the first
+skipped frame), next retry in <m>s` and no QA row (as before for prep
+failures). In a drop a skipped frame costs only its upload, so this means
+at most one slow attempt per drop, and dropping the folder again (which
+calls `reset()`) retries at once; the log line says so. Run D's ~60.5 s per
+frame with only CfA live, ~2.6 h over a 155-frame night, becomes one ~60 s attempt.
+Fast Gaia failures and every other prep failure (bad first frame, too few
+stars, truncation, edge margin) still retry on the next frame, a non-Gaia
+one resets the backoff step, and the first failure's reason keeps its
+`batch prep failed: ` shape. Tests are host-only, against a stub bandaid
+(`tests/test_bandaid_processor.py`); not yet seen in a browser run.
+
+Browser check of 5822037 (PR #23), forced failures as above: the `bandaid:`
+line for the CDS failure appeared 0.6 s after it, while CfA's request was
+still open, so the panel does update mid-fallback. A hung CfA gave
+`TimeoutError`, not `NetworkError`. A 20-frame drop with CDS and IDIA
+refused and CfA hung made 3 POSTs and took 77.7 s (cooldown started after
+71 s, frames 2-20 skipped within 0.2 s); all three refused made 15 POSTs in
+11.8 s with no cooldown, as intended. One UX bug: the view logged a
+`[skip]` line per cooldown frame, so within 0.3 s the 12-line panel held
+only "not retried" lines and the cause, the cooldown line and the
+`bandaid:` lines were gone. The view now collapses consecutive cooldown
+skips into one counted line, rewritten in place.
+
+Review changes (2026-10-30, after the rebase onto the 98183ca pin). A
+non-Gaia prep failure no longer resets the backoff step: in bandaid the
+instrument, too-few-stars and edge-margin failures are raised before the
+catalog query, so they say nothing about Gaia, and resetting on one let a
+single cloudy frame per window pin the backoff at 60 s. The cooldown log
+line's parenthetical is now the caller's `retry_hint=`; the watch notebook,
+which never calls `reset()`, says to re-run the cell, and a rebuilt
+processor starts the once-per-run warning set over. The line cap is 200
+characters, since at 98183ca bandaid already reduces a browser error to its
+first line and its longest real per-server line is 198 characters, which
+160 cut mid-URL; the tests use bandaid's real two-argument template. The
+collapsed `[skip]` line carries the newest frame's `next retry in <m>s`.
+
+Browser check of ebd2f6b at the 98183ca pin (build with the consent box
+disabled, Playwright driving Chrome with `--host-resolver-rules`, LS Psc
+frames). (a) The three VizieR hosts refused, 5 frames: three `bandaid:`
+lines, each whole (198 characters for CfA, no ellipsis), then
+`Batch prep done: 793 photometry stars.` 9 s after the drop with GAVO
+answering; 5/5 ok in 15 s. (b) All four refused, 20 frames: every frame
+retried prep and was skipped in ~0.3 s, no cooldown, the four per-server
+`bandaid:` lines and the `[skip]` line per frame, as intended for a fast
+failure. (c) CDS mapped to a black-hole address and the other three
+refused, 20 frames: CDS gave `JsGenericError: TimeoutError` at the 70 s
+cap, then three refusals in the same 0.1 s, `Gaia failed after 71 s; not
+retrying batch prep for 60 s (drop the folder again to retry now).`, the
+first frame's full `[skip]` reason, and one line `[skip] 19 frames not
+retried: Gaia failed, batch prep cooldown, next retry in 60s (see the
+first skipped frame above)` for the rest; done 78 s after the drop. The
+status line's `median 0.0 s/frame` in (c) is the pre-existing
+`RunState.frame_skipped` counting skip durations. Captures are in the
+session scratchpad (pr23_a, pr23_b, pr23_c); none are committed.

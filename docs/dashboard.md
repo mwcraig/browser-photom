@@ -168,6 +168,73 @@ Two further fixes from the PR-review batch live in this same seam.
 `make_bandaid_processor` returns a `process_frame` with a `reset()` hook
 that clears the cached batch prep, so a second folder is never photometered
 against the first folder's catalog.
+
+Batch prep and its retries. Prep is built from the first frame that reaches
+the processor; a `BatchPrepError` skips that frame with the reason
+`batch prep failed: <message>` (the prefix the tester reports and the
+view's `[skip]` line show) and leaves prep unbuilt, so a later frame retries.
+How soon depends on the cause. A bad first frame, too few stars, a truncated
+catalog or the edge-margin check fails in well under a second and the next
+frame may well be fine, so the next frame retries. When the error's
+`__cause__` is bandaid's `GaiaQueryError` (every Gaia server failed: the
+three VizieR mirrors and then GAVO), the problem is the network, not the
+frame, and a retry can cost minutes when a server hangs rather than refuses,
+since each hung request runs to bandaid's 70 s cap. So a Gaia failure whose
+`prepare_batch` call took longer than `GAIA_SLOW_PREP_S` (10 s) starts a
+cooldown of `GAIA_RETRY_FIRST_S` (60 s), doubled by each further slow Gaia
+failure up to `GAIA_RETRY_MAX_S` (600 s); a fast one (every server refused)
+is retried on the next frame like any other prep failure. A non-Gaia prep
+failure is retried on the next frame and leaves the cooldown step as it is:
+most of them (instrument, too few stars, edge margin) are raised before the
+catalog query and say nothing about Gaia, and resetting the step on one
+would let a single cloudy frame per window pin the backoff at 60 s while
+Gaia stays down. A frame inside the cooldown is skipped at once, with no
+bandaid call and, as for any prep failure, no QA row, with the short reason
+`batch prep not retried: Gaia failed <n>s ago (see the first skipped frame),
+next retry in <m>s`; the full cause is only on the frame that failed. In the
+log panel the view (`DashboardView._log_skip`) collapses consecutive
+cooldown skips into one line rewritten in place, `[skip] 19 frames not
+retried: Gaia failed, batch prep cooldown, next retry in 43s (see the first
+skipped frame above)`, carrying the newest frame's time to the retry, so the
+cause, the cooldown line and the `bandaid:` lines stay on screen; each
+frame's own reason is unchanged in the skip list and the reports. The first
+frame after the cooldown retries. The log panel gets `Gaia failed after 68
+s; not retrying batch prep for 60 s (drop the folder again to retry now).`
+when a cooldown starts and `Retrying batch prep (60 s Gaia cooldown over).`
+when it is lifted. The parenthetical is the caller's `retry_hint=`: the
+dashboard's says to drop the folder again, because a new drop calls
+`reset()`, which clears the cooldown; the watch notebook builds its
+processor once and never calls `reset()`, so its hint says to re-run the
+cell, which builds a new processor. In a folder drop a skipped frame costs
+only its upload (tens of ms), so the cooldown outlasts the rest of the drop:
+a drop makes at most one slow attempt, the rest of its frames are skipped,
+and the doubling only matters for frames that keep arriving (the watch
+notebook). The clock is `time.monotonic` unless the `clock=` argument
+replaces it (the tests do).
+
+bandaid's own warnings reach the log panel. bandaid puts a `NullHandler` on
+its package logger and nothing else, so its per-server `Gaia query to <server>
+failed, skipping it` before each fallback (to the next VizieR mirror, or
+last to GAVO) used to appear nowhere, and a successful fallback was a minute
+or more of silence after the weights download. `make_bandaid_processor`
+attaches one handler (`_BandaidLogHandler`, level WARNING) to the `bandaid`
+logger when it builds the processor, before any bandaid call; a rebuild
+re-targets that handler at the new `log` rather than adding a second, and
+starts its once-per-run set over. Each record becomes one `bandaid:
+<message>` line: the first line of the message, at most 200 characters with
+an ellipsis. bandaid's own lines fit whole (its longest, a per-server line
+naming the browser's `NetworkError` and the failed URL, is under 200
+characters; bandaid itself reduces a browser error to its first line); the
+cap is for a multi-line or unexpectedly long message. Records with
+`exc_info` are left out: those are bandaid logging a frame it also returns
+as a skip or error, which the view already logs as `[skip]`. Records from
+`bandaid.catalog` (one per failed Gaia server) are always forwarded; any
+other is forwarded only the first time its logger and message template are
+seen, until `reset()`, because the below-the-horizon, beyond-the-catalog-
+margin and dropped-filter warnings can fire on every frame, up to three
+lines a frame. A failing `log` is swallowed, and the logger's level and
+propagation are left alone.
+
 The pipeline-setup-failure latch does not live in `DashboardView` at all: it is
 a separate, tested class (`photom_dashboard.LazyProcessor`) that
 wraps a zero-arg factory and defers calling it until the first dropped frame,
@@ -779,12 +846,13 @@ module docstring; `FrameProcessor`).
 |---|---|
 | `tests/test_chunk_assembly.py` | `ChunkAssembler` (ordering, out-of-order/duplicate/mismatched-`nchunks` rejection, basename sanitization against `../` paths, binary exactness, multiple files in flight) and `FrameProcessor` (MEMFS copy removed on success, on a returned skip string, and on a raised exception) |
 | `tests/test_dashboard_flow.py` | `PhotometryDashboard`'s full message protocol end to end, via a `FakeWidget` stand-in for anywidget: manifest → chunk/ack sequencing → file_done → run_done, cancel mid-upload, zip_request/zip/zip_error, malformed and buffer-less chunk messages, a second manifest restarting a finished run, and `hidden_episode` (recorded mid-run, after `run_done` and after a cancel; the 2 s threshold; reset by a new manifest but not a refused one; dismiss; the banner's "keep this tab visible" instruction only mid-run; malformed payloads ignored with no `error`; the `_HANDLERS` row's failure reply pinned to `hidden_episode_error`; a nonpositive `slowdown_factor` refused) |
+| `tests/test_bandaid_processor.py` | `make_bandaid_processor` against stub `bandaid`, `env_setup` and `ballet_sgemm` modules in `sys.modules`: bandaid warnings forwarded to the log as one `bandaid: ` line (bandaid's longest real per-server line whole, a multi-line message cut to its first line, an over-long one cut to 200 characters), `exc_info` records and INFO left out, non-catalog templates once per run until `reset()` or a rebuild, catalog warnings every time, one handler however often the processor is built, a raising `log` swallowed; a non-Gaia `BatchPrepError` retried on the next frame, a fast Gaia failure (0.3 s, and exactly at the 10 s threshold) likewise, a slow one keeping its `batch prep failed: ` reason and starting a 60 s cooldown whose frames are skipped with the short reason without calling `prepare_batch` or emitting QA, the retry after it, doubling to the 600 s cap, a non-Gaia failure leaving the step alone, the caller's `retry_hint` in the cooldown line, a new drop after success and `reset()` starting over |
 | `tests/test_metadata.py` | `validate_metadata`'s required/optional field rules, numeric parsing, and lat/lon range checks |
 | `tests/test_run_state.py` | `RunState` counters — uploaded/processed/skipped/remaining bookkeeping, `finished`, and that `remaining` never goes negative |
 | `tests/test_zip.py` | `build_results_zip` — flattening to basenames, `.star`-only filtering, sorted and byte-deterministic output, and its error cases (empty/missing directory) |
 | `tests/test_provenance.py` | the software stamp (§7): `provenance_tag`/`starlist_name`/`zip_name`, the `unknown` fallback without `build_info`, the dashboard picking up a generated `build_info`, and `scripts/write_build_info.py` against throwaway git repos (both SHAs recorded, `-dirty` on tracked changes only, failure outside a checkout) |
 | `tests/test_tab_visibility.py` | the tab-visibility text builders (§4): `format_duration` (rounding before splitting into units, so 59.6 s reads "1 min"; bad input reads "0 s"), `running_notice`, `hidden_banner_text` (singular/plural, no frames, totals over several episodes), and a non-default factor flowing through all of them |
-| `tests/test_dashboard_view.py` | `DashboardView` built headlessly, with messages injected through the drop zone's own `_handle_custom_msg`: `slowdown_factor` is a synced trait, the running notice shows only while running, a `hidden_episode` shows the banner, Dismiss hides it, it survives into the done panel (without the "keep this tab visible" instruction) and is cleared by the next drop, its text is escaped, and `INSTRUCTIONS` quotes the factor. Needs ipywidgets and anywidget (both in the default pixi env) |
+| `tests/test_dashboard_view.py` | `DashboardView` built headlessly, with messages injected through the drop zone's own `_handle_custom_msg`: `slowdown_factor` is a synced trait, the running notice shows only while running, a `hidden_episode` shows the banner, Dismiss hides it, it survives into the done panel (without the "keep this tab visible" instruction) and is cleared by the next drop, its text is escaped, and `INSTRUCTIONS` quotes the factor; a run of Gaia-cooldown skips collapsed into one counted log line below the cause that carries the newest frame's time to the retry, restarted by any other line. Needs ipywidgets and anywidget (both in the default pixi env) |
 | `tests/test_feedback_report.py` | the tester-report rows, headers and chunks (§11), every built chunk validated against `feedback/report.schema.json` with `jsonschema`: non-finite floats nulled, unknown keys dropped and wrong types nulled, status coercion, hostile file names and reasons (URLs redacted, control characters, length), site rounding and longitude folding, obscode and comment rules (a link or over-long comment blanked, never the rows), a worst-case full chunk under 60 KB; `QA_COLUMNS` against the schema and the pinned bandaid-src; `feedback_url()` and `write_build_info.py`'s `FEEDBACK_URL` |
 | `tests/test_feedback_view.py` | the view's report form and messages, headless: off by default, greyed without an endpoint, an unusable obscode explained and nothing sent, a link in the comment warned about and sent blank (preview too), the preview's chunk before and after a run, start/row/end ordering against `file_done`/`run_done`, QA records and the resolved site reaching rows and headers, cancel, fresh ids per run, a raising reporting path logged once with the run unaffected, and the status line |
 | `tests/js/reporter.test.mjs` | the page's reporter (`buildReportChunk`, `reportBodies`, `makeReporter`, `handleReportMessage`) with injected fetch/sendBeacon: a POST every 25 rows and a final chunk, the newest header winning, `pagehide` beaconing a `page_closed` chunk once, nothing without a URL, failures counted and swallowed (with one non-keepalive retry), a report left open finished as `cancelled`, hidden time, splitting oversize bodies, the `seq` ceiling, sent/failed counts restarting per run, a `persisted` `pagehide` flushing without closing, bodies past the `seq` ceiling counted as failed, `hidden_ms` clamped to the schema maximum, the byte-aware flush sized for the beacon, the keepalive reserve for the beacon, late settles of the previous run not counted, hiding the tab flushing the buffer and then every few rows, a refused-and-retried POST releasing its share once, and the `failed` outcome |

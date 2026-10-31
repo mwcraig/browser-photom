@@ -1868,3 +1868,22 @@ characters, since at 98183ca bandaid already reduces a browser error to its
 first line and its longest real per-server line is 198 characters, which
 160 cut mid-URL; the tests use bandaid's real two-argument template. The
 collapsed `[skip]` line carries the newest frame's `next retry in <m>s`.
+
+Browser check of ebd2f6b at the 98183ca pin (build with the consent box
+disabled, Playwright driving Chrome with `--host-resolver-rules`, LS Psc
+frames). (a) The three VizieR hosts refused, 5 frames: three `bandaid:`
+lines, each whole (198 characters for CfA, no ellipsis), then
+`Batch prep done: 793 photometry stars.` 9 s after the drop with GAVO
+answering; 5/5 ok in 15 s. (b) All four refused, 20 frames: every frame
+retried prep and was skipped in ~0.3 s, no cooldown, the four per-server
+`bandaid:` lines and the `[skip]` line per frame, as intended for a fast
+failure. (c) CDS mapped to a black-hole address and the other three
+refused, 20 frames: CDS gave `JsGenericError: TimeoutError` at the 70 s
+cap, then three refusals in the same 0.1 s, `Gaia failed after 71 s; not
+retrying batch prep for 60 s (drop the folder again to retry now).`, the
+first frame's full `[skip]` reason, and one line `[skip] 19 frames not
+retried: Gaia failed, batch prep cooldown, next retry in 60s (see the
+first skipped frame above)` for the rest; done 78 s after the drop. The
+status line's `median 0.0 s/frame` in (c) is the pre-existing
+`RunState.frame_skipped` counting skip durations. Captures are in the
+session scratchpad (pr23_a, pr23_b, pr23_c); none are committed.

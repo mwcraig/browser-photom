@@ -1051,3 +1051,45 @@ def test_a_raising_reporting_hook_cannot_touch_the_run(tmp_path):
     assert "error" not in drop.types()
     assert drop.types().count("file_done") == 2
     assert calls == [("frame", "b.fit", False), ("frame", "a.fit", True), ("end", "done")]
+
+
+def test_a_cancel_with_a_reason_hands_the_end_hook_its_reason_and_message(tmp_path):
+    # Issue #19: the tester report says why a run died. The cancel's reason
+    # and status-line text reach the hook as sent (the view cleans them);
+    # the trailing `upload` cancel of the error path is dropped by the
+    # phase check, so the first cancel's words are the ones kept.
+    ends = []
+    dash, drop, _, _ = make_dashboard(
+        tmp_path, on_end=lambda d, outcome, failure=None: ends.append((outcome, failure)))
+    send_manifest(drop, [{"name": "a.fit", "size": 4}, {"name": "b.fit", "size": 4}])
+    send_file(drop, "a.fit", b"aaaa")
+    drop.receive({"type": "cancel", "reason": "error", "message": "boom\nline two"})
+    drop.receive({"type": "cancel", "reason": "upload", "message": "boom\nline two"})
+    assert dash.phase == "cancelled"
+    assert ends == [("failed", {"reason": "error", "message": "boom\nline two"})]
+
+
+def test_a_cancel_with_a_reason_but_no_message_still_passes_a_failure(tmp_path):
+    # A page from before issue #19 sends no message.
+    ends = []
+    dash, drop, _, _ = make_dashboard(
+        tmp_path, on_end=lambda d, *args: ends.append(args))
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    drop.receive({"type": "cancel", "reason": "timeout"})
+    assert ends == [("failed", {"reason": "timeout", "message": None})]
+
+
+def test_a_two_argument_end_hook_still_works_for_done_and_bare_cancels(tmp_path):
+    # `on_end(dashboard, outcome)` hooks written before the failure argument
+    # keep working wherever there is no failure to pass.
+    ends = []
+
+    def on_end(dash, outcome):
+        ends.append(outcome)
+
+    dash, drop, _, _ = make_dashboard(tmp_path, on_end=on_end)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}])
+    send_file(drop, "a.fit", b"aaaa")
+    send_manifest(drop, [{"name": "b.fit", "size": 4}], folder="night2")
+    drop.receive({"type": "cancel"})
+    assert ends == ["done", "cancelled"]

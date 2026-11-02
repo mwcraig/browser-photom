@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   isFitsName,
   collectEntries,
@@ -9,6 +10,8 @@ import {
   pickRun,
   makeErrorLatch,
   makeRunFailure,
+  cancelMessage,
+  errorText,
   SKIP_TAB_WARNING_KEY,
   tabWarningText,
   hiddenTitle,
@@ -777,4 +780,36 @@ test('writeSkipTabWarning false clears a saved skip', () => {
 test('writeSkipTabWarning returns false when storage is missing or setItem throws', () => {
   assert.equal(writeSkipTabWarning(null, true), false);
   assert.equal(writeSkipTabWarning(throwingStorage(), true), false);
+});
+
+// Issue #19: every cancel the upload loop sends says why, in the words the
+// status line shows after "Error: ", for the tester report's run.failure.
+test('cancelMessage carries the reason and the status-line text', () => {
+  assert.deepEqual(cancelMessage('timeout', 'ack: kernel not responding — reload the page to recover'), {
+    type: 'cancel', reason: 'timeout', message: 'ack: kernel not responding — reload the page to recover',
+  });
+  assert.deepEqual(cancelMessage('error', 'manifest refused'),
+    { type: 'cancel', reason: 'error', message: 'manifest refused' });
+  // Nothing known is an empty message, never a missing one.
+  assert.equal(cancelMessage('upload', undefined).message, '');
+  assert.equal(cancelMessage('upload', null).message, '');
+  assert.equal(cancelMessage('upload', 42).message, '42');
+});
+
+test('errorText is what the status line shows for a caught failure', () => {
+  assert.equal(errorText(new Error('NotReadableError: the file moved')), 'NotReadableError: the file moved');
+  assert.equal(errorText('a bare string'), 'a bare string');
+  assert.equal(errorText(new Error('')), 'Error');
+  assert.equal(errorText(undefined), 'undefined');
+});
+
+test('every cancel the loop sends goes through cancelMessage', () => {
+  // The loop is DOM-bound; check its source so a new cancel site cannot
+  // drop the message again.
+  const src = readFileSync(new URL('../../content/dropzone.js', import.meta.url), 'utf8');
+  const sends = src.match(/model\.send\([^;]*type: 'cancel'[^;]*;/g) || [];
+  assert.deepEqual(sends, []);
+  for (const reason of ['timeout', 'error', 'upload']) {
+    assert.ok(src.includes(`model.send(cancelMessage('${reason}', `), reason);
+  }
 });

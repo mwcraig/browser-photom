@@ -731,3 +731,74 @@ test('the page constants match the schema the worker enforces', () => {
   // The worker's body cap (feedback-worker/src/index.js) is 64 KiB; ours is under half of it.
   assert.ok(REPORT_MAX_BYTES * 2 <= 64 * 1024);
 });
+
+// Issue #19: run.failure. The kernel cleans it and puts it in a failed run's
+// report_end header; the page keeps it only on the final "failed" chunk.
+const FAILURE = { reason: 'error', message: 'manifest refused: duplicate stem a' };
+function failedHeader() {
+  const h = header();
+  return { ...h, run: { ...h.run, failure: FAILURE } };
+}
+
+test('buildReportChunk keeps run.failure only on a final failed chunk', () => {
+  const h = failedHeader();
+  assert.deepEqual(buildReportChunk(h, [], 1, true, 'failed', null).run.failure, FAILURE);
+  for (const [final, outcome] of [[false, null], [false, 'failed'], [true, 'done'],
+    [true, 'cancelled'], [true, 'page_closed'], [true, 'report_error'], [true, null]]) {
+    const run = buildReportChunk(h, [], 1, final, outcome, null).run;
+    assert.equal('failure' in run, false, `${final} ${outcome}`);
+  }
+  assert.deepEqual(h.run.failure, FAILURE);   // the header itself is untouched
+});
+
+test('a report_end for a failed run carries its failure onto the final chunk', async () => {
+  const fetchFn = fakeFetch();
+  const r = makeReporter({ fetchFn, beaconFn: fakeBeacon() });
+  handleReportMessage(r, URL, { type: 'report_start', header: header() }, 0, false);
+  handleReportMessage(r, URL, { type: 'report_row', row: row(0), header: header() }, 1, false);
+  handleReportMessage(r, URL, { type: 'report_end', outcome: 'failed', header: failedHeader() }, 2, false);
+  await settle();
+  assert.equal(fetchFn.calls.length, 1);
+  const { chunk } = fetchFn.calls[0];
+  assert.equal(chunk.final, true);
+  assert.equal(chunk.run.outcome, 'failed');
+  assert.deepEqual(chunk.run.failure, FAILURE);
+});
+
+test('a split final keeps run.failure on its last part only', () => {
+  const h = failedHeader();
+  const rows = [row(0), row(1), row(2), row(3)];
+  const whole = JSON.stringify(buildReportChunk(h, rows, 0, true, 'failed', null)).length;
+  const bodies = reportBodies(h, rows, 0, true, 'failed', null, whole - 1);
+  assert.ok(bodies.length >= 2);
+  const chunks = bodies.map((b) => JSON.parse(b.body));
+  const last = chunks[chunks.length - 1];
+  assert.equal(last.final, true);
+  assert.deepEqual(last.run.failure, FAILURE);
+  for (const c of chunks.slice(0, -1)) {
+    assert.equal(c.final, false);
+    assert.equal('failure' in c.run, false);
+  }
+});
+
+test('a report the page closes itself never carries a failure', async () => {
+  const fetchFn = fakeFetch();
+  const beaconFn = fakeBeacon();
+  const r = makeReporter({ fetchFn, beaconFn });
+  r.start(URL, failedHeader(), 0, false);   // a header with one, however it got there
+  r.start(URL, failedHeader(), 1, false);   // the first report closed as cancelled
+  r.pageClosed(2, false);                  // the second as page_closed
+  await settle();
+  assert.equal(fetchFn.calls[0].chunk.run.outcome, 'cancelled');
+  assert.equal('failure' in fetchFn.calls[0].chunk.run, false);
+  assert.equal(beaconFn.calls[0].chunk.run.outcome, 'page_closed');
+  assert.equal('failure' in beaconFn.calls[0].chunk.run, false);
+});
+
+test('the failure reasons the page sends are the ones the schema takes', () => {
+  const schema = JSON.parse(readFileSync(new globalThis.URL('../../feedback/report.schema.json', import.meta.url), 'utf8'));
+  const failure = schema.properties.run.properties.failure;
+  assert.deepEqual([...failure.properties.reason.enum].sort(), ['error', 'timeout', 'upload']);
+  assert.equal(failure.additionalProperties, false);
+  assert.equal(failure.properties.message.pattern, schema.properties.comment.pattern);
+});

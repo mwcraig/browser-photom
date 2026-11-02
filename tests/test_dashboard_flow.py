@@ -1093,3 +1093,22 @@ def test_a_two_argument_end_hook_still_works_for_done_and_bare_cancels(tmp_path)
     send_manifest(drop, [{"name": "b.fit", "size": 4}], folder="night2")
     drop.receive({"type": "cancel"})
     assert ends == ["done", "cancelled"]
+
+
+def test_a_two_argument_end_hook_is_skipped_for_a_failed_run(tmp_path):
+    # The documented trap: a failed run calls on_end with three arguments,
+    # so an old two-argument hook raises TypeError inside `_call_hook`,
+    # which swallows it. The run itself is unaffected; the hook simply
+    # never hears about the failure. Pinned here so the behaviour is a
+    # known one rather than a surprise.
+    ends = []
+
+    def on_end(dash, outcome):
+        ends.append(outcome)
+
+    dash, drop, _, _ = make_dashboard(tmp_path, on_end=on_end)
+    send_manifest(drop, [{"name": "a.fit", "size": 4}, {"name": "b.fit", "size": 4}])
+    send_file(drop, "a.fit", b"aaaa")
+    drop.receive({"type": "cancel", "reason": "timeout", "message": "Timed out"})
+    assert dash.phase == "cancelled"
+    assert ends == []

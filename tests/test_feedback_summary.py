@@ -177,6 +177,27 @@ def test_chart_breaks_the_line_at_a_skipped_frame(fs):
 def test_chart_ticks_span_the_data_not_zero(fs):
     assert fs._nice_ticks(1700, 1800) == [1700, 1750, 1800]
     assert fs._nice_ticks(5, 5) == [5]
+
+
+def test_ticks_terminate_on_a_range_a_few_ulps_wide(fs):
+    # Two sky medians that differ in the last bit used to make the tick
+    # step too small for `t += step` to advance, and the page hung.
+    import math
+    hi = math.nextafter(1700.0, 2000.0)
+    ticks = fs._nice_ticks(1700.0, hi)
+    assert 1 <= len(ticks) <= 8
+    assert ticks == sorted(ticks)
+    assert ticks[0] <= 1700.0 and ticks[-1] >= 1700.0
+
+
+def test_outcome_pill_survives_a_malformed_outcome(fs):
+    # A flagged chunk can hold anything under run.outcome; the pill must
+    # not raise on an unhashable value or an unknown string.
+    for outcome in (["failed"], {"x": 1}, 3, "crashed", None, ""):
+        html = fs._outcome_pill(outcome)
+        assert "pill" in html
+    assert "no header" in fs._outcome_pill(None)
+    assert "[&#x27;failed&#x27;]" in fs._outcome_pill(["failed"])
     assert fs._tick_label(38744, 0) == "38.744K"
     assert fs._tick_label(2.5, 2) == "2.50"
 

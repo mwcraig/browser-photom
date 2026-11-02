@@ -318,13 +318,16 @@ def _nice_ticks(lo, hi, n=3):
     raw = (hi - lo) / n
     mag = 10 ** math.floor(math.log10(raw))
     step = next(s * mag for s in (1, 2, 2.5, 5, 10) if s * mag >= raw)
-    first = math.ceil(lo / step) * step
-    ticks = []
-    t = first
-    while t <= hi + step * 1e-9:
-        ticks.append(round(t, 10))
-        t += step
-    return ticks
+    # Ticks by index, not by repeated addition: a range a few ulps wide
+    # (two sky medians that differ in the last bit) gives a step that
+    # `t += step` cannot represent, and a loop on `t` never ends. Index
+    # arithmetic always terminates; the count guard covers a step that is
+    # tiny or zero compared with the values.
+    first = math.ceil(lo / step)
+    last = math.floor((hi + step * 1e-9) / step)
+    if step <= 0 or not math.isfinite(step) or last - first > 2 * n + 2:
+        return [lo, hi]
+    return [round(k * step, 10) for k in range(first, last + 1)]
 
 
 def _tick_label(value, decimals):
@@ -411,7 +414,12 @@ def _pill(text, kind=""):
 
 
 def _outcome_pill(outcome):
-    kind = {"done": "ok", "running": "warn"}.get(outcome, "bad" if outcome else "")
+    # A flagged chunk can carry anything here (a list is unhashable, and
+    # would make the dict lookup raise): anything but a known string is
+    # shown as text and coloured as bad.
+    if not isinstance(outcome, str):
+        return _pill("no header" if outcome is None else repr(outcome), "bad" if outcome else "")
+    kind = {"done": "ok", "running": "warn"}.get(outcome, "bad")
     return _pill(outcome or "no header", kind)
 
 

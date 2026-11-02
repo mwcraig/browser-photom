@@ -201,6 +201,15 @@ npm test                     # local, in workerd: no account involved
 npx wrangler deploy
 ```
 
+**Order, when the schema changed.** The worker bundles
+`feedback/report.schema.json` at deploy time, and merging to `main` is
+itself the Pages deploy of the dashboard. So for a PR that adds a field
+(such as `run.failure`), run `npx wrangler deploy` from the PR branch
+*before* merging it; otherwise the live worker rejects every chunk that
+carries the new field until it is redeployed, and those reports come back
+`no-final`. The other order is always safe: new fields are optional, so
+the new worker accepts everything an older dashboard sends.
+
 On the first deploy Wrangler may ask you to pick a `workers.dev` subdomain
 for the account. Choose any name. Wrangler then prints the worker URL, for
 example `https://browser-photom-feedback.<your-subdomain>.workers.dev`. The

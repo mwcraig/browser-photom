@@ -2163,3 +2163,12 @@ to 80 characters) to a failed report's summary line, and copes with a
 missing or malformed failure object. Deploy the worker before the Pages
 build: until it is redeployed, the running worker refuses every failed
 run's final chunk that carries the new field.
+
+The tester-report review page, `scripts/feedback_summary.py` (previously
+parked uncommitted), is committed in the same PR, and shows the failure too: a "Failed" row with reason and message in
+each failed report's header, the reason next to the outcome pill in the
+overview, and a `failed: <reason>: <message>` line in `--text`. It reads
+the field through `pull_feedback.failure_text`, so a missing or malformed
+failure shows nothing rather than raising. A run that photometered
+nothing (`median_s` null since PR #28) now shows `median -` instead of
+`median None`.

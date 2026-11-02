@@ -346,7 +346,9 @@ Every pull (and every `--offline` re-merge) also writes
 `feedback-reports/index.html`. Open it in a browser to review the reports
 without reading JSON: an overview table of every merged report, newest
 first, then per report its header, run counters, the flags above as
-pills, the skipped frames grouped by reason, min/median/max of each QA
+pills, a failed run's `run.failure` reason and message (the reason alone
+in the overview's outcome column; nothing for a report without one, or
+with a malformed one), the skipped frames grouped by reason, min/median/max of each QA
 column over the measured frames, and four per-frame charts (sky level,
 FWHM, stars detected, seconds per frame) with skipped frames marked along
 the baseline; hovering a frame shows its file name and value. The page

@@ -3,10 +3,10 @@
 Reads ``<out>/<report_id>.json`` (the merged documents; nothing under
 ``raw/`` and no network) and writes ``<out>/index.html``: an overview table
 of every report, newest first, then one section per report with its
-header, run counters, any flags, the skipped frames with their reasons,
-and four per-frame charts (sky level, FWHM, stars detected, seconds per
-frame) so a run's shape -- dawn, clouds, a slow hidden tab -- shows at a
-glance. ``--text`` prints the same per-report numbers to the terminal
+header, run counters, any flags, a failed run's reason and message, the
+skipped frames with their reasons, and four per-frame charts (sky level,
+FWHM, stars detected, seconds per frame) so a run's shape -- dawn, clouds,
+a slow hidden tab -- shows at a glance. ``--text`` prints the same per-report numbers to the terminal
 instead. ``pull_feedback.py`` runs this after every pull (and with
 ``--offline``), so the page is always current::
 
@@ -166,6 +166,27 @@ def _hms(seconds):
     return f"{h}h {m:02d}m {s:02d}s" if h else f"{m}m {s:02d}s"
 
 
+def _median_s(run):
+    """``run.median_s`` as sent, or ``-``: null when a run photometered
+    nothing (PR #28), and a flagged chunk can carry anything."""
+    value = run.get("median_s")
+    return value if _num(value) else "-"
+
+
+def failure_for(run, pf=None, width=300):
+    """A failed run's ``"<reason>: <message>"`` (issue #19), or None.
+
+    Uses `pull_feedback.failure_text`, so a missing or malformed failure
+    (older builds send none; a flagged chunk can carry anything) is None or
+    whatever parts of it are strings, never an exception. ``width=0``
+    gives the reason alone. Only a run whose outcome is ``failed`` has
+    one, as in the pull script's summary line."""
+    if not isinstance(run, dict) or run.get("outcome") != "failed":
+        return None
+    pf = _pull_feedback() if pf is None else pf
+    return pf.failure_text(run, width=width)
+
+
 def flags_for(doc, pf=None):
     """The ``[...]`` flags `pull_feedback.summary_line` would print."""
     pf = _pull_feedback() if pf is None else pf
@@ -184,8 +205,11 @@ def text_summary(doc, pf=None):
     lines.append(f"  received {doc.get('first_received_at')} -> {doc.get('last_received_at')}"
                  f"  ({_hms(duration_s(doc))}, {len(doc.get('seqs') or [])} chunks)")
     lines.append(f"  frames {run.get('n_processed')} measured, {run.get('n_skipped')} skipped"
-                 f" of {run.get('n_total')}; median {run.get('median_s')} s/frame;"
+                 f" of {run.get('n_total')}; median {_median_s(run)} s/frame;"
                  f" hidden {_hms(run.get('hidden_ms') / 1000) if _num(run.get('hidden_ms')) else '-'}")
+    failure = failure_for(run, pf)
+    if failure:
+        lines.append(f"  failed: {failure}")
     if rows:
         lines.append(f"  frames {rows[0].get('file')} .. {rows[-1].get('file')}")
     for column, label, unit, decimals in STAT_COLUMNS:
@@ -412,6 +436,7 @@ def report_section(doc, pf):
                + _flag_pills(flags) + (
                    _pill(pf.status_tally(rows) or "no rows") if rows else "") + "</div>")
     hidden = run.get("hidden_ms")
+    failure = failure_for(run, pf)
     kv = [
         ("Report", f'<code>{_e(rid)}</code>'),
         ("Build", f'<code>{_e(doc.get("build"))}</code>'),
@@ -420,8 +445,12 @@ def report_section(doc, pf):
         ("Received", f'{_e(doc.get("first_received_at"))} to {_e(doc.get("last_received_at"))}'
                      f' ({_e(_hms(duration_s(doc)))}, {len(doc.get("seqs") or [])} chunks)'),
         ("Frames", f'{_e(run.get("n_processed"))} measured, {_e(run.get("n_skipped"))} skipped'
-                   f' of {_e(run.get("n_total"))}; median {_e(run.get("median_s"))} s per frame'
+                   f' of {_e(run.get("n_total"))}; median {_e(_median_s(run))} s per frame'
                    + (f'; tab hidden {_e(_hms(hidden / 1000))}' if _num(hidden) and hidden else "")),
+    ]
+    if failure:
+        kv.append(("Failed", f'<span class="reason">{_e(failure)}</span>'))
+    kv += [
         ("Files", f'<a href="{_e(rid)}.csv">{_e(rid[:8])}.csv</a> &middot; '
                   f'<a href="{_e(rid)}.json">{_e(rid[:8])}.json</a>'),
     ]
@@ -506,7 +535,7 @@ def overview_table(docs, pf):
             f'<code>{_e(rid[:8])}</code></td>'
             f'<td><code>{_e(_display_name(doc))}</code></td>'
             f'<td class="num">{len(rows)}</td>'
-            f'<td>{_outcome_pill(run.get("outcome"))}</td>'
+            f'<td>{_outcome_pill(run.get("outcome"))}{_e(failure_for(run, pf, 0) or "")}</td>'
             f'<td>{_e(pf.status_tally(rows) or "-")}</td>'
             f'<td>{_flag_pills(flags_for(doc, pf)) or ""}</td>'
             f'<td class="nowrap">{_e(received)}</td>'

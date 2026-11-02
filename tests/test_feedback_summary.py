@@ -193,6 +193,69 @@ def test_text_summary_and_short_build(fs, pf):
     assert fs._short_build(None) == ""
 
 
+FAILURE_MSG = "file_done: <b>kernel</b> not responding, see https://example.org/x?a=1&b=2"
+
+
+def failed(rows, failure, **over):
+    doc = merged(rows, **over)
+    doc["run"]["outcome"] = "failed"
+    if failure is not None:
+        doc["run"]["failure"] = failure
+    return doc
+
+
+def test_failure_shown_escaped_in_the_page_and_the_text(fs, pf):
+    doc = failed([row(0)], {"reason": "timeout", "message": FAILURE_MSG})
+    page = fs.html_page([doc], "out", pf)
+    assert "<b>kernel" not in page
+    shown = "timeout: file_done: &lt;b&gt;kernel&lt;/b&gt; not responding, see " \
+            "https://example.org/x?a=1&amp;b=2"
+    assert f"<dt>Failed</dt><dd><span class=\"reason\">{shown}</span></dd>" in page
+    # The overview's outcome cell carries the reason after the pill.
+    assert '<span class="pill bad">failed</span>timeout</td>' in page
+    assert "https://example.org" not in page.split('class="overview"')[1].split("</table>")[0]
+    assert page.count("<a ") == 3          # overview link + the .csv and .json links only
+    text = fs.text_summary(doc, pf)
+    assert f"  failed: timeout: {FAILURE_MSG}" in text.splitlines()
+
+
+def test_no_failure_shows_nothing_extra(fs, pf):
+    for doc in (merged([row(0)]), failed([row(0)], None),
+                merged([row(0)], run={"outcome": "done", "failure": {"reason": "error"}})):
+        page = fs.html_page([doc], "out", pf)
+        assert "<dt>Failed</dt>" not in page
+        assert "failed:" not in fs.text_summary(doc, pf)
+
+
+@pytest.mark.parametrize("failure", [
+    "timeout", 42, [], {"reason": 7, "message": ["x"]}, {"reason": "error", "message": {"a": 1}},
+    {}, {"message": None}])
+def test_malformed_failure_does_not_raise(fs, pf, failure):
+    doc = failed([row(0)], failure)
+    page = fs.html_page([doc], "out", pf)
+    text = fs.text_summary(doc, pf)
+    if isinstance(failure, dict):
+        # Whatever parts are strings, "?" for a missing reason, never a repr.
+        assert "<dt>Failed</dt>" in page
+        assert "{" not in page.split("<dt>Failed</dt>")[1].split("</dd>")[0]
+        assert "  failed: " in text
+    else:
+        assert "<dt>Failed</dt>" not in page and "failed:" not in text
+    # A non-dict run altogether.
+    assert fs.text_summary(merged([row(0)], run="junk"), pf)
+
+
+@pytest.mark.parametrize("median", [None, "3.0", True, float("nan")])
+def test_median_not_a_number_shows_a_dash(fs, pf, median):
+    doc = merged([row(0, "skipped: NoWCS")])
+    doc["run"]["median_s"] = median
+    assert "median - s/frame" in fs.text_summary(doc, pf)
+    page = fs.html_page([doc], "out", pf)
+    assert "median - s per frame" in page and "median None" not in page
+    doc["run"]["median_s"] = 2.5
+    assert "median 2.5 s/frame" in fs.text_summary(doc, pf)
+
+
 def test_write_index_and_main(fs, pf, tmp_path, capsys):
     (tmp_path / f"{RID}.json").write_text(json.dumps(merged([row(0)])))
     path = fs.write_index(tmp_path)

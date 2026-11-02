@@ -357,3 +357,17 @@ def test_text_mode_shows_terminal_control_characters_as_question_marks(fs, pf):
     assert "?[2Jframe.fit" in text and "bad?bell" in text
     assert "\n" in text
 
+
+def test_isolated_measured_points_get_a_marker(fs):
+    # ok, skipped, ok: the path is two lone M commands, which draw nothing,
+    # so each measured value needs its own marker. A contiguous run needs
+    # none; a lone point at either end needs one.
+    series = 'style="fill:var(--series)"'
+    rows = [row(0), row(1, status="skipped"), row(2)]
+    assert fs.chart_svg(rows, "fwhm", "FWHM", "px", 2).count(series) == 2
+    rows = [row(i) for i in range(5)]
+    assert fs.chart_svg(rows, "fwhm", "FWHM", "px", 2).count(series) == 0
+    rows = [row(0), row(1, status="skipped"), row(2), row(3), row(4, status="skipped"), row(5)]
+    assert fs.chart_svg(rows, "fwhm", "FWHM", "px", 2).count(series) == 2
+    assert fs.chart_svg([row(0)], "fwhm", "FWHM", "px", 2).count(series) == 1
+

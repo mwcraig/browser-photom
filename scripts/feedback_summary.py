@@ -397,10 +397,14 @@ def chart_svg(rows, column, label, unit, decimals):
             d.append(f"{'M' if prev is None or i != prev + 1 else 'L'}{x(i):.1f} {y(v):.1f}")
             prev = i
         parts.append(f'<path class="series" d="{" ".join(d)}"/>')
-        if len(points) == 1:
-            i, v = points[0]
-            parts.append(f'<circle class="skip" style="fill:var(--series)" cx="{x(i):.1f}" '
-                         f'cy="{y(v):.1f}" r="3"/>')
+        # A measured frame with skipped (or unmeasured) neighbours on both
+        # sides is a lone M in the path and draws nothing: give it a
+        # marker, so an ok, skipped, ok run still shows both values.
+        measured = {i for i, _ in points}
+        for i, v in points:
+            if (i - 1) not in measured and (i + 1) not in measured:
+                parts.append(f'<circle class="skip" style="fill:var(--series)" cx="{x(i):.1f}" '
+                             f'cy="{y(v):.1f}" r="3"/>')
     base = PAD_T + inner_h
     for i in skips:
         parts.append(f'<circle class="skip" cx="{x(i):.1f}" cy="{base - 3}" r="3"/>')

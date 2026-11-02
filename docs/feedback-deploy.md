@@ -28,11 +28,14 @@ something illegal or abusive into storage you own.
 - **Schema strictness.** Every field is a number, a boolean, null, or a short
   string with a fixed pattern. There is no binary or blob field. Free text
   is limited to the tester's comment (2000 characters), the per-row skip
-  reason (300) and the per-row file name (200). All three refuse control
-  characters (C0 and C1: a UTF-8 terminal reads U+009B as CSI, like ESC),
-  zero-width, bidi, soft-hyphen and tag format characters (which can hide
-  text or mask `www.`), noncharacters, unpaired surrogates, and, for
-  comment and reason, anything containing `://` or `www.` (in any case).
+  reason (300), the per-row file name (200) and, on a failed run's final
+  chunk, `run.failure.message` (300: the dashboard's own status-line
+  error text; `run.failure.reason` is one of `timeout`, `error`,
+  `upload`). All four refuse control characters (C0 and C1: a UTF-8
+  terminal reads U+009B as CSI, like ESC), zero-width, bidi, soft-hyphen
+  and tag format characters (which can hide text or mask `www.`),
+  noncharacters, unpaired surrogates, and, for all but the file name,
+  anything containing `://` or `www.` (in any case).
   Within those bounds they are untrusted text: markup, a bare domain name,
   or base64 fits the pattern and is stored as typed. So is every other
   field: the endpoint is open, so an `obscode` is a claim, not a verified
@@ -61,7 +64,9 @@ something illegal or abusive into storage you own.
   serves. That is outside what this repo stores.
 - **What a report contains.** The tester agreed to send these: the AAVSO
   observer code, the site position rounded to whole degrees, file names,
-  per-frame QA numbers, the build tag, and their comment. The consent text
+  per-frame QA numbers, the build tag, their comment, and, when a run
+  fails, the error text the dashboard showed in its status line. The
+  consent text
   (the dialog that opens when the box is ticked; the box only ticks once
   they confirm there) also says the server adds the country it infers from
   the connection. There
@@ -286,6 +291,13 @@ report:
 01234567 CMW rows=350 outcome=done ok=341 skipped: NoWCS=9 | 'Second night, clouds after 2am.'
 ```
 
+A failed run whose final chunk says why (dashboards from 2026-11-02 on)
+adds `failure=<reason>: <message>` after the status tally, the message cut
+to 80 characters, for example
+`failure=timeout: file_done: kernel not responding — reload the page to recover`.
+A failed run from an older build, or one whose failure object is missing
+or malformed, just has no `failure=`.
+
 Flags in `[...]` mark anything to look at:
 
 - `INVALID xN`: a chunk fails the schema now. That means the schema changed
@@ -458,17 +470,32 @@ change:
   without CORS headers, which the page also counts as a failure, so the
   difference is a controlled status, not safety.
 - `run.outcome` values: `running` until the final chunk, then `done`,
-  `failed` (the run died: the front end's cancel carried a reason),
+  `failed` (the run died: the front end's cancel carried a reason, which
+  the final chunk carries as `run.failure`, see below),
   `cancelled` (the page closed the report itself: a new run started with
   one open, or the widget was disposed on a kernel restart; there is no
   Stop button, so it is never "the tester stopped it"), `page_closed` (tab
   closed mid-run) or `report_error` (the dashboard's own reporting failed;
   the run went on).
+- `run.failure` (issue #19): `{"reason", "message"}`, only on a final
+  chunk whose outcome is `failed`, and absent (never null) on every other
+  chunk. `reason` is the front end's cancel reason: `timeout` (an
+  `ack`/`file_done` wait ran out), `error` (a kernel `error` reply) or
+  `upload` (the upload loop died: a file that would not read, a dead
+  comm). `message` is what the status line showed after `Error: `, for
+  `error` the kernel's own exception text, cleaned by
+  `feedback_report.clean_failure` like a skip reason (one line, URLs as
+  `[url]`, 300 characters) and possibly empty. The kernel puts it in the
+  header of a failed run's `report_end`; the page carries it onto the
+  final chunk only.
 - **Deploy order.** The worker bundles the schema at deploy time, so a
-  schema change (the `failed` outcome, the extended character class) is
-  rejected by the running worker until it is redeployed. Redeploy before
-  the Pages build that ships the matching dashboard, or the first reports
-  under the new schema come back `no-final`.
+  schema change (the `failed` outcome, the extended character class,
+  `run.failure`) is rejected by the running worker until it is
+  redeployed. Redeploy before the Pages build that ships the matching
+  dashboard, or the first reports under the new schema come back
+  `no-final` (for `run.failure`: every failed run's final chunk). The
+  other order is safe: `run.failure` is optional, so the new worker
+  still accepts every chunk an older dashboard sends.
 - Pinned versions (exact): `@cfworker/json-schema` 4.1.1, `wrangler`
   4.151.1 (bumped 2026-10-18 for the `sharp`/`undici` advisories in
   miniflare; dev-only, nothing of it ships in the worker), `vitest` 4.1.11,

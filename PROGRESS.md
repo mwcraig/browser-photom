@@ -2121,3 +2121,45 @@ and worker are unchanged: `median_s` keeps its name, and its meaning
 narrows to photometered frames. Reports from builds before this one are
 therefore not comparable on `median_s` when the run had many skips; on a
 run with few or no skips the two definitions agree closely.
+
+# A failed run's report says why it failed (2026-11-02)
+
+Issue #19. A run that died was reported as `run.outcome = "failed"` and
+nothing else. Report `2fdf95f8` (2026-10-20, one tester, 466 CzeV616
+frames) is the case that made the gap plain: 310 frames, every one `ok` at
+~1.9 s/frame, final chunk present, no merge flags, and then the run ended
+as failed. The tester's retry processed all 466 frames, so the frame after
+the crash point was not a bad file. Whether it was the 10-minute watchdog,
+a kernel error or the upload loop dying, the report could not say: the
+front end's `cancel` carried a reason the kernel collapsed to "failed",
+and the status-line text the tester saw was dropped.
+
+The final chunk of a failed run now carries `run.failure`,
+`{"reason", "message"}`: `reason` is the cancel's (`timeout`, `error`,
+`upload`) and `message` the text the status line showed after `Error: `
+(for `error`, the kernel's own exception text). The schema caps the
+message at 300 characters with the comment's character rules and
+`additionalProperties: false`; it is absent, not null, on every chunk but
+a final `failed` one, so reports from older dashboards still validate.
+
+It is built in the kernel, not the page. Every `cancel` now carries the
+status-line text as `message` (`cancelMessage` in `dropzone.js`);
+`PhotometryDashboard._on_cancel` hands reason and message to the `on_end`
+hook as an optional third argument (failed runs only, so two-argument
+hooks keep working for `done` and bare cancels); the view's
+`build_header(failure=...)` cleans them with `clean_failure`, which reuses
+the skip-reason cleaner (one line, URLs as `[url]`, 300 characters), and
+the cleaned failure rides in the header of `report_end`. The page only has
+to drop it from any chunk that is not the final `failed` one, which
+`buildReportChunk` and `build_chunk` both do. Cleaning on the page instead
+would have meant a second, JavaScript copy of the text rules; this way
+there is one, the host tests validate it against the schema (and the
+cross-validation test against the worker's own validator), and the
+"Preview report" button shows it after a failed run. The consent text
+says a failed run's report includes the error message.
+
+`scripts/pull_feedback.py` adds `failure=<reason>: <message>` (message cut
+to 80 characters) to a failed report's summary line, and copes with a
+missing or malformed failure object. Deploy the worker before the Pages
+build: until it is redeployed, the running worker refuses every failed
+run's final chunk that carries the new field.

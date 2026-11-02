@@ -342,6 +342,30 @@ def _seq_list(seqs, show=5):
     return text if len(seqs) <= show else f"{text} +{len(seqs) - show} more"
 
 
+def failure_text(run, width=80):
+    """``"error: <message>"`` from a failed run's ``run.failure`` (issue
+    #19), the message's whitespace collapsed and cut to ``width``
+    characters (non-printable ones shown as ``?``); None when there is
+    none. Builds from before issue #19 never send one, and a flagged chunk
+    can carry anything, so a missing or malformed failure is None (or
+    whatever parts of it are strings), never an exception."""
+    failure = run.get("failure") if isinstance(run, dict) else None
+    if not isinstance(failure, dict):
+        return None
+
+    def shown(value, cut):
+        # One line, and nothing a terminal would act on: the comment gets
+        # the same from repr(); an invalid chunk's text was never checked.
+        if not isinstance(value, str):
+            return ""
+        text = " ".join(value.split())[:cut]
+        return "".join(c if c.isprintable() else "?" for c in text)
+
+    reason = shown(failure.get("reason"), 20) or "?"
+    message = shown(failure.get("message"), width)
+    return f"{reason}: {message}" if message else reason
+
+
 def summary_line(merged):
     flags = []
     if merged["invalid_chunks"]:
@@ -378,6 +402,9 @@ def summary_line(merged):
         f"outcome={outcome}",
         status_tally(merged["rows"]) or "-",
     ]
+    failure = failure_text(run) if outcome == "failed" else None
+    if failure:
+        parts.append(f"failure={failure}")
     if flags:
         parts.append("[" + "; ".join(flags) + "]")
     return " ".join(parts) + f" | {comment!r}"

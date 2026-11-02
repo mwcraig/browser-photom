@@ -113,7 +113,7 @@ def other_failure(took=0.2):
         try:
             raise ValueError("too few")
         except ValueError as cause:
-            raise BatchPrepError("too few stars detected in 'a.fit'") from cause
+            raise BatchPrepError("cannot measure an FWHM on a.fit: too few stars") from cause
     except BatchPrepError as exc:
         return exc, took
 
@@ -279,7 +279,7 @@ def test_catalog_warnings_are_always_shown(build):
 def test_a_non_gaia_prep_failure_retries_on_the_next_frame(build, fake):
     proc, lines, _clock, qa = build()
     fake.prep_outcomes = [other_failure()]
-    assert proc("a.fit", "a.fit") == "batch prep failed: too few stars detected in 'a.fit'"
+    assert proc("a.fit", "a.fit") == "batch prep failed: cannot measure an FWHM on a.fit: too few stars"
     assert qa == []
     assert proc("b.fit", "b.fit") is None
     assert fake.prep_calls == ["a.fit", "b.fit"]
@@ -352,7 +352,7 @@ def test_a_non_gaia_failure_after_a_gaia_retry_leaves_the_backoff_step_alone(bui
     fake.prep_outcomes = [gaia_failure(), other_failure(), gaia_failure()]
     proc("a.fit", "a.fit")
     clock.now += 60
-    assert proc("b.fit", "b.fit").startswith("batch prep failed: too few stars")
+    assert proc("b.fit", "b.fit").startswith("batch prep failed: cannot measure an FWHM")
     # ...and, being fast and not Gaia, it is retried on the very next frame.
     assert proc("c.fit", "c.fit") == GAIA_REASON
     assert fake.prep_calls == ["a.fit", "b.fit", "c.fit"]

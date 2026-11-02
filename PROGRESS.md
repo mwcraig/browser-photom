@@ -1888,6 +1888,35 @@ status line's `median 0.0 s/frame` in (c) is the pre-existing
 `RunState.frame_skipped` counting skip durations. Captures are in the
 session scratchpad (pr23_a, pr23_b, pr23_c); none are committed.
 
+Rebased onto main at the e29ed5c pin (2026-11-01, head afe2385 plus one
+wording commit). Two conflicts, both textual: the batch-prep comment in
+`make_bandaid_processor` (main's walk wording kept, the gaia_* sentences
+appended) and this file. A review against bandaid e29ed5c found the
+cooldown's detection intact (a Gaia failure is still a `BatchPrepError`
+chained from `GaiaQueryError`; the walk's errors chain `TooFewStarsError` or
+`PSFFitError`) and that none of PR #177's new walk warnings can fire in the
+browser, which hands `prepare_batch` one frame per call; the per-frame
+"skipping" warning carries `exc_info` and is dropped, so a skip is reported
+once. Four wording fixes followed: the backoff step is cleared only by
+`reset()`, "a bad first frame" is no longer listed among the retried prep
+failures (at e29ed5c only too few stars or no usable PSF are wrapped; other
+first-frame errors propagate), the docs use the code comment's "first
+dropped frame that `prepare_batch` accepts", and the test stub's message
+reads like bandaid's. Browser rerun of the three forced-failure scenarios on
+a build of afe2385 (bandaid e29ed5c): CDS hung and the rest refused, 20
+frames: one round of four Gaia POSTs, the CDS one timing out at 70 s, four
+`bandaid:` lines, `Gaia failed after 71 s; not retrying batch prep for 60 s
+...`, frame 1 `batch prep failed: could not query Gaia for the field at
+(26.0481, 12.7537): no Gaia server answered the query; tried
+vizier.cds.unistra.fr, vizier.idia.ac.za, vizier.cfa.harvard.edu,
+dc.g-vo.org; last error: ...`, then `[skip] 19 frames not retried: Gaia
+failed, batch prep cooldown, next retry in 60s (see the first skipped frame
+above)`, 76.7 s drop to done. Three VizieR refused, 5 frames: three
+`bandaid:` lines on the panel 3 s before `Batch prep done: 793 photometry
+stars`, GAVO answered, 5 ok in 16 s. All four refused, 20 frames: 80 POSTs,
+a `batch prep failed` line per frame, no cooldown, 13 s. No page errors. 540
+pytest / 1 skipped, 97 node.
+
 # bandaid pin moved to 66b4e03 (2026-11-01)
 
 66b4e03 is the merge of bandaid PR #175, closing bandaid #174, filed

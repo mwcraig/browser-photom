@@ -209,17 +209,18 @@ Two further fixes from the PR-review batch live in this same seam.
 that clears the cached batch prep, so a second folder is never photometered
 against the first folder's catalog.
 
-Batch prep and its retries. Prep is built from the first frame that reaches
-the processor; a `BatchPrepError` skips that frame with the reason
+Batch prep and its retries. Prep is built from the first dropped frame that
+`prepare_batch` accepts; a `BatchPrepError` skips that frame with the reason
 `batch prep failed: <message>` (the prefix the tester reports and the
 view's `[skip]` line show) and leaves prep unbuilt, so a later frame retries.
-How soon depends on the cause. A bad first frame, too few stars, a truncated
-catalog or the edge-margin check fails in well under a second and the next
-frame may well be fine, so the next frame retries. When the error's
-`__cause__` is bandaid's `GaiaQueryError` (every Gaia server failed: the
-three VizieR mirrors and then GAVO), the problem is the network, not the
-frame, and a retry can cost minutes when a server hangs rather than refuses,
-since each hung request runs to bandaid's 70 s cap. So a Gaia failure whose
+How soon depends on the cause. Too few stars or no usable PSF (the message
+names the frame), a truncated catalog or the edge-margin check fails in well
+under a second and the next frame may well be fine, so the next frame
+retries. When the error's `__cause__` is bandaid's `GaiaQueryError` (every
+Gaia server failed: the three VizieR mirrors and then GAVO), the problem is
+the network, not the frame, and a retry can cost minutes when a server hangs
+rather than refuses, since each hung request runs to bandaid's 70 s cap. So a
+Gaia failure whose
 `prepare_batch` call took longer than `GAIA_SLOW_PREP_S` (10 s) starts a
 cooldown of `GAIA_RETRY_FIRST_S` (60 s), doubled by each further slow Gaia
 failure up to `GAIA_RETRY_MAX_S` (600 s); a fast one (every server refused)

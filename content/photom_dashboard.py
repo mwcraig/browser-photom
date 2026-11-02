@@ -1335,7 +1335,7 @@ def make_bandaid_processor(
     # list up front (since e29ed5c, bandaid PR #177), one frame per drop.
     # The gaia_* keys are the retry cooldown after a slow Gaia failure:
     # gaia_wait is the current backoff step (None until Gaia first fails
-    # slowly, cleared once Gaia answers), gaia_until the clock time before
+    # slowly, cleared only by reset()), gaia_until the clock time before
     # which prep is not retried (None once the cooldown is lifted), gaia_at
     # when the last slow failure ended.
     batch = {"prep": None, "n": 0}
@@ -1378,7 +1378,7 @@ def make_bandaid_processor(
             except BatchPrepError as exc:
                 # Fatal to *prep*, not to the run: leave it None so a later
                 # frame retries, rather than one bad first frame killing all.
-                # A bad frame, too few stars or a truncated catalog fails
+                # Too few stars, no usable PSF or a truncated catalog fails
                 # fast and the next frame may well succeed, so retry at once;
                 # it says nothing about Gaia either way (most of those are
                 # raised before the catalog query), so the backoff step is

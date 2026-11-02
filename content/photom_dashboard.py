@@ -280,8 +280,8 @@ class RunState:
 
         Skipped frames are left out (issue #25). A skip costs a different
         amount than a measurement: a skip during the Gaia batch-prep cooldown
-        takes ~0 s, and a skip bandaid raises partway through a frame takes
-        however long it got. Mixing them in made the label lie: a stalled run
+        takes ~0 s, and a skip that bandaid raises partway through a frame
+        takes however long it got. Mixing them in made the label lie: a stalled run
         of one 71 s prep failure and 19 cooldown skips read "median 0.0
         s/frame", as if it were fast. The skip count is already on the status
         line; this number answers only how long a measurement takes.

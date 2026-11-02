@@ -160,17 +160,28 @@ def test_every_frame_is_timed_so_the_run_can_report_s_per_frame(tmp_path):
     assert "s/frame" in dash.state.summary()
 
 
-def test_a_skipped_frame_stays_out_of_the_median(tmp_path):
+def test_a_skipped_frame_stays_out_of_the_median_but_is_still_timed(tmp_path):
     # Issue #25: the median s/frame covers photometered frames only, so a
-    # run whose every frame was skipped shows no median at all.
+    # run whose every frame was skipped shows no median at all. The skip is
+    # still timed, though: the per-frame hook gets its elapsed time, which
+    # the tester report records as the skip row's `elapsed_s`.
+    hook_calls = []
     dash, drop, _, _ = make_dashboard(
-        tmp_path, process_frame=lambda path, name: "too few stars"
+        tmp_path,
+        process_frame=lambda path, name: "too few stars",
+        on_frame=lambda dash, name, ok, reason, elapsed: hook_calls.append(
+            (name, ok, reason, elapsed)
+        ),
     )
     send_manifest(drop, [{"name": "a.fit", "size": 4}])
     send_file(drop, "a.fit", b"aaaa")
     assert dash.state.skipped == 1
     assert dash.state.frame_times == []
     assert "s/frame" not in dash.state.summary()
+    assert len(hook_calls) == 1
+    name, ok, reason, elapsed = hook_calls[0]
+    assert (name, ok, reason) == ("a.fit", False, "too few stars")
+    assert elapsed is not None and elapsed >= 0
 
 
 def test_the_memfs_copy_does_not_survive_the_frame(tmp_path):

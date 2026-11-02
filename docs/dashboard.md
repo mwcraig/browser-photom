@@ -871,9 +871,10 @@ chunking protocol itself. The 2026-08-11 run rules this out.
     logged skips, so successful frames left no trace but an advancing counter.
     Per-frame timing and a running median were added afterward
     (`RunState.median_seconds`, over photometered frames only since issue
-    #25, so near-zero cooldown skips cannot drag it to 0). A browser run on 2026-08-19 (Qatar-8, ~67
-    frames) finally read it off the screen: **~1.7 s/frame** on the
-    smaller-FWHM frames and **~2.0 s/frame** on the larger-FWHM ones.
+    #25, so near-zero cooldown skips cannot drag it to 0). A browser run on
+    2026-08-19 (Qatar-8, ~67 frames) finally read it off the screen:
+    **~1.7 s/frame** on the smaller-FWHM frames and **~2.0 s/frame** on the
+    larger-FWHM ones.
 
 ## 10. Testing
 

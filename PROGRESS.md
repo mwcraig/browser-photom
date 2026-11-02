@@ -1995,4 +1995,4 @@ and 36.9 px across four noise seeds. None of this is new with e29ed5c (a
 first frame like that always seeded prep); the walk just makes it reachable
 from later frames too. Possible bandaid follow-up: have prep require more
 than an FWHM of its candidate (a plate solve, or a sanity bound on the FWHM
-well below the cutout half-width), not filed.
+well below the cutout half-width): filed as bandaid #178.

@@ -11,6 +11,9 @@ described in `docs/dashboard.md` §11. The pieces:
 - `scripts/pull_feedback.py`: downloads what the worker stored, merges each
   run's chunks and prints a one-line summary per report, for review on your
   own machine.
+- `scripts/feedback_summary.py`: builds `feedback-reports/index.html`, a
+  review page with every report's numbers, flags, skip reasons and
+  per-frame charts. The pull script runs it after every pull.
 
 Until the steps below are done, nothing changes: the Pages build has no
 endpoint URL, so the dashboard greys out the opt-in checkbox and sends
@@ -339,6 +342,23 @@ Flags in `[...]` mark anything to look at:
 `--offline` re-merges what is already downloaded without contacting R2.
 Keep `feedback-reports/` out of git. It holds observer codes.
 
+Every pull (and every `--offline` re-merge) also writes
+`feedback-reports/index.html`. Open it in a browser to review the reports
+without reading JSON: an overview table of every merged report, newest
+first, then per report its header, run counters, the flags above as
+pills, the skipped frames grouped by reason, min/median/max of each QA
+column over the measured frames, and four per-frame charts (sky level,
+FWHM, stars detected, seconds per frame) with skipped frames marked along
+the baseline; hovering a frame shows its file name and value. The page
+is plain HTML with inline styles and no script, so every string from a
+report is shown escaped and nothing in it can run. It can be rebuilt on
+its own, or printed to the terminal instead:
+
+```sh
+pixi run python scripts/feedback_summary.py feedback-reports          # writes index.html
+pixi run python scripts/feedback_summary.py feedback-reports --text   # the same numbers, as text
+```
+
 ## 10. Turning it off
 
 - **Stop new reports from the dashboard:** delete or blank the `FEEDBACK_URL`
@@ -430,7 +450,8 @@ change:
 - Worker tests: `cd feedback-worker && npm test`. They run Vitest inside
   workerd through `@cloudflare/vitest-pool-workers`, with a local R2 bucket
   and no Cloudflare account. Python tests for the pull script are in
-  `tests/test_pull_feedback.py` and need no network or boto3.
+  `tests/test_pull_feedback.py`, and for the review page in
+  `tests/test_feedback_summary.py`; neither needs the network or boto3.
 - The worker validates with `@cfworker/json-schema` (draft 2020-12). Workers
   forbid `eval` and `new Function`, which rules out ajv's default compiled
   mode. That validator interprets the schema instead, and compiles the

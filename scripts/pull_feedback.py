@@ -8,7 +8,10 @@ lists and downloads those objects through R2's S3-compatible API into
 again), then writes, per report_id, ``<out>/<report_id>.json`` (header
 fields, run counters and every row, chunks sorted by seq) and
 ``<out>/<report_id>.csv`` (the rows; a string cell that a spreadsheet would
-take for a formula is prefixed with ``'``), and prints one line per report.
+take for a formula is prefixed with ``'``), prints one line per report, and
+writes ``<out>/index.html`` (scripts/feedback_summary.py), a review page
+with every report's numbers, flags and per-frame charts: open it in a
+browser.
 ``--since`` selects reports with any chunk stored on or after that UTC day,
 and then all of each one's chunks, however many days back they go (the
 whole bucket is listed; only the selected reports' objects are fetched).
@@ -366,7 +369,8 @@ def failure_text(run, width=80):
     return f"{reason}: {message}" if message else reason
 
 
-def summary_line(merged):
+def flag_list(merged):
+    """The flags `summary_line` prints in ``[...]``, in its order."""
     flags = []
     if merged["invalid_chunks"]:
         flags.append(f"INVALID x{len(merged['invalid_chunks'])}")
@@ -392,6 +396,11 @@ def summary_line(merged):
         flags.append("INCONSISTENT " + ",".join(merged["inconsistencies"]))
     if merged.get("merge_error"):
         flags.append(f"MERGE-ERROR {merged['merge_error']}")
+    return flags
+
+
+def summary_line(merged):
+    flags = flag_list(merged)
     run = merged.get("run")
     outcome = run.get("outcome") if isinstance(run, dict) else None
     comment = " ".join(str(merged.get("comment") or "").split())[:80]
@@ -647,7 +656,22 @@ def main(argv=None):
     print(f"{len(merged)} reports in {args.out}"
           + (f"; {n_invalid} with chunks that fail the schema" if n_invalid else "")
           + (f"; {n_errors} could not be merged" if n_errors else ""))
+    # The review page covers every merged report in <out>, not only the
+    # ones this pull selected, so it is always the whole picture.
+    index = _feedback_summary().write_index(args.out)
+    print(f"review page: {index}")
     return 0
+
+
+def _feedback_summary():
+    """The sibling review-page script (scripts/feedback_summary.py)."""
+    import importlib.util
+
+    path = Path(__file__).resolve().with_name("feedback_summary.py")
+    spec = importlib.util.spec_from_file_location("feedback_summary", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 if __name__ == "__main__":

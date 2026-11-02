@@ -298,6 +298,7 @@ svg { width: 100%; height: auto; display: block; }
 .series { fill: none; stroke: var(--series); stroke-width: 2; stroke-linejoin: round;
   stroke-linecap: round; }
 .skip { fill: var(--critical); }
+.point { fill: var(--series); }
 .hit { fill: transparent; }
 .hit:hover { fill: var(--series); fill-opacity: 0.15; }
 .legend { font-size: 12px; color: var(--text-2); margin-top: 4px; }
@@ -403,8 +404,7 @@ def chart_svg(rows, column, label, unit, decimals):
         measured = {i for i, _ in points}
         for i, v in points:
             if (i - 1) not in measured and (i + 1) not in measured:
-                parts.append(f'<circle class="skip" style="fill:var(--series)" cx="{x(i):.1f}" '
-                             f'cy="{y(v):.1f}" r="3"/>')
+                parts.append(f'<circle class="point" cx="{x(i):.1f}" cy="{y(v):.1f}" r="3"/>')
     base = PAD_T + inner_h
     for i in skips:
         parts.append(f'<circle class="skip" cx="{x(i):.1f}" cy="{base - 3}" r="3"/>')

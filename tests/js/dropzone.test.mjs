@@ -809,7 +809,12 @@ test('every cancel the loop sends goes through cancelMessage', () => {
   const src = readFileSync(new URL('../../content/dropzone.js', import.meta.url), 'utf8');
   const sends = src.match(/model\.send\([^;]*type: 'cancel'[^;]*;/g) || [];
   assert.deepEqual(sends, []);
-  for (const reason of ['timeout', 'error', 'upload']) {
+  for (const reason of ['timeout', 'error']) {
     assert.ok(src.includes(`model.send(cancelMessage('${reason}', `), reason);
   }
+  // The loop's own catch labels a kernel error that unwound it with no
+  // waiter pending as "error", not "upload" (the kernel's death is what
+  // run.failure is meant to record).
+  assert.ok(src.includes("cancelMessage(err && err.fromKernel ? 'error' : 'upload', text)"));
+  assert.ok(src.includes("{ fromKernel: true }"));
 });

@@ -1336,7 +1336,10 @@ function renderDropZone({ model, el, signal }) {
       // The latch keeps the error too, for the upload loop's rethrow():
       // there may be no waiter to reject yet if this landed during the
       // loop's first chunk read (issue #11).
-      const err = new Error(msg.reason || 'Kernel error');
+      const text = msg.reason || 'unknown error';
+      // Tagged, so the loop's catch can still label the cancel "error"
+      // when no waiter was pending here and the catch is what sends it.
+      const err = Object.assign(new Error(text), { fromKernel: true });
       if (!errorLatch.trip(err)) return;
       // No way to know which in-flight step a kernel-side error belongs
       // to, so fail every pending waiter and let the upload loop unwind.
@@ -1347,7 +1350,6 @@ function renderDropZone({ model, el, signal }) {
       // send, and the download button would never appear. With no waiter
       // pending the loop itself sends it, from its catch, once rethrow()
       // picks the error up from the latch.
-      const text = msg.reason || 'unknown error';
       if (pending.length > 0) model.send(cancelMessage('error', text));
       setStatus(`Error: ${text}`);
       return;
@@ -1499,7 +1501,10 @@ function renderDropZone({ model, el, signal }) {
       // `cancel` is idempotent, so the extra one sent when the kernel's own
       // error message is what unwound us is harmless.
       try {
-        model.send(cancelMessage('upload', text));
+        // A kernel error that landed with no waiter pending (issue #11's
+        // window) unwinds the loop through rethrow(); it is still the
+        // kernel's death, not an upload failure, and is labelled so.
+        model.send(cancelMessage(err && err.fromKernel ? 'error' : 'upload', text));
       } catch (sendErr) {
         // Comm is gone; nothing left to tell it with. Reload is the only
         // recovery, and the status line above says so as well as it can.

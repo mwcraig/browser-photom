@@ -496,6 +496,14 @@ def merge_all(raw_dir, out_dir, since=None, schema=None, report_ids=None):
             write_csv(merged["rows"], out_dir / f"{report_id}.csv", schema)
         except Exception as exc:  # noqa: BLE001 - one report must not stop the rest
             merged = failed_merge(report_id, stored, exc)
+            # Written too, so the review page (built from <out>/*.json)
+            # shows the MERGE-ERROR rather than yesterday's good merge of
+            # the same report. The raw objects are untouched; the next
+            # pull re-merges them.
+            try:
+                (out_dir / f"{report_id}.json").write_text(json.dumps(merged, indent=1) + "\n")
+            except Exception:  # noqa: BLE001
+                pass
         merged_docs.append(merged)
     merged_docs.sort(key=lambda m: m["first_received_at"] or "")
     return merged_docs
@@ -658,8 +666,17 @@ def main(argv=None):
           + (f"; {n_errors} could not be merged" if n_errors else ""))
     # The review page covers every merged report in <out>, not only the
     # ones this pull selected, so it is always the whole picture.
-    index = _feedback_summary().write_index(args.out)
-    print(f"review page: {index}")
+    # Its failure must not read as a failed pull: the merged files are
+    # already on disk, and the page can be rebuilt on its own.
+    try:
+        # Hand over this module rather than letting the page load a second
+        # copy from disk (None when loaded by path, as the tests do: the
+        # page then loads its own).
+        index = _feedback_summary().write_index(args.out, pf=sys.modules.get(__name__))
+    except Exception as exc:  # noqa: BLE001
+        print(f"review page not written: {type(exc).__name__}: {exc}", file=sys.stderr)
+    else:
+        print(f"review page: {index}")
     return 0
 
 

@@ -396,7 +396,29 @@ def test_a_report_whose_merge_raises_is_reported_and_the_rest_go_through(pf, tmp
     by_id = {m["report_id"]: m for m in merged}
     assert by_id[first]["merge_error"].startswith("KeyError")
     assert "MERGE-ERROR KeyError" in pf.summary_line(by_id[first])
-    assert (tmp_path / f"{second}.json").exists() and not (tmp_path / f"{first}.json").exists()
+    # Both are on disk: the stand-in too, so the review page (built from
+    # <out>/*.json) shows the MERGE-ERROR instead of an older good merge.
+    assert (tmp_path / f"{second}.json").exists()
+    stub = json.loads((tmp_path / f"{first}.json").read_text())
+    assert stub["merge_error"].startswith("KeyError") and stub["rows"] == []
+    assert not (tmp_path / f"{first}.csv").exists()
+
+
+def test_a_review_page_failure_does_not_fail_the_pull(pf, tmp_path, monkeypatch, capsys):
+    raw = tmp_path / "raw"
+    (raw / key(0)).parent.mkdir(parents=True)
+    (raw / key(0)).write_text(json.dumps(stored(chunk(0, [ROW_OK], final=True))))
+
+    class Broken:
+        @staticmethod
+        def write_index(out, pf=None):
+            raise RuntimeError("renderer bug")
+
+    monkeypatch.setattr(pf, "_feedback_summary", lambda: Broken())
+    assert pf.main(["bucket", "--offline", "--out", str(tmp_path)]) == 0
+    captured = capsys.readouterr()
+    assert "review page not written: RuntimeError: renderer bug" in captured.err
+    assert (tmp_path / f"{RID}.json").exists()
 
 
 def test_a_truncated_mirror_copy_never_wins_over_a_readable_duplicate(pf, validator):

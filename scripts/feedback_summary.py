@@ -87,8 +87,12 @@ def load_merged(out_dir):
 # -- numbers ------------------------------------------------------------------
 
 def _num(value):
+    """A finite number inside the schema's range (|x| <= 1e12). A flagged
+    chunk can hold anything, and 1e308 or 2**53 would break the chart
+    arithmetic (an infinite range; a padding that does not change the
+    value), so out-of-range numbers are treated as absent."""
     return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and value == value and abs(value) != float("inf"))
+            and value == value and abs(value) <= 1e12)
 
 
 def column_stats(rows, column):
@@ -226,7 +230,15 @@ def text_summary(doc, pf=None):
         lines.append("  rows/chunk " + " ".join(str(n) for _, n, _ in profile))
         lines.append("  s/frame per chunk " + " ".join(
             "-" if e is None else f"{e:.1f}" for _, _, e in profile))
-    return "\n".join(lines)
+    return _terminal_safe("\n".join(lines))
+
+
+def _terminal_safe(text):
+    """The text with every non-printable character (an escape sequence, a
+    bidi control, a lone surrogate that print() could not encode) shown as
+    ``?``; newlines kept. Everything in a report came through an open
+    endpoint, and a flagged chunk was never checked by the schema."""
+    return "".join(c if c == "\n" or c.isprintable() else "?" for c in text)
 
 
 # -- HTML ---------------------------------------------------------------------
@@ -312,22 +324,27 @@ def _e(value):
 def _nice_ticks(lo, hi, n=3):
     """Round tick values spanning [lo, hi]; the data range, not from zero,
     so a sky level that drifts from 1700 to 1800 is still visible."""
-    if hi <= lo:
-        return [lo]
     import math
+    if not (math.isfinite(lo) and math.isfinite(hi)) or hi <= lo:
+        return [lo]
     raw = (hi - lo) / n
+    # A range a few ulps wide (two sky medians that differ in the last
+    # bit), or one so small that 10**floor(log10) underflows to 0, has no
+    # round step worth drawing: label the ends and stop.
+    if not math.isfinite(raw) or raw <= 0 or raw < abs(lo) * 1e-9:
+        return [lo, hi]
     mag = 10 ** math.floor(math.log10(raw))
+    if mag == 0:
+        return [lo, hi]
     step = next(s * mag for s in (1, 2, 2.5, 5, 10) if s * mag >= raw)
-    # Ticks by index, not by repeated addition: a range a few ulps wide
-    # (two sky medians that differ in the last bit) gives a step that
-    # `t += step` cannot represent, and a loop on `t` never ends. Index
-    # arithmetic always terminates; the count guard covers a step that is
-    # tiny or zero compared with the values.
+    # Ticks by index, not by repeated addition: `t += step` can fail to
+    # advance when step is tiny next to t, and a loop on `t` never ends.
     first = math.ceil(lo / step)
     last = math.floor((hi + step * 1e-9) / step)
-    if step <= 0 or not math.isfinite(step) or last - first > 2 * n + 2:
+    if last - first > 2 * n + 2:
         return [lo, hi]
-    return [round(k * step, 10) for k in range(first, last + 1)]
+    ticks = [round(k * step, 10) for k in range(first, last + 1)]
+    return sorted(set(ticks)) or [lo, hi]
 
 
 def _tick_label(value, decimals):
@@ -557,7 +574,7 @@ def html_page(docs, out_dir=None, pf=None, now=None):
     pf = _pull_feedback() if pf is None else pf
     now = datetime.now(timezone.utc) if now is None else now
     n_frames = sum(len(d.get("rows") or []) for d in docs)
-    sections = "\n".join(report_section(d, pf) for d in docs)
+    sections = "\n".join(_guarded_section(d, pf) for d in docs)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -580,13 +597,30 @@ Newest first. Re-run <code>pull_feedback.py</code> to refresh.</p>
 """
 
 
+def _guarded_section(doc, pf):
+    """``report_section``, or a short section naming the error: one report
+    the renderer cannot cope with must not cost the page (the pull script
+    writes it unconditionally, and `merge_all` already isolates reports
+    from each other)."""
+    try:
+        return report_section(doc, pf)
+    except Exception as exc:  # noqa: BLE001 - render the rest regardless
+        rid = doc.get("report_id") if isinstance(doc, dict) else None
+        return (f'<h2 id="r-{_e(rid)}">{_e(rid)}</h2>'
+                f'<p class="pill bad">could not render this report: '
+                f'{_e(type(exc).__name__)}: {_e(str(exc)[:200])}</p>')
+
+
 def write_index(out_dir, docs=None, pf=None):
     """Write ``<out>/index.html`` from the merged documents; return its path."""
     out_dir = Path(out_dir)
     pf = _pull_feedback() if pf is None else pf
     docs = load_merged(out_dir) if docs is None else docs
     path = out_dir / "index.html"
-    path.write_text(html_page(docs, out_dir, pf), encoding="utf-8")
+    # backslashreplace: a chunk stored under an older schema can hold a lone
+    # surrogate, which json.loads and html.escape pass through and strict
+    # UTF-8 refuses to write (write_csv in pull_feedback.py does the same).
+    path.write_text(html_page(docs, out_dir, pf), encoding="utf-8", errors="backslashreplace")
     return path
 
 

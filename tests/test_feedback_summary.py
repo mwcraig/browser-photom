@@ -303,3 +303,57 @@ def test_pull_script_writes_the_page_after_an_offline_merge(pf, tmp_path, capsys
     assert "review page:" in capsys.readouterr().out
     page = (out / "index.html").read_text(encoding="utf-8")
     assert "1 report, 1 frames" in page and "CMW" in page
+
+
+def test_ticks_never_repeat_and_cope_with_extreme_ranges(fs):
+    import math
+    assert fs._nice_ticks(1700.0, math.nextafter(1700.0, 2000.0)) == [1700.0, math.nextafter(1700.0, 2000.0)]
+    assert fs._nice_ticks(0, 5e-324) == [0, 5e-324]
+    assert fs._nice_ticks(float("-inf"), float("inf")) == [float("-inf")]
+    for lo, hi in ((0, 1), (1700, 1800), (-3, 3), (0.001, 0.002)):
+        ticks = fs._nice_ticks(lo, hi)
+        assert ticks == sorted(set(ticks))
+
+
+def test_charts_ignore_numbers_outside_the_schema_range(fs):
+    # A flagged chunk can carry 1e308 (an infinite range) or 2**53 (a
+    # padding that does not change the value); both used to raise.
+    for value in (1e17, 1e308, -1e308, 2.0 ** 53):
+        rows = [row(i, sky_median=value) for i in range(3)]
+        svg = fs.chart_svg(rows, "sky_median", "Sky median", "ADU", 0)
+        assert "<svg" in svg
+    assert fs.column_stats([row(0, sky_median=1e17)], "sky_median") is None
+
+
+def test_write_index_copes_with_a_lone_surrogate(fs, pf, tmp_path):
+    # Stored under an older schema; json.loads and html.escape pass it
+    # through, and strict UTF-8 refused to write the page.
+    doc = merged([row(0, file="bad\udcff.fit")])
+    (tmp_path / f"{RID}.json").write_text(json.dumps(doc), encoding="utf-8", errors="surrogatepass")
+    path = fs.write_index(tmp_path, pf=pf)
+    assert "\\udcff" in path.read_text(encoding="utf-8")
+
+
+def test_one_report_the_renderer_cannot_cope_with_does_not_cost_the_page(fs, pf, monkeypatch):
+    good = merged([row(0)])
+    bad = merged([row(0)], rid="f" * 32)
+    real = fs.report_section
+
+    def report_section(doc, pf_):
+        if doc["report_id"] == bad["report_id"]:
+            raise ValueError("renderer bug <b>")
+        return real(doc, pf_)
+
+    monkeypatch.setattr(fs, "report_section", report_section)
+    page = fs.html_page([good, bad], pf=pf)
+    assert "could not render this report: ValueError: renderer bug &lt;b&gt;" in page
+    assert f'id="r-{RID}"' in page
+
+
+def test_text_mode_shows_terminal_control_characters_as_question_marks(fs, pf):
+    doc = merged([row(0, file="\x1b[2Jframe.fit"), row(1, status="skipped", reason="bad\x07bell")])
+    text = fs.text_summary(doc, pf)
+    assert "\x1b" not in text and "\x07" not in text
+    assert "?[2Jframe.fit" in text and "bad?bell" in text
+    assert "\n" in text
+

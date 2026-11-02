@@ -2098,3 +2098,26 @@ first frame like that always seeded prep); the walk just makes it reachable
 from later frames too. Possible bandaid follow-up: have prep require more
 than an FWHM of its candidate (a plate solve, or a sanity bound on the FWHM
 well below the cutout half-width): filed as bandaid #178.
+
+# The median s/frame covers photometered frames only (2026-11-02)
+
+Issue #25. `RunState.frame_skipped` used to append a skipped frame's
+duration to `frame_times`, so the status line's `median N s/frame` and the
+`median_s` field in the tester report header mixed skips in with
+measurements. Since PR #23's Gaia batch-prep cooldown, a stalled run is one
+71 s prep failure followed by 19 cooldown skips of ~0 s each, and the
+forced-failure run (c) above ended on
+`20/20 uploaded · 0 photometered · 20 skipped · 0 remaining · median 0.0 s/frame`:
+a run that measured nothing read as a fast one. A skip costs a different
+amount than a measurement either way (~0 s in a cooldown, however far
+bandaid got before raising otherwise), so no mix of the two describes
+anything.
+
+`frame_skipped` still takes `seconds` (the caller times every frame, and
+the `on_frame` hook still gets the elapsed time) but no longer records it;
+`median_seconds` is over photometered frames only, and the status line
+shows no median until the first frame is photometered. The report schema
+and worker are unchanged: `median_s` keeps its name, and its meaning
+narrows to photometered frames. Reports from builds before this one are
+therefore not comparable on `median_s` when the run had many skips; on a
+run with few or no skips the two definitions agree closely.

@@ -94,13 +94,28 @@ def test_frame_times_are_optional(state):
     assert "s/frame" not in state.summary()
 
 
-def test_median_seconds_covers_skipped_frames_too(state):
-    # A skipped frame still cost the kernel its time; leaving it out would
-    # flatter the median exactly when frames are failing.
+def test_median_seconds_leaves_skipped_frames_out(state):
+    # This used to count skips, on the theory that leaving them out would
+    # flatter the median when frames fail. The Gaia batch-prep cooldown
+    # turned that around: its skips cost ~0 s each, so a stalled run read
+    # "median 0.0 s/frame", the opposite distortion (issue #25). The median
+    # now describes photometered frames only; the skip count is reported
+    # separately.
     state.frame_ok("a.fit", 3.0)
-    state.frame_skipped("b.fit", "no stars", 5.0)
-    state.frame_ok("c.fit", 7.0)
+    state.frame_skipped("b.fit", "no stars", 0.0)
+    state.frame_skipped("c.fit", "no stars", 0.0)
+    state.frame_ok("d.fit", 7.0)
+    assert state.frame_times == [3.0, 7.0]
     assert state.median_seconds == 5.0
+
+
+def test_a_run_of_only_skips_reports_no_median(state):
+    state.frame_skipped("a.fit", "batch prep failed", 71.0)
+    for name in ("b.fit", "c.fit", "d.fit"):
+        state.frame_skipped(name, "batch prep cooldown", 0.0)
+    assert state.frame_times == []
+    assert state.median_seconds is None
+    assert "s/frame" not in state.summary()
 
 
 def test_median_is_robust_to_a_browser_stall(state):

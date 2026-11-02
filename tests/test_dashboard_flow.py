@@ -160,13 +160,17 @@ def test_every_frame_is_timed_so_the_run_can_report_s_per_frame(tmp_path):
     assert "s/frame" in dash.state.summary()
 
 
-def test_a_skipped_frame_is_timed_too(tmp_path):
+def test_a_skipped_frame_stays_out_of_the_median(tmp_path):
+    # Issue #25: the median s/frame covers photometered frames only, so a
+    # run whose every frame was skipped shows no median at all.
     dash, drop, _, _ = make_dashboard(
         tmp_path, process_frame=lambda path, name: "too few stars"
     )
     send_manifest(drop, [{"name": "a.fit", "size": 4}])
     send_file(drop, "a.fit", b"aaaa")
-    assert len(dash.state.frame_times) == 1
+    assert dash.state.skipped == 1
+    assert dash.state.frame_times == []
+    assert "s/frame" not in dash.state.summary()
 
 
 def test_the_memfs_copy_does_not_survive_the_frame(tmp_path):

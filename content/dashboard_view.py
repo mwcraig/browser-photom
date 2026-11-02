@@ -545,6 +545,7 @@ class DashboardView:
             n_total=state.total,
             n_processed=state.processed,
             n_skipped=state.skipped,
+            # Photometered frames only (issue #25); skips are in n_skipped.
             median_s=state.median_seconds,
         )
 

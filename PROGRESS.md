@@ -1945,7 +1945,54 @@ bumps': one browser-only TG row (frame 004601), fwhm max 2.0e-5 relative
 same two rows above 1 % (TR 012806, TB 041108), and the L4 `egain` header
 differing in the 8th digit on every frame. Zip kept as
 `~/Downloads/ls_psc_subset155-starlists.bandaid-e29ed5c.browser-photom-e8d9cad-dirty.zip`.
-The walk itself was not exercised in either run: the LS Psc set's first
-frame yields an FWHM, so natively the prep frame was frame 1 with nothing
-passed over, and the browser never gives `prepare_batch` more than one
-frame. The build reports schema `0.1.dev73+gaddd8f13e`, unchanged.
+The 155-frame runs do not exercise the walk: the LS Psc set's first frame
+yields an FWHM, so natively the prep frame was frame 1 with nothing passed
+over, and the browser never gives `prepare_batch` more than one frame. The
+build reports schema `0.1.dev73+gaddd8f13e`, unchanged.
+
+## The walk, forced with synthetic frames (2026-11-01, same evening)
+
+Three six-frame folders in `~/Downloads`, each two synthetic frames made
+from the first LS Psc frame's header (so the Seestar50 profile still
+auto-detects; DATE-OBS set to 04:00:01 and 04:00:02 so they sort first)
+followed by copies of the first four real frames; the same native CLI
+invocation as above, then the same Playwright driver against the e29ed5c
+`dist-dash`. Frame `000001` is sky noise only (the real median and MAD, no
+stars) in all three.
+
+`ls_psc_walk6_psferr/`, the intended case: `000002` is the real frame
+blurred with a 14 px Gaussian, stretched 3x and given fresh sky noise;
+`calibration_sequence` fits 36.9 px on it. Natively bandaid logged "no FWHM
+from ...000001.fit (only 0 stars detected (need at least 3)); trying the
+next frame", the same for `000002` ("no usable PSF: fitted FWHM 36.9 px
+exceeds the 25 px cutout half-width"), then "preparing the batch from
+...002201.fit after passing over 2 frame(s)"; 793 photometry targets as in
+the clean run; QA rows `skipped: TooFewStarsError`, `skipped: PSFFitError`,
+then four `ok`, and the four `.star` files are byte-identical to the
+66b4e03 reference. In the browser the two frames are skipped with "batch
+prep failed: cannot measure an FWHM on /tmp/...000001.fit: only 0 stars
+detected (need at least 3)" and "... /tmp/...000002.fit: no usable PSF:
+fitted FWHM 36.9 px exceeds the 25 px cutout half-width", then "Batch prep
+done: 793 photometry stars" and 4 ok in 95 s (70 s of it the CDS hang, IDIA
+answered); the zip's four star lists match native as the 155-frame run does
+(same rows per filter, fwhm to 1e-5). Zip kept as
+`~/Downloads/ls_psc_walk6_psferr-starlists.bandaid-e29ed5c.browser-photom-e8d9cad-dirty.zip`.
+
+`ls_psc_walk6/` and `ls_psc_walk6_psf/` show the gap `docs/dashboard.md`
+describes. Their `000002` frames (blur 20 px, and blur 14 px with a
+different noise draw) fit 8.11 px and 24.75 px respectively, both under the
+25 px ceiling, so prep accepted them as the prep frame after passing over
+`000001`: the contamination flag, evaluated at that FWHM times 1.25, left
+616 and 96 of the 793 photometry targets, and the four real frames then
+measured 94/72/91/90 and 20/19/20/21 stars instead of 113/92/117/113. The
+bad frame itself was skipped per frame a moment later, with
+`WCSScaleError` (twirl solved 5.18 and 7 arcsec/px against 2.38), but prep
+does not plate-solve, so it had no way to reject it. The browser did the
+same on `ls_psc_walk6/` ("Batch prep done: 616 photometry stars", browser
+and native star lists agree). The FWHM such a frame fits is a matter of
+which noise peaks detection finds: the same 14 px blur gave 5.3, 24.8, 34.6
+and 36.9 px across four noise seeds. None of this is new with e29ed5c (a
+first frame like that always seeded prep); the walk just makes it reachable
+from later frames too. Possible bandaid follow-up: have prep require more
+than an FWHM of its candidate (a plate solve, or a sanity bound on the FWHM
+well below the cutout half-width), not filed.

@@ -63,7 +63,7 @@ the cost of copying each image through browser storage once.
 
 `watch_photometry.ipynb` is the drag-and-drop loop above with the simulated
 processing step replaced by the actual
-[bandaid](https://github.com/mwcraig/bandaid) pipeline (pinned to commit `98183ca`,
+[bandaid](https://github.com/mwcraig/bandaid) pipeline (pinned to commit `66b4e03`,
 whose numpy-only Ballet centroider needs no jax): the first uploaded frame
 drives batch prep (source detection, Gaia-DR3-via-VizieR query, contamination
 flagging), then every frame is plate-solved, photometered, written to a
@@ -236,7 +236,7 @@ environment has (anywidget is pinned there for the build).
   round trip in both directions at several sizes, to check whether `CHUNK_BYTES` (in
   `content/photom_dashboard.py`) should move off 1 MiB.
 - `bandaid-src/`, `eloy-src/`, `aavso-starlist-schema-src/` — clones fetched by
-  `pixi run build` (bandaid pinned to commit `98183ca`, the bandaid PR #172 merge;
+  `pixi run build` (bandaid pinned to commit `66b4e03`, the bandaid PR #175 merge;
   eloy pinned to the commit bandaid pins), installed into the kernel via the `pip:`
   section.
 - `content/helper.py` — notebook-side client for the local helper: `list_images()`,

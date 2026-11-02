@@ -1194,8 +1194,11 @@ def make_bandaid_processor(
     tag = provenance_tag() if provenance is None else str(provenance)
     if not callable(results_dir):
         os.makedirs(results_dir, exist_ok=True)
-    # Batch prep is built from the first frame, exactly as the bandaid CLI
-    # does with the first file of a batch.
+    # Batch prep is built from the first dropped frame that `prepare_batch`
+    # accepts. Frames arrive one at a time, so each attempt hands it a
+    # one-frame batch and a `BatchPrepError` leaves `prep` None for the next
+    # frame to retry: the walk bandaid's own CLI does over the whole file
+    # list up front (since e29ed5c, bandaid PR #177), one frame per drop.
     batch = {"prep": None, "n": 0}
 
     def emit_qa(name, qa, schema_version):

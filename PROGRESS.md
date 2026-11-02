@@ -1885,3 +1885,67 @@ kept as `~/Downloads/ls_psc_subset155-starlists.bandaid-66b4e03.browser-photom-5
 browser: the LS Psc set has no washed-out frame, and the tester's
 `Light_CzeV616_10.0s_IRCUT_20261030-215223.fit` was offered but not fetched.
 The build still reports schema `0.1.dev73+gaddd8f13e`, unchanged by the pin.
+
+# bandaid pin moved to e29ed5c (2026-11-01)
+
+e29ed5c is the merge of bandaid PR #177, closing bandaid #176: `prepare_batch`
+takes the batch's frame list (its first parameter is `files`, was
+`first_file`; a single `str`/`Path` is still accepted as a one-frame batch,
+so the positional call in `make_bandaid_processor` is unchanged) and
+prepares the batch from the first frame, in batch order, that yields an
+FWHM. Only `TooFewStarsError` and `PSFFitError` advance the walk; any other
+`FrameError` on the first frame, and every Gaia, instrument-detection and
+observation-time failure, stays fatal. Walked-past candidates get the
+instrument-mixing guard when the instrument was auto-detected, they stay in
+the batch and are skipped per frame with a `skipped:` QA row, `BatchPrep`
+gains `prep_file`, and the `BatchPrepError` names the frame ("cannot measure
+an FWHM on <file>: ..." for a one-frame batch, "tried all N frames; the
+last, <file>, failed with: ..." otherwise). bandaid logs one WARNING per
+passed-over frame and one line naming the prep frame. Nothing else changed
+between 66b4e03 and e29ed5c: `pyproject.toml`, `photometry.py`, `writers.py`
+and the QA columns have no diff; eloy stays a056c91, twirl 0.5.2.
+
+In the browser the frames arrive one at a time, so `make_bandaid_processor`
+still hands `prepare_batch` a single path and does the walk itself by
+leaving prep unset after a `BatchPrepError` so the next dropped frame
+retries, as it has since the dashboard was written. What this pin changes
+for the dashboard is the skip text: "batch prep failed: cannot measure an
+FWHM on /tmp/<name>: ..." now names the frame (the MEMFS copy
+`ChunkAssembler` assembled, under `/tmp`). That text reaches the tester
+reports as the frame's `reason`, where the name is already in the row.
+Edits in this repo are the pin and its comment in `pixi.toml`, README (two
+mentions), `docs/dashboard.md` (pin history paragraph) and the batch-prep
+comment in `make_bandaid_processor`. `pixi run test` 530 passed, `pixi run
+test-js` 97 passed.
+
+Native CLI at e29ed5c (eloy env, `BANDAID_BALLET_BACKEND=numpy`, bandaid
+from `bandaid-src/src` on PYTHONPATH with an import-path assert, the same
+`{"observer": "WCR", "site_elev": 300.0}` metadata, Gaia from astroquery's
+cache): the new "preparing the batch from <first frame>" INFO line, no
+warnings, 155/155 ok in 65.7 s, kept as
+`~/Downloads/ls_psc_reference_star_e29ed5c/`. It is byte-identical to
+`ls_psc_reference_star_66b4e03/` (and so to 98183ca): `diff -rq` is silent
+over all 155 `.star` files and `qa_manifest.csv`, and the comparison script
+finds 46,216 matched rows with no field differing.
+
+Browser run, `pixi run build-dash` with BROWSER_PHOTOM_FEEDBACK_URL unset
+(consent box present, unchecked, disabled; build_info bandaid e29ed5c,
+browser-photom e8d9cad-dirty), Playwright 1.64.1 driving the installed
+Chrome headful with the drive_98183ca.mjs driver unchanged, the 155-frame
+LS Psc subset, observer WCR, elevation 300.0: 155 ok, 0 skipped, median
+0.8 s/frame, 210 s from drop to done (66b4e03: 210 s), no page errors. CDS
+hung again: the CDS POST went out at 12.9 s and the IDIA POST at 82.9 s,
+the 70 s cap, and IDIA answered; no GAVO request. With the build stamps
+stripped from the file names the zip is byte-identical to the 66b4e03
+browser zip (0 differing files over 155, 477,050 lines each). Against
+native 66b4e03 (and so native e29ed5c) the picture is exactly the last two
+bumps': one browser-only TG row (frame 004601), fwhm max 2.0e-5 relative
+(frame 012806), |dx|, |dy| <= 6.4e-5 px (bandaid #155 float32), ra/dec to
+1.4e-14, tot_count max 8.8e-3 (TB 035213), count_err max 1.8e-2 with the
+same two rows above 1 % (TR 012806, TB 041108), and the L4 `egain` header
+differing in the 8th digit on every frame. Zip kept as
+`~/Downloads/ls_psc_subset155-starlists.bandaid-e29ed5c.browser-photom-e8d9cad-dirty.zip`.
+The walk itself was not exercised in either run: the LS Psc set's first
+frame yields an FWHM, so natively the prep frame was frame 1 with nothing
+passed over, and the browser never gives `prepare_batch` more than one
+frame. The build reports schema `0.1.dev73+gaddd8f13e`, unchanged.

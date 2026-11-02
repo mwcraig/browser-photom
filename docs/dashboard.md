@@ -154,7 +154,7 @@ comparison was rerun at 98183ca (2026-10-30, numbers in PROGRESS): native
 and `egain`, plus a few hundred rows gained just above `min_snr`, and browser
 and native agree at 98183ca as they did at 0378410 (count_err now has two
 rows above 1 % instead of one).
-The pin is now 66b4e03 (2026-11-01, bandaid PR #175, closing bandaid #174).
+The pin then moved to 66b4e03 (2026-11-01, bandaid PR #175, closing bandaid #174).
 `calibration_sequence` raises `PSFFitError`, a new `FrameError`, when the
 fitted FWHM exceeds `fwhm_cutout_half` (25 px on the Seestar50 profile). A
 frame with no real star image, from dawn, clouds or an obstruction, could fit
@@ -173,7 +173,27 @@ fit between 8 and 25 px (10,419 measured frames, maximum 7.2 px, then the
 five failures at 85 px and above), so #20 is addressed for every case seen,
 not closed by construction. Frames that fit a sane FWHM are untouched, so photometry is unchanged: native 66b4e03
 is byte-identical to native 98183ca on the 155 LS Psc frames, and the
-browser agrees with native as at 98183ca (numbers in PROGRESS). The 0378410
+browser agrees with native as at 98183ca (numbers in PROGRESS).
+The pin is now e29ed5c (2026-11-01, bandaid PR #177, closing bandaid #176).
+`prepare_batch` takes the batch's frame list (the parameter is `files`, was
+`first_file`; a single path is still a one-frame batch, so the positional
+call in `make_bandaid_processor` is unchanged) and prepares the batch from
+the first frame, in batch order, that yields an FWHM, passing over frames
+that raise `TooFewStarsError` or `PSFFitError`; any other error on the
+first frame, and every Gaia, instrument and observation-time failure, is
+still fatal to prep. Passed-over frames stay in the batch and are skipped
+per frame, `BatchPrep` gains `prep_file`, and the `BatchPrepError` names
+the frame ("cannot measure an FWHM on <file>: ..."), so the dashboard's
+"batch prep failed" reason now carries the file name, as its MEMFS path
+`/tmp/<name>`, the copy `ChunkAssembler` assembled. In the browser the
+frames arrive one at a time, so `make_bandaid_processor` still hands
+`prepare_batch` a single path and does the walk itself by leaving prep
+unset for the next frame, as it has since the dashboard was written; the
+bandaid CLI now behaves the same way over a folder, which is what bandaid
+#176 asked for. `photometry.py` and `writers.py` have no diff, so
+photometry is unchanged; native e29ed5c is byte-identical to native
+66b4e03 and 98183ca on the 155 LS Psc frames, and the browser agrees with
+native as before (numbers in PROGRESS). The 0378410
 rerun found that a fresh kernel build picks up twirl 0.6.0, which fails every
 plate solve on wasm32, so environment.yml now pins twirl 0.5.2. The larger
 browser-versus-native position difference,

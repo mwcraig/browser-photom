@@ -13,29 +13,36 @@ version = "0.1.0"
 fetch-astrowidgets = "(test -d astrowidgets-src || git clone https://github.com/astropy/astrowidgets astrowidgets-src) && git -C astrowidgets-src pull --ff-only"
 # Full clone (not shallow) so hatch-vcs sees tags. Pinned (detached HEAD) to the
 # bandaid commit the dashboard was validated against, so a redeploy cannot
-# silently pick up whatever bandaid main is at build time. 66b4e03 is the
-# merge of bandaid PR #175 (closes bandaid #174): `calibration_sequence`
-# raises `PSFFitError`, a new `FrameError`, when the fitted FWHM exceeds
-# `fwhm_cutout_half` (25 px for the Seestar50 profile). Before this a frame
-# with no real star image (dawn, clouds, an obstruction) could fit an 85 px
-# FWHM from a near-flat stacked cutout, and since apertures and annuli are
-# sized in FWHM every star then got a ~1400 px annulus mask: 7 GB and the
-# OOM killer natively, and the per-frame MemoryError rows in the tester
-# reports (browser-photom #20) in the wasm kernel. Such a frame is now
-# skipped (`skipped: PSFFitError`), and on the first frame of a batch it is
-# a `BatchPrepError` ("cannot measure an FWHM: ...") like TooFewStarsError,
-# which `make_bandaid_processor` already catches and retries next frame. The
-# previous pin, 98183ca, brought the Gaia DR3 query's fallbacks (VizieR CDS,
-# IDIA, CfA, then GAVO TAP; PRs #170, #171, #172) and the per-channel
-# Seestar50 egain (PR #173). The API the dashboard uses is
-# unchanged since d6ba44a (PR #159): `process_frame(file, prep, *,
-# user_specific_metadata, label, fail_fast)` returns a `FrameResult`
-# (outcome, per-filter tables, error, QA record) and `qa_record_skipped`
-# rebuilds the record when the writer raises; `make_bandaid_processor` is
-# written against those, not `process_one_image`. Move the pin deliberately,
-# together with the call in `make_bandaid_processor` (the one place this
-# repo calls bandaid; the watch notebook goes through it too).
-fetch-bandaid = "(test -d bandaid-src || git clone https://github.com/mwcraig/bandaid bandaid-src) && git -C bandaid-src fetch && git -C bandaid-src checkout 66b4e03"
+# silently pick up whatever bandaid main is at build time. e29ed5c is the
+# merge of bandaid PR #177 (closes bandaid #176): `prepare_batch` takes the
+# batch's frame list (its first parameter is `files`, was `first_file`; a
+# single path is still accepted as a one-frame batch, so the positional call
+# in `make_bandaid_processor` is unchanged) and prepares the batch from the
+# first frame, in batch order, that yields an FWHM, passing over frames that
+# raise `TooFewStarsError` or `PSFFitError`; any other error on the first
+# frame, and every Gaia, instrument and obs-time failure, stays fatal.
+# `BatchPrep` gains `prep_file`, and the `BatchPrepError` names the frame
+# ("cannot measure an FWHM on <file>: ..."). In the browser frames arrive one
+# at a time, so `make_bandaid_processor` hands `prepare_batch` one path per
+# attempt and does the walk itself by retrying prep on the next dropped
+# frame; this pin changes the skip text the dashboard shows and nothing it
+# computes (`photometry.py` and `writers.py` have no diff). The previous
+# pin, 66b4e03 (PR #175, closes #174), added `PSFFitError`, raised when the
+# fitted FWHM exceeds `fwhm_cutout_half` (25 px on the Seestar50 profile):
+# a frame with no real star image could fit an 85 px FWHM and, with
+# apertures sized in FWHM, a ~1400 px annulus mask per star, the per-frame
+# MemoryError rows in the tester reports (browser-photom #20). 98183ca
+# brought the Gaia DR3 query's fallbacks (VizieR CDS, IDIA, CfA, then GAVO
+# TAP; PRs #170, #171, #172) and the per-channel Seestar50 egain (PR #173).
+# The per-frame API the dashboard uses is unchanged since d6ba44a (PR
+# #159): `process_frame(file, prep, *, user_specific_metadata, label,
+# fail_fast)` returns a `FrameResult` (outcome, per-filter tables, error,
+# QA record) and `qa_record_skipped` rebuilds the record when the writer
+# raises; `make_bandaid_processor` is written against those, not
+# `process_one_image`. Move the pin deliberately, together with the call in
+# `make_bandaid_processor` (the one place this repo calls bandaid; the watch
+# notebook goes through it too).
+fetch-bandaid = "(test -d bandaid-src || git clone https://github.com/mwcraig/bandaid bandaid-src) && git -C bandaid-src fetch && git -C bandaid-src checkout e29ed5c"
 # Pinned to the commit bandaid's pyproject pins (detached HEAD)
 fetch-eloy = "(test -d eloy-src || git clone https://github.com/mwcraig/eloy eloy-src) && git -C eloy-src fetch && git -C eloy-src checkout a056c91a945772e0520a89695f8fcd16fda36870"
 fetch-starlist-schema = "(test -d aavso-starlist-schema-src || git clone https://github.com/mwcraig/aavso-starlist-schema aavso-starlist-schema-src) && git -C aavso-starlist-schema-src pull --ff-only"

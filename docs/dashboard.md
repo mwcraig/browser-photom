@@ -138,7 +138,7 @@ are again unchanged. The 155-frame LS Psc comparison was rerun at 0378410
 (2026-10-27, PROGRESS has the numbers): browser and native CLI agree as well
 as at b7fb737 (fwhm max 2e-5 relative, one row of 46k unmatched at the SNR
 edge, tot_count tail under 1 %); no comparison was run at 1775df7.
-The pin is now 98183ca (2026-10-30, bandaid PRs #171, #173 and #172). The
+The pin then moved to 98183ca (2026-10-30, bandaid PRs #171, #173 and #172). The
 VizieR order is CDS, IDIA, CfA (CfA last because it flaps), and when every
 VizieR server fails the GAVO Heidelberg TAP service (`dc.g-vo.org`,
 `gaia.dr3lite`) is the last resort, so `GaiaQueryError` names four servers.
@@ -153,7 +153,27 @@ comparison was rerun at 98183ca (2026-10-30, numbers in PROGRESS): native
 98183ca differs from native 0378410 only in TG, TB and L4 `count_err`, `snr`
 and `egain`, plus a few hundred rows gained just above `min_snr`, and browser
 and native agree at 98183ca as they did at 0378410 (count_err now has two
-rows above 1 % instead of one). The 0378410
+rows above 1 % instead of one).
+The pin is now 66b4e03 (2026-11-01, bandaid PR #175, closing bandaid #174).
+`calibration_sequence` raises `PSFFitError`, a new `FrameError`, when the
+fitted FWHM exceeds `fwhm_cutout_half` (25 px on the Seestar50 profile). A
+frame with no real star image, from dawn, clouds or an obstruction, could fit
+an FWHM of 85 px or more from its near-flat stacked cutout, and because
+apertures and annuli are sized in FWHM every star then got an annulus mask
+about 1,400 px square. In the browser that is the per-frame `MemoryError`
+(a 14 MiB float64 array of exactly that shape) seen on the last, dawn
+frames of several tester runs (issue #20); natively it reached 7 GB and the
+OOM killer. Such a frame is now `skipped: PSFFitError`; on the first frame
+of a batch it is a `BatchPrepError` that `make_bandaid_processor` already
+catches and retries on the next frame, as for too few stars. The ceiling is
+the cutout half-width, not a tunable, so a frame that fits an FWHM of 15 to
+25 px would still pass and still size its annulus masks to 240 to 400 px per
+star, more than the wasm heap can hold on a rich field; no tester frame has
+fit between 8 and 25 px (10,419 measured frames, maximum 7.2 px, then the
+five failures at 85 px and above), so #20 is addressed for every case seen,
+not closed by construction. Frames that fit a sane FWHM are untouched, so photometry is unchanged: native 66b4e03
+is byte-identical to native 98183ca on the 155 LS Psc frames, and the
+browser agrees with native as at 98183ca (numbers in PROGRESS). The 0378410
 rerun found that a fresh kernel build picks up twirl 0.6.0, which fails every
 plate solve on wasm32, so environment.yml now pins twirl 0.5.2. The larger
 browser-versus-native position difference,

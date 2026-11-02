@@ -1814,3 +1814,74 @@ down from 1414 characters of JSON stack at 0378410. `feedback_report._reason`
 redacts the URL and cuts at 300 characters, which now ends cleanly at
 "Failed to load " instead of a broken `[ur`. Captures are in the session
 scratchpad (browser_98183ca, gaia98_a, gaia98_b); none are committed.
+
+# bandaid pin moved to 66b4e03 (2026-11-01)
+
+66b4e03 is the merge of bandaid PR #175, closing bandaid #174, filed
+2026-10-31 by a tester whose native watcher was killed by the Linux OOM
+killer. A Seestar frame partly occluded by a house fit an FWHM of 85.8 px
+from the 50x50 stacked cutout (the near-flat stack leaves the Gaussian
+width unconstrained, up to the fit's bound of about 118 px). Apertures and
+annuli are sized in FWHM, so with the default `radii=(1,)`, `gap=4`,
+`annulus_width=3` every star got an annulus of radius 687 px and photutils
+built a 1374 px square float64 mask per star: 14 MB times 223 stars, 7.3 GB
+resident. The fix: `calibration_sequence` raises `PSFFitError`, a new
+`FrameError` exported from `bandaid`, when the fitted FWHM exceeds
+`fwhm_cutout_half` (25 px for the Seestar50 profile); the frame is
+`skipped: PSFFitError`, and on the first frame of a batch `prepare_batch`
+wraps it in a `BatchPrepError` ("cannot measure an FWHM: ...") as it does
+`TooFewStarsError`, which `make_bandaid_processor` catches and retries on
+the next frame. Nothing else changed between 98183ca and 66b4e03:
+`pyproject.toml`, `writers.py` and the QA columns have no diff, so
+`process_frame`, `BatchPrep`, `FrameResult`, `qa_record_skipped` and the
+report schema are untouched; eloy stays a056c91, twirl 0.5.2. `pixi run
+test` 530 passed (518 plus the 12 uncommitted summary-viewer tests), `pixi
+run test-js` 97 passed.
+
+This is the browser side of issue #20. The per-frame `MemoryError` rows in
+the tester reports are that same mask: "Unable to allocate 14.2 MiB for an
+array with shape (1366, 1365)" is a mask for an FWHM of 85 px (16 times the
+FWHM on a side), and the five reported shapes (742, 1366, 1387, 1421, 1441)
+correspond to FWHMs of 46 to 90 px, the same range as the native report.
+All five landed on the last frames of dawn runs, where the brightening sky
+leaves no real star image, which is the occluded-frame case by another
+route. The wasm heap simply refused the allocation where native Python kept
+going. The "catalog-star pairwise matrix" reading in #20 was wrong, and so
+were both heap hypotheses; per-frame time was flat because nothing
+accumulated. What the pin does not do: the ceiling is the cutout half-width,
+not a tunable, so a frame fitting 15 to 25 px would still pass and still
+want 240 to 400 px masks per star, which a rich field would not fit in the
+wasm heap. Across the 10,419 tester frames with a measured FWHM the maximum
+is 7.2 px and none lies between 8 and 25 px, so the pin covers every case
+seen; #20 stays open for that gap unless Matt decides otherwise.
+
+Native CLI at 66b4e03 (eloy env, `BANDAID_BALLET_BACKEND=numpy`, bandaid
+from a git worktree on PYTHONPATH with an import-path assert, the same
+`{"observer": "WCR", "site_elev": 300.0}` metadata): 155/155 ok in 71.5 s,
+no warnings or skips, kept as `~/Downloads/ls_psc_reference_star_66b4e03/`.
+It is byte-identical to `ls_psc_reference_star_98183ca/`: `diff -rq` is
+silent over all 155 `.star` files and `qa_manifest.csv`, and the comparison
+script finds 46,216 matched rows with no field differing. Note the `.star`
+files record neither the bandaid commit nor a timestamp, only the schema
+string, so two pins that agree are indistinguishable from the files alone.
+
+Browser run, `pixi run build-dash` with BROWSER_PHOTOM_FEEDBACK_URL unset
+(consent box present, unchecked, disabled), Playwright 1.64.1 driving the
+installed Chrome headful with the drive_98183ca.mjs driver unchanged, the
+155-frame LS Psc subset, observer WCR, elevation 300.0: 155 ok, 0 skipped,
+median 0.8 s/frame, 210 s from drop to done (98183ca: 210.2 s), no page
+errors. CDS hung again: the CDS POST went out at 14.3 s and the IDIA POST
+at 84.3 s, the 70 s cap, and IDIA answered. With the build stamps stripped
+from the file names the zip is byte-identical to the 98183ca browser zip
+(0 differing lines over 310 files; TG has 13,210 rows in both). Against
+native 98183ca (and so native 66b4e03) the picture is exactly the last
+bump's: one browser-only TG row (frame 004601, tot_count about 1,700, at
+the SNR edge), fwhm max 2.0e-5 relative (frame 012806), |dx|, |dy| <=
+6.4e-5 px (bandaid #155 float32), tot_count max 8.8e-3, count_err max
+1.8e-2 with the same two rows above 1 % (TR 012806, TB 041108), and the L4
+`egain` header differing in the 8th digit on every frame as before. Zip
+kept as `~/Downloads/ls_psc_subset155-starlists.bandaid-66b4e03.browser-photom-537daab-dirty.zip`
+(built before the commit, hence -dirty). No PSFFitError was exercised in the
+browser: the LS Psc set has no washed-out frame, and the tester's
+`Light_CzeV616_10.0s_IRCUT_20261030-215223.fit` was offered but not fetched.
+The build still reports schema `0.1.dev73+gaddd8f13e`, unchanged by the pin.

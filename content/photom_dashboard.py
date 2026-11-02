@@ -265,18 +265,26 @@ class RunState:
             self.frame_times.append(float(seconds))
 
     def frame_skipped(self, name, reason, seconds=None):
+        # `seconds` is accepted and deliberately not recorded: see
+        # `median_seconds` for why a skip stays out of the median.
         self.skipped += 1
         self.skips.append((os.path.basename(str(name)), reason))
-        if seconds is not None:
-            self.frame_times.append(float(seconds))
 
     @property
     def median_seconds(self):
-        """Median s/frame so far, or None before the first frame lands.
+        """Median s/frame over photometered frames, or None before the first.
 
         Median rather than mean: browser stalls produce occasional multi-second
         outliers (one 9.1 s frame in the 67-frame profile) that would drag a
         mean away from the number that actually characterises a run.
+
+        Skipped frames are left out (issue #25). A skip costs a different
+        amount than a measurement: a skip during the Gaia batch-prep cooldown
+        takes ~0 s, and a skip that bandaid raises partway through a frame
+        takes however long it got. Mixing them in made the label lie: a stalled run
+        of one 71 s prep failure and 19 cooldown skips read "median 0.0
+        s/frame", as if it were fast. The skip count is already on the status
+        line; this number answers only how long a measurement takes.
         """
         if not self.frame_times:
             return None

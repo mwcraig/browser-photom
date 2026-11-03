@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/mwcraig/browser-photom/feedback/report.schema.json",
   "title": "browser-photom tester report chunk",
-  "description": "One POST from the dashboard's opt-in tester reporting. A run sends several chunks sharing report_id, numbered by seq; the last carries final=true. Strict on purpose: there are no binary or blob fields, every string is bounded and printable (no C0 or C1 control characters, no zero-width, bidi, soft-hyphen or tag format characters, no noncharacters or unpaired surrogates), and the two free-text fields (comment, reason) also refuse the plainest link markers (\"://\", \"www.\"). Within those bounds they are untrusted text -- base64 or markup fits the pattern -- that is only ever read as data, never rendered. The worker rejects anything that does not validate; the dashboard builds its chunks against this same file in its tests.",
+  "description": "One POST from the dashboard's opt-in tester reporting. A run sends several chunks sharing report_id, numbered by seq; the last carries final=true. Strict on purpose: there are no binary or blob fields, every string is bounded and printable (no C0 or C1 control characters, no zero-width, bidi, soft-hyphen or tag format characters, no noncharacters or unpaired surrogates), and the free-text fields (comment, a row's reason, run.failure.message) also refuse the plainest link markers (\"://\", \"www.\"). Within those bounds they are untrusted text -- base64 or markup fits the pattern -- that is only ever read as data, never rendered. The worker rejects anything that does not validate; the dashboard builds its chunks against this same file in its tests.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -55,6 +55,19 @@
         "outcome": {
           "description": "running until the final chunk; then done, cancelled (the Stop button), failed (the run died: an error reply, a file that would not read, an upload timeout), page_closed (the tab closed mid-run) or report_error (the dashboard's own reporting failed mid-run; the run itself went on).",
           "enum": ["running", "done", "cancelled", "failed", "page_closed", "report_error", null]
+        },
+        "failure": {
+          "description": "Why the run died: present only on a final chunk whose outcome is failed, absent otherwise (older dashboards never send it). reason is the front end's cancel reason: timeout (an ack/file_done wait ran out), error (a kernel error reply) or upload (the upload loop died: a file that would not read, a dead comm). message is the text the dashboard showed after \"Error: \" in its status line (for error, the kernel's own exception text), one line with URLs replaced by [url], possibly empty; same character rules as comment.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reason", "message"],
+          "properties": {
+            "reason": { "enum": ["timeout", "error", "upload"] },
+            "message": {
+              "type": "string", "maxLength": 300,
+              "pattern": "^(?![\\s\\S]*(://|[wW]{3}\\.))[^\\x00-\\x09\\x0b-\\x1f\\x7f\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u2069\\ufeff\\ud800-\\udfff\\x80-\\x9f\\u00ad\\u061c\\u180e\\ufff9-\\ufffb\\ufffe\\uffff󠀀-󠁿]*$"
+            }
+          }
         }
       }
     },

@@ -890,3 +890,55 @@ def test_a_whole_runs_chunks_merge_with_no_inconsistencies(view):
     assert merged["n_rows"] == len(names)
     assert merged["run"]["n_processed"] + merged["run"]["n_skipped"] == len(names)
     assert "[" not in pf.summary_line(merged)
+
+
+# -- issue #19: why a failed run died ------------------------------------------
+
+
+def test_a_failed_runs_report_end_carries_the_cleaned_failure(view):
+    fill(view)
+    view.report_opt_in.value = True
+    manifest(view, "a.fit", "b.fit")
+    upload(view, "a.fit")
+    rows_before = [m for m in reports(view) if m["type"] == "report_row"]
+    assert all("failure" not in m["header"]["run"] for m in rows_before)
+    receive(view, {"type": "cancel", "reason": "error",
+                   "message": "HTTPError: 503 for https://gea.esac.esa.int/x\nTraceback ..."})
+    end = reports(view)[-1]
+    assert end["type"] == "report_end" and end["outcome"] == "failed"
+    failure = end["header"]["run"]["failure"]
+    assert failure == {"reason": "error", "message": "HTTPError: 503 for [url] Traceback ..."}
+    # The page's final chunk: the header it was sent, outcome "failed".
+    chunk = assert_valid(build_chunk(end["header"], [], seq=1, final=True, outcome="failed"))
+    assert chunk["run"]["failure"] == failure
+    # The preview of the finished run shows it too.
+    preview = assert_valid(view.preview_chunk())
+    assert preview["final"] is True and preview["run"]["failure"] == failure
+    # The next run starts without it.
+    manifest(view, "c.fit", folder="night2")
+    assert "failure" not in reports(view)[-1]["header"]["run"]
+    assert "failure" not in view.preview_chunk()["run"]
+
+
+def test_a_cancel_reason_the_schema_does_not_know_fails_without_a_failure(view):
+    fill(view)
+    view.report_opt_in.value = True
+    manifest(view, "a.fit", "b.fit")
+    upload(view, "a.fit")
+    receive(view, {"type": "cancel", "reason": "gremlins", "message": "x"})
+    end = reports(view)[-1]
+    assert end["outcome"] == "failed" and "failure" not in end["header"]["run"]
+
+
+def test_a_finished_run_has_no_failure(view):
+    fill(view)
+    view.report_opt_in.value = True
+    manifest(view, "a.fit")
+    upload(view, "a.fit")
+    end = reports(view)[-1]
+    assert end["outcome"] == "done" and "failure" not in end["header"]["run"]
+
+
+def test_the_consent_says_a_failed_run_sends_its_error_message(view):
+    text = " ".join(view.report_opt_in.consent_html.split())
+    assert "error message" in text and "status line" in text

@@ -396,7 +396,29 @@ def test_a_report_whose_merge_raises_is_reported_and_the_rest_go_through(pf, tmp
     by_id = {m["report_id"]: m for m in merged}
     assert by_id[first]["merge_error"].startswith("KeyError")
     assert "MERGE-ERROR KeyError" in pf.summary_line(by_id[first])
-    assert (tmp_path / f"{second}.json").exists() and not (tmp_path / f"{first}.json").exists()
+    # Both are on disk: the stand-in too, so the review page (built from
+    # <out>/*.json) shows the MERGE-ERROR instead of an older good merge.
+    assert (tmp_path / f"{second}.json").exists()
+    stub = json.loads((tmp_path / f"{first}.json").read_text())
+    assert stub["merge_error"].startswith("KeyError") and stub["rows"] == []
+    assert not (tmp_path / f"{first}.csv").exists()
+
+
+def test_a_review_page_failure_does_not_fail_the_pull(pf, tmp_path, monkeypatch, capsys):
+    raw = tmp_path / "raw"
+    (raw / key(0)).parent.mkdir(parents=True)
+    (raw / key(0)).write_text(json.dumps(stored(chunk(0, [ROW_OK], final=True))))
+
+    class Broken:
+        @staticmethod
+        def write_index(out, pf=None):
+            raise RuntimeError("renderer bug")
+
+    monkeypatch.setattr(pf, "_feedback_summary", lambda: Broken())
+    assert pf.main(["bucket", "--offline", "--out", str(tmp_path)]) == 0
+    captured = capsys.readouterr()
+    assert "review page not written: RuntimeError: renderer bug" in captured.err
+    assert (tmp_path / f"{RID}.json").exists()
 
 
 def test_a_truncated_mirror_copy_never_wins_over_a_readable_duplicate(pf, validator):
@@ -783,3 +805,52 @@ def test_malformed_run_headers_are_flagged_or_skipped_never_raised(pf, validator
     assert merged["inconsistencies"] == flags
     assert [c["seq"] for c in merged["invalid_chunks"]] == [1]
     assert isinstance(pf.summary_line(merged), str)
+
+
+# --- run.failure (issue #19) ----------------------------------------------
+
+
+def _failed(pf, validator, failure, outcome="failed"):
+    run = {"n_total": 3, "n_processed": 1, "n_skipped": 0, "outcome": outcome}
+    if failure is not ...:
+        run["failure"] = failure
+    return pf.merge_report(RID, [(key(0), stored(chunk(0, [ROW_OK], final=True, run=run)))],
+                           validator)
+
+
+def test_a_failed_report_shows_why_it_failed(pf, validator):
+    message = "ack: kernel not responding — reload the page to recover " + "x" * 100
+    merged = _failed(pf, validator, {"reason": "timeout", "message": message})
+    assert merged["invalid_chunks"] == []
+    line = pf.summary_line(merged)
+    assert "outcome=failed" in line
+    shown = line.split("failure=", 1)[1].split(" | ", 1)[0]
+    assert shown == "timeout: " + message[:80]
+    assert "\n" not in line
+
+
+def test_a_failed_report_with_an_empty_message_shows_the_reason(pf, validator):
+    line = pf.summary_line(_failed(pf, validator, {"reason": "upload", "message": ""}))
+    assert "failure=upload |" in line
+
+
+def test_reports_without_a_failure_show_none(pf, validator):
+    # An older build's failed run, and a failure on another outcome (never
+    # built by the dashboard; the schema does not forbid it).
+    assert "failure=" not in pf.summary_line(_failed(pf, validator, ...))
+    done = _failed(pf, validator, {"reason": "error", "message": "x"}, outcome="done")
+    assert "failure=" not in pf.summary_line(done)
+
+
+@pytest.mark.parametrize("failure", [
+    None, "error: boom", ["error"], {}, {"reason": 7, "message": {"a": 1}},
+    {"message": "only a message"}, {"reason": "error\x1b[2J", "message": "a\nb\x9bc\x07"},
+])
+def test_a_malformed_failure_does_not_break_the_summary(pf, validator, failure):
+    merged = _failed(pf, validator, failure)
+    assert merged["invalid_chunks"]          # the schema refuses every one of these
+    line = pf.summary_line(merged)
+    assert "outcome=failed" in line and "\n" not in line
+    assert "\x1b" not in line and "\x9b" not in line and "\x07" not in line
+    assert pf.failure_text({"failure": failure}) is None or isinstance(
+        pf.failure_text({"failure": failure}), str)

@@ -650,6 +650,7 @@ class PhotometryDashboard:
         JS  -> kernel  {type:"zip_request", run?}   <- omitted run = most recent
         kernel -> JS   {type:"zip", filename} + 1 buffer  <- <run>-starlists.<tag>.zip
         kernel -> JS   {type:"error", reason}
+        JS  -> kernel  {type:"cancel", reason?, message?}
         JS  -> kernel  {type:"hidden_episode", hidden_ms, frames}
         kernel -> JS   {type:"hidden_episode_error", reason}  <- never `error`
 
@@ -725,9 +726,14 @@ class PhotometryDashboard:
         # end sent with a reason (its upload loop died: an `error` reply, a
         # read error, a timeout), "cancelled" on a bare cancel (nothing in
         # the front end sends one today -- there is no Stop button -- so it
-        # is the fallback for a cancel without a reason). Both are called
-        # through `_call_hook`, so a hook that raises cannot touch the run:
-        # reporting must never cost a frame.
+        # is the fallback for a cancel without a reason). For "failed" only,
+        # a third argument carries the cancel's own words,
+        # `{"reason": ..., "message": ...}` exactly as the front end sent
+        # them (unvalidated; the view cleans them into the report's
+        # `run.failure`), so an `on_end` hook must accept an optional third
+        # parameter; "done" and "cancelled" still call it with two. Both
+        # hooks are called through `_call_hook`, so a hook that raises
+        # cannot touch the run: reporting must never cost a frame.
         self.on_frame = on_frame
         self.on_end = on_end
 
@@ -1028,9 +1034,17 @@ class PhotometryDashboard:
         # cancel -- none is sent now; there is no Stop button -- would be
         # the tester's own doing and reads as "cancelled". The run panel
         # shows "Stopped" either way. The hook goes before _push_runs for
-        # the reason given in _finish_if_done.
+        # the reason given in _finish_if_done. A failed run's hook also gets
+        # the cancel's `reason` and `message` (the status-line text the
+        # front end showed), passed on as sent; the first cancel of a run
+        # is the one that counts, since the phase check above drops the
+        # rest (the error path's own `upload` cancel trails the `error` one).
         reason = content.get("reason") if isinstance(content, dict) else None
-        self._call_hook(self.on_end, "failed" if reason else "cancelled")
+        if reason:
+            failure = {"reason": reason, "message": content.get("message")}
+            self._call_hook(self.on_end, "failed", failure)
+        else:
+            self._call_hook(self.on_end, "cancelled")
         self._push_runs()
         self._changed()
 

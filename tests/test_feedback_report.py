@@ -23,6 +23,7 @@ import pytest
 
 from feedback_report import (
     COMMENT_MAX_CHARS,
+    FAILURE_REASONS,
     NO_QA_STATUS,
     QA_COLUMNS,
     ROWS_PER_CHUNK,
@@ -30,6 +31,7 @@ from feedback_report import (
     build_header,
     chunk_json,
     clean_comment,
+    clean_failure,
     clean_row,
     endpoint_url,
     new_report_id,
@@ -509,3 +511,80 @@ def test_c1_controls_and_the_remaining_invisible_characters_are_dropped(validato
     assert row["file"] == "31mevil.fit" and row["reason"] == "xy z"
     assert clean_comment("fine ️❤ emoji") == ("fine ️❤ emoji", None)   # VS stays
     valid(validator, build_chunk(header(comment="a\x9bb"), [row]))
+
+
+# --------------------------------------------------------------------------
+# run.failure (issue #19)
+# --------------------------------------------------------------------------
+
+KERNEL_ERROR = {"reason": "error", "message": "manifest refused: duplicate stem 'a'"}
+
+
+@pytest.mark.parametrize("reason", FAILURE_REASONS)
+def test_a_failed_final_chunk_carries_the_failure(validator, reason):
+    h = header(failure={"reason": reason, "message": "ack: kernel not responding"})
+    chunk = valid(validator, build_chunk(h, [], seq=3, final=True, outcome="failed"))
+    assert chunk["run"]["failure"] == {"reason": reason, "message": "ack: kernel not responding"}
+
+
+def test_failure_rides_only_on_the_final_failed_chunk(validator):
+    h = header(failure=KERNEL_ERROR)
+    assert h["run"]["failure"] == KERNEL_ERROR      # the header keeps it ...
+    # ... but no chunk other than the final "failed" one does.
+    for kw in (dict(final=False), dict(final=False, outcome="failed"),
+               dict(final=True, outcome="done"), dict(final=True, outcome="cancelled"),
+               dict(final=True, outcome="page_closed"),
+               dict(final=True, outcome="report_error"), dict(final=True)):
+        chunk = valid(validator, build_chunk(h, [], **kw))
+        assert "failure" not in chunk["run"], kw
+    assert h["run"]["failure"] == KERNEL_ERROR      # build_chunk did not touch it
+
+
+def test_no_failure_means_no_key_not_null(validator):
+    for failure in (None, {}, "error", {"reason": "nope", "message": "x"},
+                    {"reason": None}, {"reason": ["error"]}, {"message": "x"}):
+        h = header(failure=failure)
+        assert "failure" not in h["run"], failure
+        valid(validator, build_chunk(h, [], final=True, outcome="failed"))
+
+
+def test_the_failure_message_is_cleaned_like_a_skip_reason(validator):
+    text = ("HTTPError: 503 for https://gea.esac.esa.int/tap\nTraceback (most\trecent)"
+            "\x9b\u200b\ud800 " + "x" * 400)
+    cleaned = clean_failure({"reason": "error", "message": text})
+    assert cleaned["reason"] == "error"
+    assert cleaned["message"].startswith("HTTPError: 503 for [url] Traceback (most recent)")
+    assert len(cleaned["message"]) == 300
+    assert "\n" not in cleaned["message"]
+    valid(validator, build_chunk(header(failure={"reason": "error", "message": text}), [],
+                                 final=True, outcome="failed"))
+
+
+@pytest.mark.parametrize("message", [None, "", "   ", "www.", 12, "\x00\x01"])
+def test_a_missing_or_unusable_failure_message_is_empty(validator, message):
+    cleaned = clean_failure({"reason": "upload", "message": message})
+    assert cleaned["reason"] == "upload"
+    assert isinstance(cleaned["message"], str)
+    valid(validator, build_chunk(header(failure={"reason": "upload", "message": message}), [],
+                                 final=True, outcome="failed"))
+    assert clean_failure({"reason": "upload"}) == {"reason": "upload", "message": ""}
+
+
+def test_the_schema_refuses_a_failure_the_builders_never_make(validator):
+    base = json.loads(chunk_json(build_chunk(header(), [], final=True, outcome="failed")))
+
+    def errors(failure):
+        chunk = json.loads(json.dumps(base))
+        chunk["run"]["failure"] = failure
+        return list(validator.iter_errors(chunk))
+
+    assert not errors({"reason": "timeout", "message": ""})
+    assert not errors({"reason": "error", "message": "x" * 300})
+    assert errors({"reason": "crash", "message": ""})
+    assert errors({"reason": "error", "message": "x" * 301})
+    assert errors({"reason": "error", "message": "see https://example.org"})
+    assert errors({"reason": "error", "message": "see WWW.example.org"})
+    assert errors({"reason": "error", "message": "bell\x07"})
+    assert errors({"reason": "error"})                       # message is required
+    assert errors({"reason": "error", "message": "", "stack": "x"})
+    assert errors(None)                                      # absent, never null

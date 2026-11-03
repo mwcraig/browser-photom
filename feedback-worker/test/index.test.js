@@ -29,6 +29,14 @@ function chunk(overrides = {}) {
   };
 }
 
+// A failed final chunk carrying `failure` as given (issue #19).
+function failed(failure) {
+  return chunk({
+    final: true,
+    run: { n_total: 2, n_processed: 1, n_skipped: 1, median_s: 3.2, hidden_ms: null, outcome: "failed", failure },
+  });
+}
+
 function post(body, { type = "text/plain;charset=UTF-8", origin = ORIGIN, headers = {} } = {}) {
   const h = { "Content-Type": type, ...headers };
   if (origin) h.Origin = origin;
@@ -178,6 +186,16 @@ describe("schema rejections", () => {
     "tag character in file name": chunk({ rows: [{ file: "a\u{e0041}.fits", status: "ok" }] }),
     "noncharacter in reason": chunk({ rows: [{ file: "a.fits", status: "ok", reason: "x\uffffy" }] }),
     "negative elapsed_s": chunk({ rows: [{ file: "a.fits", status: "ok", elapsed_s: -1 }] }),
+    // Issue #19: run.failure is as strict as the comment.
+    "unknown failure reason": failed({ reason: "crash", message: "" }),
+    "failure message over 300 characters": failed({ reason: "error", message: "x".repeat(301) }),
+    "URL in failure message": failed({ reason: "error", message: "GET https://example.com/tap failed" }),
+    "www in failure message": failed({ reason: "error", message: "see www.example.com" }),
+    "control character in failure message": failed({ reason: "error", message: "bell\x07" }),
+    "failure with an extra key": failed({ reason: "error", message: "boom", stack: "at x (y.js:1)" }),
+    "failure without a reason": failed({ message: "boom" }),
+    "failure without a message": failed({ reason: "error" }),
+    "null failure": failed(null),
   };
   for (const [name, body] of Object.entries(cases)) {
     it(`400 for ${name}`, async () => {
@@ -215,6 +233,30 @@ describe("schema rejections", () => {
       rows: [{ file: "émoji😀.fits", status: "ok", reason: "pas de solution" }],
     }));
     expect(res.status).toBe(204);
+  });
+
+  it("accepts a failed final chunk that says why it failed", async () => {
+    for (const reason of ["timeout", "error", "upload"]) {
+      const res = await post(failed({ reason, message: "ack: kernel not responding — reload the page to recover" }));
+      expect(res.status).toBe(204);
+    }
+    expect((await post(failed({ reason: "error", message: "" }))).status).toBe(204);
+    expect((await post(failed({ reason: "error", message: "中".repeat(300) }))).status).toBe(204);
+    // An older dashboard's failed final chunk, without one, still validates.
+    expect((await post(chunk({ final: true, run: { n_total: 2, n_processed: 1, n_skipped: 1, outcome: "failed" } })))
+      .status).toBe(204);
+  });
+
+  it("carries the failure the kernel put in the report_end header onto the page's final chunk", async () => {
+    const { seq, final, rows, ...rest } = chunk();
+    const failure = { reason: "error", message: "manifest refused: duplicate stem a" };
+    const header = { ...rest, run: { ...rest.run, failure } };
+    const bodies = reportBodies(header, rows, 0, true, "failed", 1500);
+    expect(bodies.length).toBe(1);
+    expect((await post(bodies[0].body)).status).toBe(204);
+    const [key] = await listKeys();
+    const storedChunk = (await (await env.REPORTS.get(key)).json()).report;
+    expect(storedChunk.run.failure).toEqual(failure);
   });
 
   it("accepts the edge values the schema allows", async () => {

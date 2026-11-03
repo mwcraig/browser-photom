@@ -5,7 +5,8 @@ report per run: a header (a random report id, the observer code, the site
 position rounded to whole degrees, the build's SHAs, a free-text comment and
 the run's counters) and one row per frame (bandaid's own QA record from the
 `make_bandaid_processor` ``on_qa`` hook, plus the dashboard's skip reason and
-the frame's wall time). The contract is `feedback/report.schema.json`, which
+the frame's wall time), and, when the run dies, why (``run.failure``). The
+contract is `feedback/report.schema.json`, which
 the worker validates every chunk against and rejects outright on any
 mismatch -- so everything here errs on the side of sending ``None`` (or an
 empty comment) rather than a value that might not validate. A rejected chunk
@@ -21,6 +22,16 @@ buffers rows and POSTs chunks. `build_chunk` here assembles a chunk exactly
 the way the JS does (`buildReportChunk`), which is what lets the host tests
 validate real chunks against the schema with `jsonschema`, and what the
 "Preview report" button shows.
+
+The page owns two fields of the final chunk: ``run.outcome`` and
+``run.hidden_ms``. ``run.failure`` is the kernel's: the front end's
+``cancel`` carries its reason and status-line text, `PhotometryDashboard`
+hands both to the view's ``on_end`` hook, and `build_header` cleans them
+(`clean_failure`) into the header the ``report_end`` message carries. Both
+builders then keep ``run.failure`` only on a final chunk whose outcome is
+``"failed"``. Cleaning it here rather than in the page keeps one
+implementation of the text rules (the one the skip reasons already use),
+and puts the failure in the preview and in the host tests' schema checks.
 
 Standard library only, like everything above `make_bandaid_processor` in
 `photom_dashboard`: the host tests never import bandaid. `QA_COLUMNS` is
@@ -42,9 +53,11 @@ __all__ = [
     "REPORT_SCHEMA_VERSION",
     "ROWS_PER_CHUNK",
     "build_chunk",
+    "FAILURE_REASONS",
     "build_header",
     "chunk_json",
     "clean_comment",
+    "clean_failure",
     "clean_row",
     "endpoint_url",
     "new_report_id",
@@ -361,6 +374,7 @@ def build_header(
     n_processed=0,
     n_skipped=0,
     median_s=None,
+    failure=None,
 ):
     """Every chunk field except ``seq``, ``final`` and ``rows``.
 
@@ -370,6 +384,12 @@ def build_header(
     frame). ``run.outcome`` is ``"running"`` here; the page sets the real
     outcome on the final chunk, and ``run.hidden_ms`` (the page tracks tab
     visibility itself; the kernel only learns about it later, if at all).
+    ``failure`` is the raw ``{"reason", "message"}`` of the cancel that
+    ended a failed run (see `clean_failure`); when it cleans to something,
+    ``run.failure`` is set, and only the view's ``report_end`` header of a
+    failed run passes one. `build_chunk` (and `buildReportChunk` in the
+    page) drop it again from any chunk that is not the final ``"failed"``
+    one, so a header carrying it cannot put it anywhere else.
     ``qa_schema`` 0 means no frame has reached bandaid yet, so no
     `FrameResult.schema_version` is known. The comment goes through
     `clean_comment`; ``obscode`` must already have passed `obscode_problem`
@@ -382,7 +402,7 @@ def build_header(
         raise ValueError(f"observer code {obscode!r} does not fit the report schema")
     comment, _problem = clean_comment(comment)
     qa_schema = qa_schema if isinstance(qa_schema, int) and not isinstance(qa_schema, bool) else 0
-    return {
+    header = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "report_id": str(report_id),
         "build": _build_tag(build),
@@ -400,6 +420,10 @@ def build_header(
             "outcome": "running",
         },
     }
+    cleaned = clean_failure(failure)
+    if cleaned is not None:
+        header["run"]["failure"] = cleaned
+    return header
 
 
 # --------------------------------------------------------------------------
@@ -458,7 +482,8 @@ def _reason(reason):
     Exception messages are whatever the library wrote: multi-line tracebacks
     from astroquery, an HTTP error quoting the Gaia URL. Redacting the URL
     keeps the useful part ("HTTPError: 503 ...") rather than dropping the
-    whole reason.
+    whole reason. `clean_failure` cleans a failed run's status-line text
+    with it too.
     """
     if reason is None:
         return None
@@ -468,6 +493,32 @@ def _reason(reason):
     if _URL_MARK_RE.search(text) or _CONTROL_RE.search(text):
         return None
     return text or None
+
+
+# The schema's run.failure.reason values: the front end's cancel reasons
+# (`dropzone.js`). A cancel with any other reason still ends the report as
+# "failed", just without a failure object.
+FAILURE_REASONS = ("timeout", "error", "upload")
+
+
+def clean_failure(failure):
+    """``run.failure`` for a run that died, or None.
+
+    ``failure`` is what the front end's ``cancel`` carried, as
+    `PhotometryDashboard._on_cancel` passes it on: ``{"reason", "message"}``,
+    unvalidated. ``reason`` must be one of `FAILURE_REASONS`, or there is
+    no failure object at all. ``message`` (the status-line text: the
+    kernel's own exception text for ``error``) goes through `_reason`, the
+    skip-reason cleaner: one line, URLs replaced by ``[url]``, at most 300
+    characters. A message that cannot be made to fit, or none at all, is
+    ``""``; the reason alone still says which way the run died.
+    """
+    if not isinstance(failure, dict):
+        return None
+    reason = failure.get("reason")
+    if not isinstance(reason, str) or reason not in FAILURE_REASONS:
+        return None
+    return {"reason": reason, "message": _reason(failure.get("message")) or ""}
 
 
 def clean_row(qa, *, name, reason=None, elapsed_s=None):
@@ -527,12 +578,16 @@ def clean_row(qa, *, name, reason=None, elapsed_s=None):
 def build_chunk(header, rows, *, seq=0, final=False, outcome=None, hidden_ms=None):
     """One POST body, assembled exactly as `buildReportChunk` in dropzone.js
     does it: the header, then ``seq``/``final``/``rows``, with ``run.outcome``
-    and ``run.hidden_ms`` overridden when given."""
+    and ``run.hidden_ms`` overridden when given. ``run.failure`` is kept
+    only when the chunk is final and its outcome is ``"failed"``; on any
+    other chunk it is dropped (absent, not null)."""
     run = dict(header["run"])
     if outcome is not None:
         run["outcome"] = outcome
     if hidden_ms is not None:
         run["hidden_ms"] = hidden_ms
+    if not (final and run.get("outcome") == "failed"):
+        run.pop("failure", None)
     return {**header, "run": run, "seq": seq, "final": bool(final), "rows": list(rows)}
 
 

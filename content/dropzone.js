@@ -220,6 +220,27 @@ export function makeErrorLatch() {
   };
 }
 
+// The `cancel` the upload loop's three failure paths send the kernel:
+// `reason` is "timeout" (a waitFor watchdog), "error" (a kernel `error`
+// reply) or "upload" (the loop itself died), and `message` is the text the
+// status line shows after "Error: " for that failure -- for "error", the
+// kernel's own exception text. The kernel ends the run as failed and
+// passes both to the tester report's on_end hook, where
+// feedback_report.clean_failure makes them fit the schema's run.failure
+// (one line, URLs redacted, 300 characters). The cleaning is done there,
+// not here, so the text rules have one implementation (the one the skip
+// reasons already use), which the host tests check against the schema and
+// the preview shows. Nothing here trims: the comm is local.
+export function cancelMessage(reason, text) {
+  return { type: 'cancel', reason, message: text == null ? '' : String(text) };
+}
+
+// What the status line shows after "Error: " for a failure the upload loop
+// caught, and what its cancel then carries.
+export function errorText(err) {
+  return err && err.message ? err.message : String(err);
+}
+
 // One upload's first-failure slot. Waiters the loop is not currently
 // awaiting must never reject unobserved (that's an unhandled rejection and
 // a lost error), so every stored waiter goes through guard(): it records
@@ -461,13 +482,18 @@ export const REPORT_MAX_HIDDEN_MS = 1_000_000_000;
 /**
  * One POST body, assembled exactly as feedback_report.build_chunk does it:
  * the header the kernel sent, then seq/final/rows, with run.outcome and
- * run.hidden_ms overridden when given. The Python tests validate that
- * shape against the schema; the JS tests pin that this matches it.
+ * run.hidden_ms overridden when given. run.failure (the kernel puts it in
+ * a failed run's report_end header, already cleaned) is kept only on a
+ * final chunk whose outcome is "failed", and dropped from every other
+ * chunk: the non-final parts of a split final, a report closed as
+ * "cancelled" or "page_closed". The Python tests validate that shape
+ * against the schema; the JS tests pin that this matches it.
  */
 export function buildReportChunk(header, rows, seq, final, outcome, hiddenMs) {
   const run = { ...header.run };
   if (outcome != null) run.outcome = outcome;
   if (hiddenMs != null) run.hidden_ms = hiddenMs;
+  if (!(final && run.outcome === 'failed')) delete run.failure;
   return { ...header, run, seq, final: Boolean(final), rows: [...rows] };
 }
 
@@ -514,8 +540,10 @@ export function reportBodies(header, rows, seq, final, outcome, hiddenMs, maxByt
  *   reporting. A previous report still open is finished as "cancelled".
  * - row(row, header): buffer one row; send a chunk every rowsPerChunk
  *   (every hiddenFlushRows while the tab is hidden).
- * - end(outcome, header): send the final chunk ("done"/"cancelled", or
- *   "report_error" when the kernel's own reporting broke mid-run).
+ * - end(outcome, header): send the final chunk ("done"/"cancelled",
+ *   "failed" when the run died -- the kernel's header then carries
+ *   run.failure, which goes on this chunk only -- or "report_error" when
+ *   the kernel's own reporting broke mid-run).
  * - pageClosed(nowMs, persisted): the page is going away mid-run; send the
  *   final chunk by beacon with outcome "page_closed". With `persisted` (the
  *   page is entering the back/forward cache, not closing) POST the
@@ -657,7 +685,11 @@ export function makeReporter({ fetchFn, beaconFn, onStatus, rowsPerChunk = REPOR
   // Would `candidate` go out as one body under the current header, however
   // it ends up being flushed? Sized as the largest body the same rows can
   // become: a final chunk with the longest outcome string the schema has
-  // and a hidden_ms grown to its 10-digit maximum.
+  // and a hidden_ms grown to its 10-digit maximum. Not run.failure: only
+  // the kernel's report_end brings one, and that final goes out by
+  // fetch, where reportBodies splits a body the failure pushed over the
+  // cap; the pagehide beacon this sizing protects is "page_closed" and
+  // never carries it.
   function fits(candidate, nowMs) {
     try {
       const body = JSON.stringify(
@@ -1280,15 +1312,17 @@ function renderDropZone({ model, el, signal }) {
         // waiting for chunks this loop has given up on sending -- but only
         // if this watchdog still belongs to the current run; a stale one
         // firing here must not cancel a healthy later upload.
+        const err = new Error(`${label}: kernel not responding — reload the page to recover`);
         if (waiter.runId === runCounter) {
           try {
-            model.send({ type: 'cancel', reason: 'timeout' });
+            // The same words the loop's catch puts in the status line.
+            model.send(cancelMessage('timeout', err.message));
           } catch (sendErr) {
             // Comm is gone; the reject below still unwinds the loop, and
             // the status line it produces says reload is the recovery.
           }
         }
-        reject(new Error(`${label}: kernel not responding — reload the page to recover`));
+        reject(err);
       }, timeoutMs);
       waiters.push(waiter);
     });
@@ -1302,7 +1336,10 @@ function renderDropZone({ model, el, signal }) {
       // The latch keeps the error too, for the upload loop's rethrow():
       // there may be no waiter to reject yet if this landed during the
       // loop's first chunk read (issue #11).
-      const err = new Error(msg.reason || 'Kernel error');
+      const text = msg.reason || 'unknown error';
+      // Tagged, so the loop's catch can still label the cancel "error"
+      // when no waiter was pending here and the catch is what sends it.
+      const err = Object.assign(new Error(text), { fromKernel: true });
       if (!errorLatch.trip(err)) return;
       // No way to know which in-flight step a kernel-side error belongs
       // to, so fail every pending waiter and let the upload loop unwind.
@@ -1313,8 +1350,8 @@ function renderDropZone({ model, el, signal }) {
       // send, and the download button would never appear. With no waiter
       // pending the loop itself sends it, from its catch, once rethrow()
       // picks the error up from the latch.
-      if (pending.length > 0) model.send({ type: 'cancel', reason: 'error' });
-      setStatus(`Error: ${msg.reason || 'unknown error'}`);
+      if (pending.length > 0) model.send(cancelMessage('error', text));
+      setStatus(`Error: ${text}`);
       return;
     }
     // Frames finished while the tab is hidden, for the on-return banner.
@@ -1449,7 +1486,8 @@ function renderDropZone({ model, el, signal }) {
       }
       setStatus(`Uploaded ${files.length} file${files.length === 1 ? '' : 's'}.${skippedSuffix}`);
     } catch (err) {
-      setStatus(`Error: ${err && err.message ? err.message : err}`);
+      const text = errorText(err);
+      setStatus(`Error: ${text}`);
       // Settle every waiter this loop abandoned (a kernel error already
       // drained them; a local failure -- a read error, one timed-out ack --
       // did not). Settling clears their 10-minute watchdog timers, so a
@@ -1463,7 +1501,10 @@ function renderDropZone({ model, el, signal }) {
       // `cancel` is idempotent, so the extra one sent when the kernel's own
       // error message is what unwound us is harmless.
       try {
-        model.send({ type: 'cancel', reason: 'upload' });
+        // A kernel error that landed with no waiter pending (issue #11's
+        // window) unwinds the loop through rethrow(); it is still the
+        // kernel's death, not an upload failure, and is labelled so.
+        model.send(cancelMessage(err && err.fromKernel ? 'error' : 'upload', text));
       } catch (sendErr) {
         // Comm is gone; nothing left to tell it with. Reload is the only
         // recovery, and the status line above says so as well as it can.

@@ -103,6 +103,22 @@ def _hostile_chunks():
                    build_chunk(_header(), [], seq=1, final=True, outcome="report_error")))
     chunks.append(("failed outcome",
                    build_chunk(_header(), [], seq=1, final=True, outcome="failed")))
+    # Issue #19: the failure a failed run's final chunk carries, from the
+    # kind of text a kernel error or a dying upload loop puts in it.
+    failures = {
+        "failure, timeout": {"reason": "timeout",
+                             "message": "ack: kernel not responding — reload the page to recover"},
+        "failure, error with a URL, newlines and format characters": {
+            "reason": "error",
+            "message": "HTTPError: 503 for https://gea.esac.esa.int/x\nTraceback\u200b\ud800\x9b"},
+        "failure, upload with 4-byte text over the cap": {"reason": "upload", "message": "😀" * 400},
+        "failure, no message": {"reason": "error", "message": None},
+        "failure, message ending in a newline": {"reason": "error", "message": "boom\n"},
+    }
+    for name, failure in failures.items():
+        chunk = build_chunk(_header(failure=failure), [], seq=2, final=True, outcome="failed")
+        assert "failure" in chunk["run"], name
+        chunks.append((name, chunk))
     return chunks
 
 

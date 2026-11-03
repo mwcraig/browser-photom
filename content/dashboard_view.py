@@ -90,6 +90,8 @@ REPORT_CONSENT = """
     <li>the run's counts and timing, how it ended (finished, failed, or the
       tab was closed), how long the tab spent in the background, and the
       dashboard version</li>
+    <li>if the run fails, the <b>error message</b> the dashboard showed
+      in its status line (at most 300 characters)</li>
     <li>your comment, if you write one</li>
   </ul>
   <p style="margin:0.5em 0 0.2em"><b>The receiving server adds</b></p>
@@ -156,6 +158,7 @@ class DashboardView:
         self._run_identity = None
         self._run_comment = None
         self._run_outcome = None
+        self._run_failure = None
         # The id the *next* reported run will use, drawn early so that a
         # preview shown before the run carries the id it will really have.
         self._next_report_id = None
@@ -531,6 +534,9 @@ class DashboardView:
         # preview shows what the final chunk carried.
         comment = (self._run_comment if self._run_comment is not None
                    and report_id == self._run_report_id else self.report_comment.value)
+        # Set only once a reported run has failed: the header that goes out
+        # with its report_end carries it, and so does the preview after.
+        failure = self._run_failure if report_id == self._run_report_id else None
         lat, lon = self._resolved_site
         return build_header(
             report_id=report_id,
@@ -547,6 +553,7 @@ class DashboardView:
             n_skipped=state.skipped,
             # Photometered frames only (issue #25); skips are in n_skipped.
             median_s=state.median_seconds,
+            failure=failure,
         )
 
     def _report_send(self, content):
@@ -561,6 +568,7 @@ class DashboardView:
         self._run_identity = None
         self._run_comment = None
         self._run_outcome = None
+        self._run_failure = None
         self._report_rows = []
         self._pending_qa = {}
         self._qa_schema = 0
@@ -604,12 +612,16 @@ class DashboardView:
         # After the send, so a row whose send raised is not previewed as sent.
         self._report_rows.append(row)
 
-    def _report_end(self, _dashboard, outcome):
+    def _report_end(self, _dashboard, outcome, failure=None):
         # Unless the guard already closed this run's report as report_error:
         # the preview then shows what was actually sent, not a "done" final
-        # chunk the page never got.
+        # chunk the page never got. `failure` is the raw reason/message of
+        # the cancel that ended a failed run (`_on_cancel`); build_header
+        # cleans it into run.failure.
         if self._run_outcome is None:
             self._run_outcome = outcome
+            if outcome == "failed":
+                self._run_failure = failure
         self._report_guard(self._report_end_unguarded, outcome)
 
     def _report_end_unguarded(self, outcome):

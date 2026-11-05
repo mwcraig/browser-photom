@@ -2172,3 +2172,78 @@ the field through `pull_feedback.failure_text`, so a missing or malformed
 failure shows nothing rather than raising. A run that photometered
 nothing (`median_s` null since PR #28) now shows `median -` instead of
 `median None`.
+
+# bandaid pin moved to 9baaf7c (2026-11-05)
+
+9baaf7c is bandaid main as of 2026-11-05 20:11 UTC, the merge of bandaid
+PR #186 ("Require photutils >= 3.1.1 and re-lock"), after PR #157
+("Require photutils >= 3.1", merged ad6b3fa) and PR #180 (merged 6f7f53a).
+`pyproject.toml` now requires `photutils>=3.1.1`. photutils 3.1 is the
+first release with the compiled sigma-clipped `ApertureStats` that bandaid
+#103 / PR #156 wanted: bandaid measured about 26 % less time per frame
+natively, with output that differs only at the last bit. So this is the
+first pin since 98183ca whose photometry is expected to change relative to
+the previous one, at the last bit.
+
+PR #180 ("Check the prep frame can fill the output schema; drop Seestar
+keys it never has"): `prepare_batch` gains the keyword
+`user_specific_metadata=None` and, after parsing the observation time and
+before the Gaia query, calls `_check_output_metadata({**metadata,
+**(user_specific_metadata or {})}, prep_file)`. That raises
+`FrameMetadataError` (a `FrameError`, not a `BatchPrepError`) naming every
+StarList key that is missing or None (required keys) or absent (optional
+keys, i.e. `stack`). The Seestar50 profile drops `"site_elev": "@SITEELEV"`
+and `"observer": "@obscode"` (no real Seestar frame has either card) and
+keeps `"stack": "@STACKCNT"`. That check is `photometry.py`'s only change;
+`writers.py` has no diff. The rest of e29ed5c..9baaf7c is docs (PRs #168,
+#179), README/CHANGELOG, the `__init__` docstring URL and the cli.py
+`weights` help text. eloy stays a056c91, twirl 0.5.2.
+
+For the dashboard: `make_bandaid_processor` called `prepare_batch(path,
+cnn=cnn, config=config)` with no user metadata, so at 9baaf7c every prep
+attempt would raise `FrameMetadataError` for `observer` and `site_elev`;
+that propagates out of the processor's `process_frame`, `FrameProcessor.run`
+reports it as "FrameMetadataError: ...", prep stays unset, and every frame
+fails fast. The form already supplies both keys as `user_meta`, passed to
+`bandaid.process_frame` as `user_specific_metadata=dict(user_meta)`; the
+prep call now gets the same, read live per attempt:
+
+    batch["prep"] = prepare_batch(
+        path, cnn=cnn, config=config,
+        user_specific_metadata=dict(user_meta),
+    )
+
+`FrameMetadataError` handling is unchanged (it propagates, as the
+observation-time one always has). The fake `prepare_batch` in
+`tests/test_bandaid_processor.py` records what it was given, and a new test
+checks prep gets a copy of the live form metadata (a later edit does not
+rewrite what one attempt saw, and does reach the next attempt).
+
+The channel. emscripten-forge renamed its channel on 2026-11-05
+(emscripten-forge/recipes PR #8266, merged 11:58 UTC): main-branch builds
+now upload to `https://repo.prefix.dev/emscripten-forge/4x` (prefix.dev org
+channel `@emscripten-forge/4x`). The old `https://prefix.dev/emscripten-forge-4x`
+still serves but is frozen from before the rename and will never get
+photutils 3.1.1. The new channel holds every package the old one had (3410
+entries) plus photutils 3.1.1 (`photutils-3.1.1-np23py313h07ed413_0`, built
+from emscripten-forge/recipes PR #7636, uploaded 15:54 UTC) and ujson
+6.1.0. That is what made this bump possible the same day bandaid merged
+#186. environment.yml now lists the new channel (with a comment on the
+rename) and `photutils>=3.1.1`, so a solve against the frozen channel fails
+instead of quietly building an older photutils. A `mamba create --dry-run
+--platform emscripten-wasm32` of environment.yml (minus the pip block)
+against the new channel resolves photutils 3.1.1, python 3.13.1, numpy
+2.5.4, scipy 1.18.0, astropy-base 8.0.2, xeus-python 0.19.0: the versions
+of the current dist-dash build apart from photutils. photutils 3.1.1's
+floors (astropy>=7, numpy>=2, scipy>=1.15) are met, its recipe run deps
+are unchanged (numpy, astropy, scipy, shapely), and the recipe's wasm smoke
+test passed.
+
+Edits in this repo: the pin and its comment in `pixi.toml`; environment.yml
+(channel, photutils floor); the `prepare_batch` call and the
+`make_bandaid_processor` docstring; the processor test; README (two
+mentions); `docs/dashboard.md` (pin history paragraph, and the Metadata
+section, which still quoted the two dropped profile mappings). `pixi run
+test` 608 passed, `pixi run test-js` 105 passed.
+
+Validation: pending (native and browser LS Psc rerun).

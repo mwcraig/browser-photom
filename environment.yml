@@ -1,6 +1,10 @@
 name: browser-photom
 channels:
-  - https://prefix.dev/emscripten-forge-4x
+  # emscripten-forge renamed its channel on 2026-11-05 (emscripten-forge/
+  # recipes PR #8266): builds now upload here. The old
+  # https://prefix.dev/emscripten-forge-4x still serves but is frozen before
+  # the rename, so it will never carry photutils 3.1.1.
+  - https://repo.prefix.dev/emscripten-forge/4x
   - https://prefix.dev/conda-forge
 dependencies:
   - xeus-python
@@ -14,7 +18,8 @@ dependencies:
   - pillow
   # bandaid pipeline deps with emscripten-forge builds
   - scipy
-  - photutils
+  # bandaid's floor since 9baaf7c; only the renamed channel above has 3.1.1
+  - photutils>=3.1.1
   - scikit-image
   # pure-Python noarch; pydantic pins an exact pydantic-core, which must
   # intersect emscripten-forge's builds — pin pydantic down a version if the

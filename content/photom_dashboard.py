@@ -1258,8 +1258,9 @@ def make_bandaid_processor(
     is this build's `provenance_tag` (bandaid and browser-photom SHAs) unless
     ``provenance`` overrides it.
 
-    `user_meta` is read on every frame, so the view can keep it live while the
-    form is still editable. `results_dir` may be a zero-arg callable returning
+    `user_meta` is read on every frame (by every prep attempt as well as by
+    the per-frame step), so the view can keep it live while the form is
+    still editable. `results_dir` may be a zero-arg callable returning
     the directory to write into, re-read on every frame -- that is how the
     dashboard points frames at the current run's directory (which the kernel
     creates per manifest) through a processor that is only built once per
@@ -1396,7 +1397,14 @@ def make_bandaid_processor(
                 log(f"Retrying batch prep ({batch['gaia_wait']} s Gaia cooldown over).")
             prep_started = clock()
             try:
-                batch["prep"] = prepare_batch(path, cnn=cnn, config=config)
+                # The form's metadata goes to prep too: since 9baaf7c prep
+                # checks the frame can fill the output schema, and observer
+                # and site_elev are never in a Seestar header (the form
+                # supplies them). A copy, read live like the per-frame call.
+                batch["prep"] = prepare_batch(
+                    path, cnn=cnn, config=config,
+                    user_specific_metadata=dict(user_meta),
+                )
             except BatchPrepError as exc:
                 # Fatal to *prep*, not to the run: leave it None so a later
                 # frame retries, rather than one bad first frame killing all.

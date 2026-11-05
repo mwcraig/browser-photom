@@ -174,7 +174,7 @@ five failures at 85 px and above), so #20 is addressed for every case seen,
 not closed by construction. Frames that fit a sane FWHM are untouched, so photometry is unchanged: native 66b4e03
 is byte-identical to native 98183ca on the 155 LS Psc frames, and the
 browser agrees with native as at 98183ca (numbers in PROGRESS).
-The pin is now e29ed5c (2026-11-01, bandaid PR #177, closing bandaid #176).
+The pin then moved to e29ed5c (2026-11-01, bandaid PR #177, closing bandaid #176).
 `prepare_batch` takes the batch's frame list (the parameter is `files`, was
 `first_file`; a single path is still a one-frame batch, so the positional
 call in `make_bandaid_processor` is unchanged) and prepares the batch from
@@ -193,7 +193,32 @@ bandaid CLI now behaves the same way over a folder, which is what bandaid
 #176 asked for. `photometry.py` and `writers.py` have no diff, so
 photometry is unchanged; native e29ed5c is byte-identical to native
 66b4e03 and 98183ca on the 155 LS Psc frames, and the browser agrees with
-native as before (numbers in PROGRESS). The 0378410
+native as before (numbers in PROGRESS).
+The pin is now 9baaf7c (2026-11-05, bandaid PR #186, after PR #157 and
+PR #180). bandaid requires photutils >= 3.1.1: 3.1 is the first photutils
+with the compiled sigma-clipped `ApertureStats` that bandaid #103 and PR
+#156 wanted, about 26 % less time per frame natively, with output that
+differs only at the last bit. So this is the first pin since 98183ca whose
+photometry is expected to change, at the last bit, relative to e29ed5c.
+PR #180 makes `prepare_batch` check, after parsing the observation time
+and before the Gaia query, that the prep frame's metadata, with the new
+`user_specific_metadata` keyword applied, can fill every StarList output
+key; a missing or None required key, or an absent optional one (`stack`),
+raises `FrameMetadataError`, a `FrameError` rather than a `BatchPrepError`,
+naming the keys. The Seestar50 profile no longer maps `site_elev` or
+`observer` (no Seestar frame carries `SITEELEV` or `obscode`), so
+`make_bandaid_processor` now passes `user_specific_metadata=dict(user_meta)`
+to `prepare_batch` as well as to every `process_frame`; without it every
+frame would fail on those two keys. The `FrameMetadataError` propagates out
+of the processor's `process_frame` as the observation-time one always has,
+so `FrameProcessor` reports it and prep stays unset for the next frame.
+emscripten-forge has photutils 3.1.1 only on the channel it renamed the
+same day (emscripten-forge/recipes PR #8266): environment.yml now points at
+`https://repo.prefix.dev/emscripten-forge/4x` instead of the frozen
+`https://prefix.dev/emscripten-forge-4x`, and pins `photutils>=3.1.1` so a
+solve against the wrong channel fails instead of quietly building an older photutils.
+Every other kernel package resolves to the version the previous build had.
+The LS Psc rerun at 9baaf7c is pending (numbers in PROGRESS). The 0378410
 rerun found that a fresh kernel build picks up twirl 0.6.0, which fails every
 plate solve on wasm32, so environment.yml now pins twirl 0.5.2. The larger
 browser-versus-native position difference,
@@ -584,14 +609,16 @@ sending episodes; aborting it also closes an open dialog (resolving
 The form has four fields: observer code and site elevation (required), latitude
 and longitude (optional). This isn't an arbitrary UX choice — it follows directly
 from how bandaid's `Seestar50` instrument profile maps FITS header cards onto
-metadata (`bandaid-src/src/bandaid/meta_json_files/Seestar50/profile.json:15-18`):
+metadata (`bandaid-src/src/bandaid/meta_json_files/Seestar50/profile.json`):
 
 ```
 "site_lat": "@SITELAT",
 "site_lon": "@SITELONG",
-"site_elev": "@SITEELEV",
-"observer":  "@obscode",
 ```
+
+with no mapping for `site_elev` or `observer` (until the 9baaf7c pin the
+profile mapped them to `@SITEELEV` and `@obscode`, cards no Seestar frame
+has),
 
 and `user_specific_metadata` (the dict built by `validate_metadata` and passed
 through as `user_meta`) is applied *last*, overriding whatever the header supplied
@@ -599,12 +626,14 @@ through as `user_meta`) is applied *last*, overriding whatever the header suppli
 `bandaid.photometry.prepare_image`). Real Seestar frames carry
 `SITELAT`/`SITELONG` in the header but **no** `SITEELEV` card and no `obscode`
 card — those two fields have nothing to fall back to, so
-`photom_dashboard.validate_metadata` requires them. Latitude and longitude,
+`photom_dashboard.validate_metadata` requires them (and since 9baaf7c
+`prepare_batch` refuses a prep frame without them, so prep gets `user_meta`
+too). Latitude and longitude,
 by contrast, do have a header fallback: `validate_metadata` omits `site_lat`/
 `site_lon` from the returned dict when the field is left blank, rather than
 defaulting it to anything, specifically so the header value wins
 (`test_blank_lat_lon_are_omitted_so_the_header_supplies_them`,
-`tests/test_metadata.py`). `_meta` is read fresh on every frame
+`tests/test_metadata.py`). `_meta` is read fresh on every frame and every prep attempt
 (`DashboardView._meta`), so editing the form between dropped
 folders takes effect on the next run without restarting anything.
 

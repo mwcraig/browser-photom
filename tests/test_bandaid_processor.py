@@ -56,6 +56,8 @@ class FakeBandaid(types.ModuleType):
     def __init__(self):
         super().__init__("bandaid")
         self.prep_calls = []
+        # The user_specific_metadata each prep attempt was given, in order.
+        self.prep_metadata = []
         self.frame_calls = []
         # (exception, seconds the attempt takes) pairs to play out in order;
         # once they run out, prep succeeds instantly.
@@ -65,8 +67,9 @@ class FakeBandaid(types.ModuleType):
     def PhotometryConfig(self):  # noqa: N802 - mirrors bandaid's class name
         return object()
 
-    def prepare_batch(self, path, *, cnn, config):
+    def prepare_batch(self, path, *, cnn, config, user_specific_metadata=None):
         self.prep_calls.append(path)
+        self.prep_metadata.append(user_specific_metadata)
         if self.prep_outcomes:
             exc, took = self.prep_outcomes.pop(0)
             self.clock.now += took
@@ -153,14 +156,14 @@ def fake(monkeypatch):
 
 @pytest.fixture
 def build(fake, tmp_path):
-    def build(**kw):
+    def build(user_meta=None, **kw):
         lines = []
         clock = Clock()
         fake.clock = clock
         qa = []
         kw.setdefault("retry_hint", "drop the folder again to retry now")
         proc = make_bandaid_processor(
-            {}, tmp_path, log=lines.append, cnn=object(), provenance="tag",
+            {} if user_meta is None else user_meta, tmp_path, log=lines.append, cnn=object(), provenance="tag",
             clock=clock, on_qa=lambda *a: qa.append(a), **kw,
         )
         return proc, lines, clock, qa
@@ -284,6 +287,21 @@ def test_a_non_gaia_prep_failure_retries_on_the_next_frame(build, fake):
     assert proc("b.fit", "b.fit") is None
     assert fake.prep_calls == ["a.fit", "b.fit"]
     assert not any("Gaia" in line for line in lines)
+
+
+def test_prep_gets_a_copy_of_the_live_form_metadata(build, fake):
+    # bandaid 9baaf7c's prepare_batch checks the prep frame can fill the
+    # output schema, and observer and site_elev come only from the form.
+    user_meta = {"observer": "XYZ", "site_elev": 100.0}
+    proc, _lines, _clock, _qa = build(user_meta=user_meta)
+    fake.prep_outcomes = [other_failure()]
+    proc("a.fit", "a.fit")
+    # A copy: editing the form afterwards does not rewrite what prep saw...
+    user_meta["site_elev"] = 250.0
+    assert fake.prep_metadata == [{"observer": "XYZ", "site_elev": 100.0}]
+    # ...but the edit reaches the next prep attempt.
+    assert proc("b.fit", "b.fit") is None
+    assert fake.prep_metadata[1] == {"observer": "XYZ", "site_elev": 250.0}
 
 
 @pytest.mark.parametrize("took", [0.3, GAIA_SLOW_PREP_S])

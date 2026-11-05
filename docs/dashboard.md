@@ -230,8 +230,8 @@ Every other kernel package resolves to the version the previous build had.
 At a fixed stack, photutils 3.0.0 -> 3.1.1 alone moves tot_count,
 count_err and bkgd_count by at most 2e-14 relative and nothing else; the
 larger differences against the e29ed5c reference are the reference's older
-numpy and photutils (numbers in PROGRESS). The LS Psc browser rerun at
-9baaf7c is pending. The 0378410
+numpy and photutils (numbers in PROGRESS). The browser agrees with
+native 9baaf7c as at the earlier bumps (numbers in PROGRESS). The 0378410
 rerun found that a fresh kernel build picks up twirl 0.6.0, which fails every
 plate solve on wasm32, so environment.yml now pins twirl 0.5.2. The larger
 browser-versus-native position difference,

@@ -2295,4 +2295,23 @@ bandaid's "output differs only at the last bit" holds for the 3.0.0 ->
 3.1.1 step. Scratchpad outputs: out_9baaf7c/ and out_9baaf7c_pu300/ under
 this session's native-9baaf7c/.
 
-Browser run at 9baaf7c: pending (filled in before merge).
+Browser run at 9baaf7c (2026-11-05, dist-dash built from 8420560 against
+the renamed channel; empack_env_meta.json lists
+photutils-3.1.1-np23py313h07ed413_0, so the kernel loads 3.1.1): 155/155
+frames photometered, 0 skipped, no `[skip]` lines, about 165 s from drop to
+done, median 0.6 s/frame on the status line (per-frame lines 0.4 to 0.5 s
+with 158 to 175 stars). CDS hung and IDIA answered 70 s later, as on
+2026-11-01. Star lists stamped `bandaid-9baaf7c.browser-photom-8420560`;
+zip kept as
+`~/Downloads/ls_psc_subset155-starlists.bandaid-9baaf7c.browser-photom-8420560.zip`.
+Against native 9baaf7c (`~/Downloads/ls_psc_reference_star_9baaf7c/`):
+same schema version, row counts identical in all four filters with no
+one-sided rows, x float32-exact 17970 of 46217 on both sides, max |dx| and
+|dy| 1.2e-4 px, fwhm max 2.2e-5 relative, tot_count max 6.1e-3 (TG
+-045725), count_err max 1.1e-2 (TB -041108), bkgd_count max 1.0e-3, egain
+header differs on every file at about 1e-7: the Ballet sgemm-versus-numpy
+round-off of issue #8, the same picture as at e29ed5c. Against native
+e29ed5c the browser shows exactly what native 9baaf7c shows (the numpy-2
+float32-exact x/y, the extra TG row in -004601, tot_count up to 8.8e-3), so
+the browser and native sides moved together. Playwright driver and compare
+outputs in this session's scratchpad browser-9baaf7c/.

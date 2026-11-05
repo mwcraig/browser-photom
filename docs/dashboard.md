@@ -227,7 +227,11 @@ same day (emscripten-forge/recipes PR #8266): environment.yml now points at
 `https://prefix.dev/emscripten-forge-4x`, and pins `photutils>=3.1.1` so a
 solve against the wrong channel fails instead of quietly building an older photutils.
 Every other kernel package resolves to the version the previous build had.
-The LS Psc rerun at 9baaf7c is pending (numbers in PROGRESS). The 0378410
+At a fixed stack, photutils 3.0.0 -> 3.1.1 alone moves tot_count,
+count_err and bkgd_count by at most 2e-14 relative and nothing else; the
+larger differences against the e29ed5c reference are the reference's older
+numpy and photutils (numbers in PROGRESS). The LS Psc browser rerun at
+9baaf7c is pending. The 0378410
 rerun found that a fresh kernel build picks up twirl 0.6.0, which fails every
 plate solve on wasm32, so environment.yml now pins twirl 0.5.2. The larger
 browser-versus-native position difference,

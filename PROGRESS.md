@@ -2279,4 +2279,20 @@ SNR ~2) just above min_snr; egain header differs by up to 1.9e-4 (L4's
 per-star median). The reference set for the next bump is
 `~/Downloads/ls_psc_reference_star_9baaf7c/`.
 
-Browser run and a photutils-only A/B: pending (filled in before merge).
+photutils-only A/B, native (2026-11-05): bandaid 9baaf7c run twice in the
+same scratchpad env with only photutils changed (3.0.0 from conda-forge
+versus 3.1.1; numpy 2.5.4, astropy 7.2.0, scipy 1.18.1, twirl 0.6.0, eloy
+a056c91 identical). Same prep frame, 793 targets; row sets identical in
+every filter (TR 10062, TB 7763, TG 13210, L4 15182, the extra TG row in
+both); x, y, fwhm, ra, dec and peak_count identical; tot_count, count_err,
+bkgd_count and the egain header differ at the last bit only (max relative
+2.3e-14, 6.7e-15, 4.7e-16 and 5.1e-15; 0 of 155 files byte-identical for
+that reason). Wall time 101.5 s at 3.0.0 versus 78.1 s at 3.1.1 (user CPU
+254 s versus 108 s). So the 0.9 % tot_count and 1.8 % count_err outliers
+against the e29ed5c reference above come from the reference's older stack
+(numpy 1.26.4, photutils 2.3.0, eloy env), not from photutils 3.1.1;
+bandaid's "output differs only at the last bit" holds for the 3.0.0 ->
+3.1.1 step. Scratchpad outputs: out_9baaf7c/ and out_9baaf7c_pu300/ under
+this session's native-9baaf7c/.
+
+Browser run at 9baaf7c: pending (filled in before merge).

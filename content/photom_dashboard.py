@@ -179,6 +179,12 @@ def _as_number(value):
     return ("ok", number) if math.isfinite(number) else ("bad", None)
 
 
+# The StarList keys the metadata form can supply: what `validate_metadata`
+# returns when every field is filled. `make_bandaid_processor` reads it to
+# say whether the form can fix a prep frame's missing output keys.
+FORM_METADATA_KEYS = frozenset({"observer", "site_elev", "site_lat", "site_lon"})
+
+
 def validate_metadata(observer=None, site_elev=None, site_lat=None, site_lon=None):
     """Turn the four form fields into bandaid's ``USER_META``.
 
@@ -1253,8 +1259,10 @@ def make_bandaid_processor(
     ``error`` outcome, reported as ``<ExceptionType>: <message>``, the same
     text `FrameProcessor` would have produced had it propagated). A
     `FrameMetadataError` from `prepare_batch` (output keys the form and the
-    header leave unfilled, no observation time, an undetectable instrument)
-    is reported as a batch prep failure too. Any other exception from
+    header leave unfilled, or a header keyword on the prep frame that is
+    missing or unparsable: DATE-OBS, pointing, gain, NAXIS) is reported as a
+    batch prep failure too; an undetectable instrument already arrives as a
+    `BatchPrepError`. Any other exception from
     `prepare_batch` that is not a `BatchPrepError`, and any exception outside
     bandaid's per-frame step -- a failed write that is not a `FrameError`, a
     hook that raises -- propagates.
@@ -1434,9 +1442,11 @@ def make_bandaid_processor(
                 return f"batch prep failed: {exc}"
             except FrameMetadataError as exc:
                 # A `FrameError`, not a `BatchPrepError`, because bandaid
-                # raises it about the frame's metadata (since 9baaf7c, also
-                # output keys neither the header nor `user_meta` fill, e.g.
-                # blank form lat/lon on a frame without SITELAT/SITELONG).
+                # raises it about the frame's metadata: a header keyword
+                # missing or unparsable on the prep frame (DATE-OBS,
+                # pointing, gain, NAXIS) and, since 9baaf7c, output keys
+                # neither the header nor `user_meta` fill (e.g. blank form
+                # lat/lon on a frame without SITELAT/SITELONG).
                 # Uncaught it would reach `FrameProcessor.run` on every frame
                 # as "FrameMetadataError: /tmp/<name>: ...", and the watch
                 # notebook would retry each file five times. Either way each
@@ -1448,12 +1458,20 @@ def make_bandaid_processor(
                 # path, and bandaid's CLI advice ("...; map them in the
                 # instrument profile's header_map or supply them with
                 # --user-metadata") is cut: a browser user can act on neither.
+                # In its place, say who can supply the keys bandaid names
+                # ("... lacks required output keys: <k1>, <k2>; map them
+                # ..."): the form only when every one is a form field.
                 reason = exc.reason
-                if (cut := reason.find("; map them")) >= 0:
-                    reason = reason[:cut]
-                return (f"batch prep failed: {reason} (the form or the frame "
-                        f"header has to supply them)"
-                        if cut >= 0 else f"batch prep failed: {reason}")
+                cut = reason.find("; map them")
+                if cut < 0:
+                    return f"batch prep failed: {reason}"
+                reason = reason[:cut]
+                _, sep, names = reason.rpartition("output keys: ")
+                keys = set(names.split(", ")) if sep else set()
+                who = ("the form or the frame header"
+                       if keys and keys <= FORM_METADATA_KEYS
+                       else "the frame header")
+                return f"batch prep failed: {reason} ({who} has to supply them)"
             # No clear_gaia() here: once prep exists it is never attempted
             # again until `reset()`, which clears the cooldown itself.
             log(f"Batch prep done: {len(batch['prep'].photometry_coords)} photometry stars.")

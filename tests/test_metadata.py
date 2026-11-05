@@ -9,7 +9,7 @@ to the header when left blank.
 
 import pytest
 
-from photom_dashboard import validate_metadata
+from photom_dashboard import FORM_METADATA_KEYS, validate_metadata
 
 
 def test_minimal_valid_input():
@@ -87,6 +87,14 @@ def test_blank_lat_lon_are_omitted_so_the_header_supplies_them(blank):
     assert errors == []
     assert "site_lat" not in meta
     assert "site_lon" not in meta
+
+
+def test_a_full_form_fills_exactly_the_form_metadata_keys():
+    # make_bandaid_processor's prep-failure hint relies on FORM_METADATA_KEYS
+    # naming what the form can supply.
+    meta, errors = validate_metadata("XYZ", "100", "40", "-90")
+    assert errors == []
+    assert set(meta) == FORM_METADATA_KEYS
 
 
 def test_supplied_lat_lon_override():

@@ -316,26 +316,58 @@ def test_prep_gets_a_copy_of_the_live_form_metadata(build, fake):
     assert fake.prep_metadata[1] == {"observer": "XYZ", "site_elev": 250.0}
 
 
+def missing_keys_failure(keys):
+    # A hand copy of bandaid 9baaf7c's message; the source of truth is
+    # `_check_output_metadata` in bandaid's photometry.py.
+    return FrameMetadataError(
+        "the metadata of the frame the batch is prepared from lacks required "
+        f"output keys: {keys}; map them in the instrument "
+        "profile's header_map or supply them with --user-metadata",
+        file="/tmp/a.fit",
+    ), 2.0
+
+
+MISSING_KEYS_PREFIX = (
+    "batch prep failed: the metadata of the frame the batch is prepared from "
+    "lacks required output keys: "
+)
+
+
 def test_missing_output_metadata_in_prep_is_a_prep_failure(build, fake):
     # Blank form lat/lon on a frame without SITELAT/SITELONG: bandaid
     # 9baaf7c's prep raises FrameMetadataError, a FrameError.
     proc, lines, _clock, qa = build()
-    fake.prep_outcomes = [(FrameMetadataError(
-        "the metadata of the frame the batch is prepared from lacks required "
-        "output keys: site_lat, site_lon; map them in the instrument "
-        "profile's header_map or supply them with --user-metadata",
-        file="/tmp/a.fit",
-    ), 2.0)]
-    reason = proc("a.fit", "a.fit")
-    assert reason.startswith("batch prep failed: ")
-    assert "site_lat, site_lon" in reason
-    assert "/tmp/" not in reason
-    assert "--user-metadata" not in reason
+    fake.prep_outcomes = [missing_keys_failure("site_lat, site_lon")]
+    assert proc("a.fit", "a.fit") == (
+        MISSING_KEYS_PREFIX
+        + "site_lat, site_lon (the form or the frame header has to supply them)"
+    )
     assert qa == []
     # Prep is retried at once on the next frame, with no Gaia cooldown.
     assert proc("b.fit", "b.fit") is None
     assert len(fake.prep_calls) == 2
     assert not any("Gaia" in line for line in lines)
+
+
+def test_a_missing_key_the_form_cannot_supply_points_at_the_header(build, fake):
+    proc, _lines, _clock, _qa = build()
+    fake.prep_outcomes = [missing_keys_failure("exposure, site_lat")]
+    assert proc("a.fit", "a.fit") == (
+        MISSING_KEYS_PREFIX
+        + "exposure, site_lat (the frame header has to supply them)"
+    )
+
+
+def test_other_prep_metadata_errors_keep_their_reason_without_the_path(build, fake):
+    proc, _lines, _clock, qa = build()
+    reason = (
+        "no observation time in the metadata of the frame the batch is "
+        "prepared from (obs_time, usually DATE-OBS)"
+    )
+    fake.prep_outcomes = [(FrameMetadataError(reason, file="/tmp/a.fit"), 0.5)]
+    assert proc("a.fit", "a.fit") == "batch prep failed: " + reason
+    assert qa == []
+    assert proc("b.fit", "b.fit") is None
 
 
 @pytest.mark.parametrize("took", [0.3, GAIA_SLOW_PREP_S])

@@ -197,8 +197,9 @@ native as before (numbers in PROGRESS).
 The pin is now 9baaf7c (2026-11-05, bandaid PR #186, after PR #157 and
 PR #180). bandaid requires photutils >= 3.1.1: 3.1 is the first photutils
 with the compiled sigma-clipped `ApertureStats` that bandaid #103 and PR
-#156 wanted, about 26 % less time per frame natively, with output that
-differs only at the last bit. So this is the first pin since 98183ca whose
+#156 wanted (bandaid expected about 26 % less time per frame natively
+against photutils main; browser-photom PR #31 measured about 23 % against the 3.1.1
+release), with output that differs only at the last bit. So this is the first pin since 98183ca whose
 photometry is expected to change, at the last bit, relative to e29ed5c.
 PR #180 makes `prepare_batch` check, after parsing the observation time
 and before the Gaia query, that the prep frame's metadata, with the new
@@ -210,15 +211,18 @@ naming the keys. The Seestar50 profile no longer maps `site_elev` or
 `make_bandaid_processor` now passes `user_specific_metadata=dict(user_meta)`
 to `prepare_batch` as well as to every `process_frame`; without it every
 frame would fail on those two keys. `make_bandaid_processor` now catches a
-`FrameMetadataError` from `prepare_batch` (this check, and the
-observation-time and instrument-detection ones that used to propagate to
-`FrameProcessor`) and reports it as `batch prep failed: <reason>`, like a
+`FrameMetadataError` from `prepare_batch` (this check, and a header keyword
+missing or unparsable on the prep frame -- DATE-OBS, pointing, gain, NAXIS
+-- which used to propagate to `FrameProcessor`; an undetectable instrument
+was already a `BatchPrepError`) and reports it as `batch prep failed: <reason>`, like a
 non-Gaia `BatchPrepError`: prep stays unset and the next frame retries at
 once, the Gaia cooldown is untouched, and there is no QA row. The reason
 leaves out the MEMFS path, and for missing output keys bandaid's CLI advice
 ("map them in the instrument profile's header_map or supply them with
 --user-metadata") is replaced by "(the form or the frame header has to
-supply them)". Uncaught, every frame of the folder would have paid a full
+supply them)" when every named key is a form field (`FORM_METADATA_KEYS`:
+observer, site_elev, site_lat, site_lon) and by "(the frame header has to
+supply them)" otherwise. Uncaught, every frame of the folder would have paid a full
 calibration (the check runs after detection, the FWHM and the CNN) before
 failing.
 emscripten-forge has photutils 3.1.1 only on the channel it renamed the

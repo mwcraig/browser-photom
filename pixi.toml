@@ -16,9 +16,10 @@ fetch-astrowidgets = "(test -d astrowidgets-src || git clone https://github.com/
 # silently pick up whatever bandaid main is at build time. 9baaf7c is the
 # merge of bandaid PR #186 (after PR #157): bandaid now requires photutils
 # >= 3.1.1. photutils 3.1 brought the compiled sigma-clipped `ApertureStats`
-# bandaid #103 / PR #156 wanted (bandaid expects ~26 % less time per frame,
-# measured natively against photutils main, not the 3.1.1 release; output
-# different only at the last bit); 3.1.1 is the first photutils on
+# bandaid #103 / PR #156 wanted (bandaid expected ~26 % less time per frame
+# against photutils main; browser-photom PR #31 measured ~23 % against the
+# 3.1.1 release natively, 101.5 s versus 78.1 s; output different only at
+# the last bit); 3.1.1 is the first photutils on
 # emscripten-forge, so it is the floor the browser build can meet. This is
 # the first pin since 98183ca whose photometry is expected to change.
 # emscripten-forge carries photutils 3.1.1 only on its renamed channel,

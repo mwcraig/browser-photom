@@ -2180,8 +2180,10 @@ PR #186 ("Require photutils >= 3.1.1 and re-lock"), after PR #157
 ("Require photutils >= 3.1", merged ad6b3fa) and PR #180 (merged 6f7f53a).
 `pyproject.toml` now requires `photutils>=3.1.1`. photutils 3.1 is the
 first release with the compiled sigma-clipped `ApertureStats` that bandaid
-#103 / PR #156 wanted: bandaid measured about 26 % less time per frame
-natively, with output that differs only at the last bit. So this is the
+#103 / PR #156 wanted: bandaid expected about 26 % less time per frame
+natively against photutils main, and this PR measured about 23 % against
+the 3.1.1 release (A/B below), with output that differs only at the last
+bit. So this is the
 first pin since 98183ca whose photometry is expected to change relative to
 the previous one, at the last bit.
 
@@ -2233,8 +2235,14 @@ supply them)". Uncaught, every frame of the folder paid a full calibration
 (the check runs after detection, the FWHM and the CNN) and failed through
 `FrameProcessor.run` as "FrameMetadataError: /tmp/<name>: ...", and the
 watch notebook would have retried each file five times. The same clause now
-covers the observation-time and instrument-detection `FrameMetadataError`s
-from prep, which used to propagate the same way.
+covers a header keyword missing or unparsable on the prep frame (DATE-OBS,
+pointing, gain, NAXIS), which used to propagate the same way; an
+undetectable instrument never reaches it (bandaid's
+`_resolve_batch_instrument` re-raises `InstrumentDetectionError` as
+`BatchPrepError`). Review on PR #31 narrowed the hint: "(the form or the
+frame header has to supply them)" only when every key bandaid names is in
+`FORM_METADATA_KEYS` (observer, site_elev, site_lat, site_lon), "(the frame
+header has to supply them)" otherwise.
 
 The channel. emscripten-forge renamed its channel on 2026-11-05
 (emscripten-forge/recipes PR #8266, merged 11:58 UTC): main-branch builds

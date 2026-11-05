@@ -2231,10 +2231,11 @@ longitude (the form calls them optional) on a frame without
 `SITELAT`/`SITELONG`. The reason drops the MEMFS path, and bandaid's CLI
 advice ("map them in the instrument profile's header_map or supply them
 with --user-metadata") is replaced by "(the form or the frame header has to
-supply them)". Uncaught, every frame of the folder paid a full calibration
-(the check runs after detection, the FWHM and the CNN) and failed through
+supply them)". Uncaught, every frame of the folder failed through
 `FrameProcessor.run` as "FrameMetadataError: /tmp/<name>: ...", and the
-watch notebook would have retried each file five times. The same clause now
+watch notebook would have retried each file five times. Each attempt still
+pays the calibration either way (the check runs after detection, the FWHM
+and the CNN); the catch buys the skip reason, not less work. The same clause now
 covers a header keyword missing or unparsable on the prep frame (DATE-OBS,
 pointing, gain, NAXIS), which used to propagate the same way; an
 undetectable instrument never reaches it (bandaid's

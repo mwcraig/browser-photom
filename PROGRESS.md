@@ -2306,7 +2306,11 @@ this session's native-9baaf7c/.
 
 Browser run at 9baaf7c (2026-11-05, dist-dash built from 8420560 against
 the renamed channel; empack_env_meta.json lists
-photutils-3.1.1-np23py313h07ed413_0, so the kernel loads 3.1.1): 155/155
+photutils-3.1.1-np23py313h07ed413_0, so the kernel loads 3.1.1; against the
+manifest the deployed Pages build serves, the kernel differs in exactly
+bandaid, photutils and five pure-Python conda-forge packages that move on
+every rebuild, certifi, platformdirs, pyvo, soupsieve and typing-inspection,
+while numpy, scipy, astropy, twirl and eloy are the same tarballs): 155/155
 frames photometered, 0 skipped, no `[skip]` lines, about 165 s from drop to
 done, median 0.6 s/frame on the status line (per-frame lines 0.4 to 0.5 s
 with 158 to 175 stars). CDS hung and IDIA answered 70 s later, as on

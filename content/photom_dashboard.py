@@ -179,6 +179,12 @@ def _as_number(value):
     return ("ok", number) if math.isfinite(number) else ("bad", None)
 
 
+# The StarList keys the metadata form can supply: what `validate_metadata`
+# returns when every field is filled. `make_bandaid_processor` reads it to
+# say whether the form can fix a prep frame's missing output keys.
+FORM_METADATA_KEYS = frozenset({"observer", "site_elev", "site_lat", "site_lon"})
+
+
 def validate_metadata(observer=None, site_elev=None, site_lat=None, site_lon=None):
     """Turn the four form fields into bandaid's ``USER_META``.
 
@@ -1251,15 +1257,22 @@ def make_bandaid_processor(
     prep failure, a per-frame `FrameError` (bandaid's ``skipped`` outcome, or
     one the writer raises), or an unexpected error inside bandaid (its
     ``error`` outcome, reported as ``<ExceptionType>: <message>``, the same
-    text `FrameProcessor` would have produced had it propagated). Only an
-    exception outside bandaid's per-frame step -- a failed write that is not
-    a `FrameError`, a hook that raises -- propagates.
+    text `FrameProcessor` would have produced had it propagated). A
+    `FrameMetadataError` from `prepare_batch` (output keys the form and the
+    header leave unfilled, or a header keyword on the prep frame that is
+    missing or unparsable: DATE-OBS, pointing, gain, NAXIS) is reported as a
+    batch prep failure too; an undetectable instrument already arrives as a
+    `BatchPrepError`. Any other exception from
+    `prepare_batch` that is not a `BatchPrepError`, and any exception outside
+    bandaid's per-frame step -- a failed write that is not a `FrameError`, a
+    hook that raises -- propagates.
     The `.star` is named `starlist_name(<stem of name>, tag)`, where the tag
     is this build's `provenance_tag` (bandaid and browser-photom SHAs) unless
     ``provenance`` overrides it.
 
-    `user_meta` is read on every frame, so the view can keep it live while the
-    form is still editable. `results_dir` may be a zero-arg callable returning
+    `user_meta` is read on every frame (by every prep attempt as well as by
+    the per-frame step), so the view can keep it live while the form is
+    still editable. `results_dir` may be a zero-arg callable returning
     the directory to write into, re-read on every frame -- that is how the
     dashboard points frames at the current run's directory (which the kernel
     creates per manifest) through a processor that is only built once per
@@ -1322,6 +1335,7 @@ def make_bandaid_processor(
     from bandaid import (
         BatchPrepError,
         FrameError,
+        FrameMetadataError,
         GaiaQueryError,
         PhotometryConfig,
         prepare_batch,
@@ -1396,7 +1410,14 @@ def make_bandaid_processor(
                 log(f"Retrying batch prep ({batch['gaia_wait']} s Gaia cooldown over).")
             prep_started = clock()
             try:
-                batch["prep"] = prepare_batch(path, cnn=cnn, config=config)
+                # The form's metadata goes to prep too: since 9baaf7c prep
+                # checks the frame can fill the output schema, and observer
+                # and site_elev are never in a Seestar header (the form
+                # supplies them). A copy, read live like the per-frame call.
+                batch["prep"] = prepare_batch(
+                    path, cnn=cnn, config=config,
+                    user_specific_metadata=dict(user_meta),
+                )
             except BatchPrepError as exc:
                 # Fatal to *prep*, not to the run: leave it None so a later
                 # frame retries, rather than one bad first frame killing all.
@@ -1419,6 +1440,38 @@ def make_bandaid_processor(
                 # Unchanged for every cause: feedback reports and the view's
                 # "[skip]" line show the "batch prep failed: " prefix.
                 return f"batch prep failed: {exc}"
+            except FrameMetadataError as exc:
+                # A `FrameError`, not a `BatchPrepError`, because bandaid
+                # raises it about the frame's metadata: a header keyword
+                # missing or unparsable on the prep frame (DATE-OBS,
+                # pointing, gain, NAXIS) and, since 9baaf7c, output keys
+                # neither the header nor `user_meta` fill (e.g. blank form
+                # lat/lon on a frame without SITELAT/SITELONG).
+                # Uncaught it would reach `FrameProcessor.run` on every frame
+                # as "FrameMetadataError: /tmp/<name>: ...", and the watch
+                # notebook would retry each file five times. Either way each
+                # attempt pays the calibration (the check runs after
+                # detection, FWHM and the CNN); what this buys is the skip
+                # reason, not less work. Handled as a prep failure:
+                # prep stays None, the next frame retries, the Gaia cooldown
+                # is left alone, no QA row. `exc.reason` leaves out the MEMFS
+                # path, and bandaid's CLI advice ("...; map them in the
+                # instrument profile's header_map or supply them with
+                # --user-metadata") is cut: a browser user can act on neither.
+                # In its place, say who can supply the keys bandaid names
+                # ("... lacks required output keys: <k1>, <k2>; map them
+                # ..."): the form only when every one is a form field.
+                reason = exc.reason
+                cut = reason.find("; map them")
+                if cut < 0:
+                    return f"batch prep failed: {reason}"
+                reason = reason[:cut]
+                _, sep, names = reason.rpartition("output keys: ")
+                keys = set(names.split(", ")) if sep else set()
+                who = ("the form or the frame header"
+                       if keys and keys <= FORM_METADATA_KEYS
+                       else "the frame header")
+                return f"batch prep failed: {reason} ({who} has to supply them)"
             # No clear_gaia() here: once prep exists it is never attempted
             # again until `reset()`, which clears the cooldown itself.
             log(f"Batch prep done: {len(batch['prep'].photometry_coords)} photometry stars.")

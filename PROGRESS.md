@@ -2172,3 +2172,159 @@ the field through `pull_feedback.failure_text`, so a missing or malformed
 failure shows nothing rather than raising. A run that photometered
 nothing (`median_s` null since PR #28) now shows `median -` instead of
 `median None`.
+
+# bandaid pin moved to 9baaf7c (2026-11-05)
+
+9baaf7c is bandaid main as of 2026-11-05 20:11 UTC, the merge of bandaid
+PR #186 ("Require photutils >= 3.1.1 and re-lock"), after PR #157
+("Require photutils >= 3.1", merged ad6b3fa) and PR #180 (merged 6f7f53a).
+`pyproject.toml` now requires `photutils>=3.1.1`. photutils 3.1 is the
+first release with the compiled sigma-clipped `ApertureStats` that bandaid
+#103 / PR #156 wanted: bandaid expected about 26 % less time per frame
+natively against photutils main, and this PR measured about 23 % against
+the 3.1.1 release (A/B below), with output that differs only at the last
+bit. So this is the
+first pin since 98183ca whose photometry is expected to change relative to
+the previous one, at the last bit.
+
+PR #180 ("Check the prep frame can fill the output schema; drop Seestar
+keys it never has"): `prepare_batch` gains the keyword
+`user_specific_metadata=None` and, after parsing the observation time and
+before the Gaia query, calls `_check_output_metadata({**metadata,
+**(user_specific_metadata or {})}, prep_file)`. That raises
+`FrameMetadataError` (a `FrameError`, not a `BatchPrepError`) naming every
+StarList key that is missing or None (required keys) or absent (optional
+keys, i.e. `stack`). The Seestar50 profile drops `"site_elev": "@SITEELEV"`
+and `"observer": "@obscode"` (no real Seestar frame has either card) and
+keeps `"stack": "@STACKCNT"`. That check is `photometry.py`'s only change;
+`writers.py` has no diff. The rest of e29ed5c..9baaf7c is the
+`pyproject.toml` changes (the photutils floor and the photutils-dev source
+rev), docs (PRs #168, #179), README/CHANGELOG, the `__init__` docstring URL
+and the cli.py `weights` help text. eloy stays a056c91, twirl 0.5.2.
+
+For the dashboard: `make_bandaid_processor` called `prepare_batch(path,
+cnn=cnn, config=config)` with no user metadata, so at 9baaf7c every prep
+attempt would raise `FrameMetadataError` for `observer` and `site_elev`;
+that propagates out of the processor's `process_frame`, `FrameProcessor.run`
+reports it as "FrameMetadataError: ...", prep stays unset, and every frame
+fails fast. The form already supplies both keys as `user_meta`, passed to
+`bandaid.process_frame` as `user_specific_metadata=dict(user_meta)`; the
+prep call now gets the same, read live per attempt:
+
+    batch["prep"] = prepare_batch(
+        path, cnn=cnn, config=config,
+        user_specific_metadata=dict(user_meta),
+    )
+
+The fake `prepare_batch` in `tests/test_bandaid_processor.py` records what
+it was given (and no longer defaults it, so every test fails if the
+processor stops passing it), and a new test checks prep gets a copy of the
+live form metadata (a later edit does not rewrite what one attempt saw, and
+does reach the next attempt).
+
+After review (second commit), `make_bandaid_processor` also catches a
+`FrameMetadataError` from `prepare_batch` (a `FrameError`, so the
+`BatchPrepError` clause missed it) and reports it as `batch prep failed:
+<reason>`: prep stays unset, the next frame retries, the Gaia cooldown is
+untouched, no QA row. The realistic trigger is blank form latitude or
+longitude (the form calls them optional) on a frame without
+`SITELAT`/`SITELONG`. The reason drops the MEMFS path, and bandaid's CLI
+advice ("map them in the instrument profile's header_map or supply them
+with --user-metadata") is replaced by "(the form or the frame header has to
+supply them)". Uncaught, every frame of the folder failed through
+`FrameProcessor.run` as "FrameMetadataError: /tmp/<name>: ...", and the
+watch notebook would have retried each file five times. Each attempt still
+pays the calibration either way (the check runs after detection, the FWHM
+and the CNN); the catch buys the skip reason, not less work. The same clause now
+covers a header keyword missing or unparsable on the prep frame (DATE-OBS,
+pointing, gain, NAXIS), which used to propagate the same way; an
+undetectable instrument never reaches it (bandaid's
+`_resolve_batch_instrument` re-raises `InstrumentDetectionError` as
+`BatchPrepError`). Review on PR #31 narrowed the hint: "(the form or the
+frame header has to supply them)" only when every key bandaid names is in
+`FORM_METADATA_KEYS` (observer, site_elev, site_lat, site_lon), "(the frame
+header has to supply them)" otherwise.
+
+The channel. emscripten-forge renamed its channel on 2026-11-05
+(emscripten-forge/recipes PR #8266, merged 11:58 UTC): main-branch builds
+now upload to `https://repo.prefix.dev/emscripten-forge/4x` (prefix.dev org
+channel `@emscripten-forge/4x`). The old `https://prefix.dev/emscripten-forge-4x`
+still serves but is frozen from before the rename and will never get
+photutils 3.1.1. The new channel holds every package the old one had (3410
+entries) plus photutils 3.1.1 (`photutils-3.1.1-np23py313h07ed413_0`, built
+from emscripten-forge/recipes PR #7636, uploaded 15:54 UTC) and ujson
+6.1.0. That is what made this bump possible the same day bandaid merged
+#186. environment.yml now lists the new channel (with a comment on the
+rename) and `photutils>=3.1.1`, so a solve against the frozen channel fails
+instead of quietly building an older photutils. A `mamba create --dry-run
+--platform emscripten-wasm32` of environment.yml (minus the pip block)
+against the new channel resolves photutils 3.1.1, python 3.13.1, numpy
+2.5.4, scipy 1.18.0, astropy-base 8.0.2, xeus-python 0.19.0: the versions
+of the current dist-dash build apart from photutils. photutils 3.1.1's
+floors (astropy>=7, numpy>=2, scipy>=1.15) are met, its recipe run deps
+are unchanged (numpy, astropy, scipy, shapely), and the recipe's wasm smoke
+test passed.
+
+Edits in this repo: the pin and its comment in `pixi.toml`; environment.yml
+(channel, photutils floor); the `prepare_batch` call and the
+`make_bandaid_processor` docstring; the processor test; README (two
+mentions); `docs/dashboard.md` (pin history paragraph, and the Metadata
+section, which still quoted the two dropped profile mappings). `pixi run
+test` 608 passed, `pixi run test-js` 105 passed (609 and 105 after the
+review commit below).
+
+Validation, native (2026-11-05, scratchpad pixi env: python 3.13.18, numpy
+2.5.4, astropy 7.2.0, scipy 1.18.1, photutils 3.1.1, twirl 0.6.0, bandaid
+9baaf7c on PYTHONPATH, BANDAID_BALLET_BACKEND=numpy): 155/155 frames in
+78.1 s (65.7 s at e29ed5c in the eloy env). Against the native e29ed5c
+reference (made in the eloy env: numpy 1.26.4, photutils 2.3.0) 0 of 155
+.star files are byte-identical: ra, dec and peak_count identical; x/y
+differ by up to 6.1e-5 px (the numpy-2 float32 centroid rounding, bandaid
+#155, now on both sides of the browser comparison for the first time);
+tot_count differs in 46163 of 46216 matched rows, median 1.9e-6, 99th
+percentile 3.7e-5, max 8.8e-3 relative; count_err max 1.8e-2 relative;
+bkgd_count max 1.2e-3; fwhm max 1.8e-5; one extra TG row (frame -004601,
+SNR ~2) just above min_snr; egain header differs by up to 1.9e-4 (L4's
+per-star median). The reference set for the next bump is
+`~/Downloads/ls_psc_reference_star_9baaf7c/`.
+
+photutils-only A/B, native (2026-11-05): bandaid 9baaf7c run twice in the
+same scratchpad env with only photutils changed (3.0.0 from conda-forge
+versus 3.1.1; numpy 2.5.4, astropy 7.2.0, scipy 1.18.1, twirl 0.6.0, eloy
+a056c91 identical). Same prep frame, 793 targets; row sets identical in
+every filter (TR 10062, TB 7763, TG 13210, L4 15182, the extra TG row in
+both); x, y, fwhm, ra, dec and peak_count identical; tot_count, count_err,
+bkgd_count and the egain header differ at the last bit only (max relative
+2.3e-14, 6.7e-15, 4.7e-16 and 5.1e-15; 0 of 155 files byte-identical for
+that reason). Wall time 101.5 s at 3.0.0 versus 78.1 s at 3.1.1 (user CPU
+254 s versus 108 s). So the 0.9 % tot_count and 1.8 % count_err outliers
+against the e29ed5c reference above come from the reference's older stack
+(numpy 1.26.4, photutils 2.3.0, eloy env), not from photutils 3.1.1;
+bandaid's "output differs only at the last bit" holds for the 3.0.0 ->
+3.1.1 step. Scratchpad outputs: out_9baaf7c/ and out_9baaf7c_pu300/ under
+this session's native-9baaf7c/.
+
+Browser run at 9baaf7c (2026-11-05, dist-dash built from 8420560 against
+the renamed channel; empack_env_meta.json lists
+photutils-3.1.1-np23py313h07ed413_0, so the kernel loads 3.1.1; against the
+manifest the deployed Pages build serves, the kernel differs in exactly
+bandaid, photutils and five pure-Python conda-forge packages that move on
+every rebuild, certifi, platformdirs, pyvo, soupsieve and typing-inspection,
+while numpy, scipy, astropy, twirl and eloy are the same tarballs): 155/155
+frames photometered, 0 skipped, no `[skip]` lines, about 165 s from drop to
+done, median 0.6 s/frame on the status line (per-frame lines 0.4 to 0.5 s
+with 158 to 175 stars). CDS hung and IDIA answered 70 s later, as on
+2026-11-01. Star lists stamped `bandaid-9baaf7c.browser-photom-8420560`;
+zip kept as
+`~/Downloads/ls_psc_subset155-starlists.bandaid-9baaf7c.browser-photom-8420560.zip`.
+Against native 9baaf7c (`~/Downloads/ls_psc_reference_star_9baaf7c/`):
+same schema version, row counts identical in all four filters with no
+one-sided rows, x float32-exact 17970 of 46217 on both sides, max |dx| and
+|dy| 1.2e-4 px, fwhm max 2.2e-5 relative, tot_count max 6.1e-3 (TG
+-045725), count_err max 1.1e-2 (TB -041108), bkgd_count max 1.0e-3, egain
+header differs on every file at about 1e-7: the Ballet sgemm-versus-numpy
+round-off of issue #8, the same picture as at e29ed5c. Against native
+e29ed5c the browser shows exactly what native 9baaf7c shows (the numpy-2
+float32-exact x/y, the extra TG row in -004601, tot_count up to 8.8e-3), so
+the browser and native sides moved together. Playwright driver and compare
+outputs in this session's scratchpad browser-9baaf7c/.

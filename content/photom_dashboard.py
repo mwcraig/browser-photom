@@ -1437,9 +1437,12 @@ def make_bandaid_processor(
                 # raises it about the frame's metadata (since 9baaf7c, also
                 # output keys neither the header nor `user_meta` fill, e.g.
                 # blank form lat/lon on a frame without SITELAT/SITELONG).
-                # Uncaught it would reach `FrameProcessor.run` on every frame,
-                # each paying a full calibration first (the check runs after
-                # detection, FWHM and the CNN). Handled as a prep failure:
+                # Uncaught it would reach `FrameProcessor.run` on every frame
+                # as "FrameMetadataError: /tmp/<name>: ...", and the watch
+                # notebook would retry each file five times. Either way each
+                # attempt pays the calibration (the check runs after
+                # detection, FWHM and the CNN); what this buys is the skip
+                # reason, not less work. Handled as a prep failure:
                 # prep stays None, the next frame retries, the Gaia cooldown
                 # is left alone, no QA row. `exc.reason` leaves out the MEMFS
                 # path, and bandaid's CLI advice ("...; map them in the

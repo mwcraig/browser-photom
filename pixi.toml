@@ -15,12 +15,14 @@ fetch-astrowidgets = "(test -d astrowidgets-src || git clone https://github.com/
 # bandaid commit the dashboard was validated against, so a redeploy cannot
 # silently pick up whatever bandaid main is at build time. 9baaf7c is the
 # merge of bandaid PR #186 (after PR #157): bandaid now requires photutils
-# >= 3.1.1, the first release line with the compiled sigma-clipped
-# `ApertureStats` bandaid #103 / PR #156 wanted (~26 % less time per frame
-# natively, output different only at the last bit), so this is the first
-# pin since 98183ca whose photometry is expected to change. emscripten-forge
-# carries photutils 3.1.1 only on its renamed channel, which is why
-# environment.yml moved channels with this bump. PR #180 makes
+# >= 3.1.1. photutils 3.1 brought the compiled sigma-clipped `ApertureStats`
+# bandaid #103 / PR #156 wanted (bandaid expects ~26 % less time per frame,
+# measured natively against photutils main, not the 3.1.1 release; output
+# different only at the last bit); 3.1.1 is the first photutils on
+# emscripten-forge, so it is the floor the browser build can meet. This is
+# the first pin since 98183ca whose photometry is expected to change.
+# emscripten-forge carries photutils 3.1.1 only on its renamed channel,
+# which is why environment.yml moved channels with this bump. PR #180 makes
 # `prepare_batch` check, before the Gaia query, that the prep frame's
 # metadata can fill every StarList output key; it takes
 # `user_specific_metadata` for that and raises `FrameMetadataError` (a
@@ -28,7 +30,9 @@ fetch-astrowidgets = "(test -d astrowidgets-src || git clone https://github.com/
 # Seestar50 profile no longer maps `site_elev` or `observer` (real Seestar
 # frames never have them), so `make_bandaid_processor` now hands the form's
 # metadata to prep as well as to every frame; without it every frame would
-# fail on those two keys. `photometry.py` changes only by that check and
+# fail on those two keys. It also reports a prep `FrameMetadataError` as a
+# batch prep failure (retried on the next frame) instead of letting it
+# propagate. `photometry.py` changes only by that check and
 # `writers.py` has no diff. The per-frame API the dashboard uses is
 # unchanged since d6ba44a (PR #159): `process_frame(file, prep, *,
 # user_specific_metadata, label, fail_fast)` returns a `FrameResult`

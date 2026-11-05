@@ -2195,9 +2195,10 @@ StarList key that is missing or None (required keys) or absent (optional
 keys, i.e. `stack`). The Seestar50 profile drops `"site_elev": "@SITEELEV"`
 and `"observer": "@obscode"` (no real Seestar frame has either card) and
 keeps `"stack": "@STACKCNT"`. That check is `photometry.py`'s only change;
-`writers.py` has no diff. The rest of e29ed5c..9baaf7c is docs (PRs #168,
-#179), README/CHANGELOG, the `__init__` docstring URL and the cli.py
-`weights` help text. eloy stays a056c91, twirl 0.5.2.
+`writers.py` has no diff. The rest of e29ed5c..9baaf7c is the
+`pyproject.toml` changes (the photutils floor and the photutils-dev source
+rev), docs (PRs #168, #179), README/CHANGELOG, the `__init__` docstring URL
+and the cli.py `weights` help text. eloy stays a056c91, twirl 0.5.2.
 
 For the dashboard: `make_bandaid_processor` called `prepare_batch(path,
 cnn=cnn, config=config)` with no user metadata, so at 9baaf7c every prep
@@ -2213,11 +2214,27 @@ prep call now gets the same, read live per attempt:
         user_specific_metadata=dict(user_meta),
     )
 
-`FrameMetadataError` handling is unchanged (it propagates, as the
-observation-time one always has). The fake `prepare_batch` in
-`tests/test_bandaid_processor.py` records what it was given, and a new test
-checks prep gets a copy of the live form metadata (a later edit does not
-rewrite what one attempt saw, and does reach the next attempt).
+The fake `prepare_batch` in `tests/test_bandaid_processor.py` records what
+it was given (and no longer defaults it, so every test fails if the
+processor stops passing it), and a new test checks prep gets a copy of the
+live form metadata (a later edit does not rewrite what one attempt saw, and
+does reach the next attempt).
+
+After review (second commit), `make_bandaid_processor` also catches a
+`FrameMetadataError` from `prepare_batch` (a `FrameError`, so the
+`BatchPrepError` clause missed it) and reports it as `batch prep failed:
+<reason>`: prep stays unset, the next frame retries, the Gaia cooldown is
+untouched, no QA row. The realistic trigger is blank form latitude or
+longitude (the form calls them optional) on a frame without
+`SITELAT`/`SITELONG`. The reason drops the MEMFS path, and bandaid's CLI
+advice ("map them in the instrument profile's header_map or supply them
+with --user-metadata") is replaced by "(the form or the frame header has to
+supply them)". Uncaught, every frame of the folder paid a full calibration
+(the check runs after detection, the FWHM and the CNN) and failed through
+`FrameProcessor.run` as "FrameMetadataError: /tmp/<name>: ...", and the
+watch notebook would have retried each file five times. The same clause now
+covers the observation-time and instrument-detection `FrameMetadataError`s
+from prep, which used to propagate the same way.
 
 The channel. emscripten-forge renamed its channel on 2026-11-05
 (emscripten-forge/recipes PR #8266, merged 11:58 UTC): main-branch builds
@@ -2244,6 +2261,22 @@ Edits in this repo: the pin and its comment in `pixi.toml`; environment.yml
 `make_bandaid_processor` docstring; the processor test; README (two
 mentions); `docs/dashboard.md` (pin history paragraph, and the Metadata
 section, which still quoted the two dropped profile mappings). `pixi run
-test` 608 passed, `pixi run test-js` 105 passed.
+test` 608 passed, `pixi run test-js` 105 passed (609 and 105 after the
+review commit below).
 
-Validation: pending (native and browser LS Psc rerun).
+Validation, native (2026-11-05, scratchpad pixi env: python 3.13.18, numpy
+2.5.4, astropy 7.2.0, scipy 1.18.1, photutils 3.1.1, twirl 0.6.0, bandaid
+9baaf7c on PYTHONPATH, BANDAID_BALLET_BACKEND=numpy): 155/155 frames in
+78.1 s (65.7 s at e29ed5c in the eloy env). Against the native e29ed5c
+reference (made in the eloy env: numpy 1.26.4, photutils 2.3.0) 0 of 155
+.star files are byte-identical: ra, dec and peak_count identical; x/y
+differ by up to 6.1e-5 px (the numpy-2 float32 centroid rounding, bandaid
+#155, now on both sides of the browser comparison for the first time);
+tot_count differs in 46163 of 46216 matched rows, median 1.9e-6, 99th
+percentile 3.7e-5, max 8.8e-3 relative; count_err max 1.8e-2 relative;
+bkgd_count max 1.2e-3; fwhm max 1.8e-5; one extra TG row (frame -004601,
+SNR ~2) just above min_snr; egain header differs by up to 1.9e-4 (L4's
+per-star median). The reference set for the next bump is
+`~/Downloads/ls_psc_reference_star_9baaf7c/`.
+
+Browser run and a photutils-only A/B: pending (filled in before merge).

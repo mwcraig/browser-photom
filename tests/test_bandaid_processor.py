@@ -34,6 +34,16 @@ class FrameError(Exception):
     pass
 
 
+class FrameMetadataError(FrameError):
+    def __init__(self, reason, *, file=None):
+        self.reason = reason
+        self.file = file
+        super().__init__(reason)
+
+    def __str__(self):
+        return f"{self.file}: {self.reason}" if self.file is not None else self.reason
+
+
 class Clock:
     def __init__(self):
         self.now = 1000.0
@@ -51,6 +61,7 @@ class FakeBandaid(types.ModuleType):
 
     BatchPrepError = BatchPrepError
     FrameError = FrameError
+    FrameMetadataError = FrameMetadataError
     GaiaQueryError = GaiaQueryError
 
     def __init__(self):
@@ -67,7 +78,7 @@ class FakeBandaid(types.ModuleType):
     def PhotometryConfig(self):  # noqa: N802 - mirrors bandaid's class name
         return object()
 
-    def prepare_batch(self, path, *, cnn, config, user_specific_metadata=None):
+    def prepare_batch(self, path, *, cnn, config, user_specific_metadata):
         self.prep_calls.append(path)
         self.prep_metadata.append(user_specific_metadata)
         if self.prep_outcomes:
@@ -163,8 +174,9 @@ def build(fake, tmp_path):
         qa = []
         kw.setdefault("retry_hint", "drop the folder again to retry now")
         proc = make_bandaid_processor(
-            {} if user_meta is None else user_meta, tmp_path, log=lines.append, cnn=object(), provenance="tag",
-            clock=clock, on_qa=lambda *a: qa.append(a), **kw,
+            {} if user_meta is None else user_meta, tmp_path,
+            log=lines.append, cnn=object(), provenance="tag", clock=clock,
+            on_qa=lambda *a: qa.append(a), **kw,
         )
         return proc, lines, clock, qa
     return build
@@ -302,6 +314,28 @@ def test_prep_gets_a_copy_of_the_live_form_metadata(build, fake):
     # ...but the edit reaches the next prep attempt.
     assert proc("b.fit", "b.fit") is None
     assert fake.prep_metadata[1] == {"observer": "XYZ", "site_elev": 250.0}
+
+
+def test_missing_output_metadata_in_prep_is_a_prep_failure(build, fake):
+    # Blank form lat/lon on a frame without SITELAT/SITELONG: bandaid
+    # 9baaf7c's prep raises FrameMetadataError, a FrameError.
+    proc, lines, _clock, qa = build()
+    fake.prep_outcomes = [(FrameMetadataError(
+        "the metadata of the frame the batch is prepared from lacks required "
+        "output keys: site_lat, site_lon; map them in the instrument "
+        "profile's header_map or supply them with --user-metadata",
+        file="/tmp/a.fit",
+    ), 2.0)]
+    reason = proc("a.fit", "a.fit")
+    assert reason.startswith("batch prep failed: ")
+    assert "site_lat, site_lon" in reason
+    assert "/tmp/" not in reason
+    assert "--user-metadata" not in reason
+    assert qa == []
+    # Prep is retried at once on the next frame, with no Gaia cooldown.
+    assert proc("b.fit", "b.fit") is None
+    assert len(fake.prep_calls) == 2
+    assert not any("Gaia" in line for line in lines)
 
 
 @pytest.mark.parametrize("took", [0.3, GAIA_SLOW_PREP_S])

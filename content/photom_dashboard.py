@@ -1251,9 +1251,13 @@ def make_bandaid_processor(
     prep failure, a per-frame `FrameError` (bandaid's ``skipped`` outcome, or
     one the writer raises), or an unexpected error inside bandaid (its
     ``error`` outcome, reported as ``<ExceptionType>: <message>``, the same
-    text `FrameProcessor` would have produced had it propagated). Only an
-    exception outside bandaid's per-frame step -- a failed write that is not
-    a `FrameError`, a hook that raises -- propagates.
+    text `FrameProcessor` would have produced had it propagated). A
+    `FrameMetadataError` from `prepare_batch` (output keys the form and the
+    header leave unfilled, no observation time, an undetectable instrument)
+    is reported as a batch prep failure too. Any other exception from
+    `prepare_batch` that is not a `BatchPrepError`, and any exception outside
+    bandaid's per-frame step -- a failed write that is not a `FrameError`, a
+    hook that raises -- propagates.
     The `.star` is named `starlist_name(<stem of name>, tag)`, where the tag
     is this build's `provenance_tag` (bandaid and browser-photom SHAs) unless
     ``provenance`` overrides it.
@@ -1323,6 +1327,7 @@ def make_bandaid_processor(
     from bandaid import (
         BatchPrepError,
         FrameError,
+        FrameMetadataError,
         GaiaQueryError,
         PhotometryConfig,
         prepare_batch,
@@ -1427,6 +1432,25 @@ def make_bandaid_processor(
                 # Unchanged for every cause: feedback reports and the view's
                 # "[skip]" line show the "batch prep failed: " prefix.
                 return f"batch prep failed: {exc}"
+            except FrameMetadataError as exc:
+                # A `FrameError`, not a `BatchPrepError`, because bandaid
+                # raises it about the frame's metadata (since 9baaf7c, also
+                # output keys neither the header nor `user_meta` fill, e.g.
+                # blank form lat/lon on a frame without SITELAT/SITELONG).
+                # Uncaught it would reach `FrameProcessor.run` on every frame,
+                # each paying a full calibration first (the check runs after
+                # detection, FWHM and the CNN). Handled as a prep failure:
+                # prep stays None, the next frame retries, the Gaia cooldown
+                # is left alone, no QA row. `exc.reason` leaves out the MEMFS
+                # path, and bandaid's CLI advice ("...; map them in the
+                # instrument profile's header_map or supply them with
+                # --user-metadata") is cut: a browser user can act on neither.
+                reason = exc.reason
+                if (cut := reason.find("; map them")) >= 0:
+                    reason = reason[:cut]
+                return (f"batch prep failed: {reason} (the form or the frame "
+                        f"header has to supply them)"
+                        if cut >= 0 else f"batch prep failed: {reason}")
             # No clear_gaia() here: once prep exists it is never attempted
             # again until `reset()`, which clears the cooldown itself.
             log(f"Batch prep done: {len(batch['prep'].photometry_coords)} photometry stars.")

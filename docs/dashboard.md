@@ -209,9 +209,18 @@ naming the keys. The Seestar50 profile no longer maps `site_elev` or
 `observer` (no Seestar frame carries `SITEELEV` or `obscode`), so
 `make_bandaid_processor` now passes `user_specific_metadata=dict(user_meta)`
 to `prepare_batch` as well as to every `process_frame`; without it every
-frame would fail on those two keys. The `FrameMetadataError` propagates out
-of the processor's `process_frame` as the observation-time one always has,
-so `FrameProcessor` reports it and prep stays unset for the next frame.
+frame would fail on those two keys. `make_bandaid_processor` now catches a
+`FrameMetadataError` from `prepare_batch` (this check, and the
+observation-time and instrument-detection ones that used to propagate to
+`FrameProcessor`) and reports it as `batch prep failed: <reason>`, like a
+non-Gaia `BatchPrepError`: prep stays unset and the next frame retries at
+once, the Gaia cooldown is untouched, and there is no QA row. The reason
+leaves out the MEMFS path, and for missing output keys bandaid's CLI advice
+("map them in the instrument profile's header_map or supply them with
+--user-metadata") is replaced by "(the form or the frame header has to
+supply them)". Uncaught, every frame of the folder would have paid a full
+calibration (the check runs after detection, the FWHM and the CNN) before
+failing.
 emscripten-forge has photutils 3.1.1 only on the channel it renamed the
 same day (emscripten-forge/recipes PR #8266): environment.yml now points at
 `https://repo.prefix.dev/emscripten-forge/4x` instead of the frozen
@@ -619,7 +628,6 @@ metadata (`bandaid-src/src/bandaid/meta_json_files/Seestar50/profile.json`):
 with no mapping for `site_elev` or `observer` (until the 9baaf7c pin the
 profile mapped them to `@SITEELEV` and `@obscode`, cards no Seestar frame
 has),
-
 and `user_specific_metadata` (the dict built by `validate_metadata` and passed
 through as `user_meta`) is applied *last*, overriding whatever the header supplied
 (the `metadata.update(user_specific_metadata)` step in
@@ -633,7 +641,11 @@ by contrast, do have a header fallback: `validate_metadata` omits `site_lat`/
 `site_lon` from the returned dict when the field is left blank, rather than
 defaulting it to anything, specifically so the header value wins
 (`test_blank_lat_lon_are_omitted_so_the_header_supplies_them`,
-`tests/test_metadata.py`). `_meta` is read fresh on every frame and every prep attempt
+`tests/test_metadata.py`). They are optional only when the header has them:
+since 9baaf7c, blank latitude or longitude on a frame without
+`SITELAT`/`SITELONG` fails batch prep with "batch prep failed: ... lacks
+required output keys: site_lat, site_lon (the form or the frame header has
+to supply them)", retried on the next frame, rather than passing silently. `_meta` is read fresh on every frame and every prep attempt
 (`DashboardView._meta`), so editing the form between dropped
 folders takes effect on the next run without restarting anything.
 

@@ -240,7 +240,7 @@ rerun found that a fresh kernel build picks up twirl 0.6.0, which fails every
 plate solve on wasm32, so environment.yml now pins twirl 0.5.2. The larger
 browser-versus-native position difference,
 about 3e-5 px from float32 rounding under numpy 2, is bandaid #155 and is in
-no pin yet. This is the one place that difference is described; README, PROGRESS and
+no pin yet. This is the one place that difference is described; `docs/development.md`, PROGRESS and
 the code comments point here. Everything in `photom_dashboard.py` above
 `make_bandaid_processor` is import-free beyond the standard library
 (a rule its module docstring states), so the host test environment needs neither numpy,

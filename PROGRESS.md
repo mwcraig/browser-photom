@@ -51,7 +51,7 @@ partially done; remaining checks listed at the bottom.
   can't point at the proxy; instead the helper replaces the `SimbadClass.tap` property
   and wraps `VizierClass._server_to_url` (idempotent). Also forces the null keyring
   backend and calls `pyodide_http.patch_all()`.
-- Caveat (also in README): the proxy is local-only; a static deployment (GitHub Pages)
+- Caveat (also in docs/notebooks.md, formerly the README): the proxy is local-only; a static deployment (GitHub Pages)
   would need a hosted CORS proxy.
 
 ## Remaining browser checks

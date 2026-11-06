@@ -316,7 +316,15 @@ other is forwarded only the first time its logger and message template are
 seen, until `reset()`, because the below-the-horizon, beyond-the-catalog-
 margin and dropped-filter warnings can fire on every frame, up to three
 lines a frame. A failing `log` is swallowed, and the logger's level and
-propagation are left alone.
+propagation are left alone. The handler only speaks once a server has
+failed, so a prep whose first VizieR mirror hangs rather than refuses was
+still 70 s of silence after the weights download (seen on the deployed
+build, 2026-11-05). So `process_frame` logs `Preparing the batch from
+<name>: star detection, plate solve and the Gaia query (a Gaia server that
+hangs costs about 70 s before the next one is tried)...` just before each
+`prepare_batch` call: on the first frame, on every retry after a prep
+failure, and on the first frame after a cooldown, never on a frame skipped
+inside one or once prep exists.
 
 The pipeline-setup-failure latch does not live in `DashboardView` at all: it is
 a separate, tested class (`photom_dashboard.LazyProcessor`) that
@@ -938,7 +946,7 @@ module docstring; `FrameProcessor`).
 |---|---|
 | `tests/test_chunk_assembly.py` | `ChunkAssembler` (ordering, out-of-order/duplicate/mismatched-`nchunks` rejection, basename sanitization against `../` paths, binary exactness, multiple files in flight) and `FrameProcessor` (MEMFS copy removed on success, on a returned skip string, and on a raised exception) |
 | `tests/test_dashboard_flow.py` | `PhotometryDashboard`'s full message protocol end to end, via a `FakeWidget` stand-in for anywidget: manifest → chunk/ack sequencing → file_done → run_done, cancel mid-upload, zip_request/zip/zip_error, malformed and buffer-less chunk messages, a second manifest restarting a finished run, and `hidden_episode` (recorded mid-run, after `run_done` and after a cancel; the 2 s threshold; reset by a new manifest but not a refused one; dismiss; the banner's "keep this tab visible" instruction only mid-run; malformed payloads ignored with no `error`; the `_HANDLERS` row's failure reply pinned to `hidden_episode_error`; a nonpositive `slowdown_factor` refused), and the reporting hooks (a raising hook costs nothing; a cancel with a reason hands `on_end` its reason and message, the first cancel's only; two-argument `on_end` hooks still called for `done` and bare cancels) |
-| `tests/test_bandaid_processor.py` | `make_bandaid_processor` against stub `bandaid`, `env_setup` and `ballet_sgemm` modules in `sys.modules`: bandaid warnings forwarded to the log as one `bandaid: ` line (bandaid's longest real per-server line whole, a multi-line message cut to its first line, an over-long one cut to 200 characters), `exc_info` records and INFO left out, non-catalog templates once per run until `reset()` or a rebuild, catalog warnings every time, one handler however often the processor is built, a raising `log` swallowed; a non-Gaia `BatchPrepError` retried on the next frame, a fast Gaia failure (0.3 s, and exactly at the 10 s threshold) likewise, a slow one keeping its `batch prep failed: ` reason and starting a 60 s cooldown whose frames are skipped with the short reason without calling `prepare_batch` or emitting QA, the retry after it, doubling to the 600 s cap, a non-Gaia failure leaving the step alone, the caller's `retry_hint` in the cooldown line, a new drop after success and `reset()` starting over |
+| `tests/test_bandaid_processor.py` | `make_bandaid_processor` against stub `bandaid`, `env_setup` and `ballet_sgemm` modules in `sys.modules`: bandaid warnings forwarded to the log as one `bandaid: ` line (bandaid's longest real per-server line whole, a multi-line message cut to its first line, an over-long one cut to 200 characters), `exc_info` records and INFO left out, non-catalog templates once per run until `reset()` or a rebuild, catalog warnings every time, one handler however often the processor is built, a raising `log` swallowed; the `Preparing the batch from <name>...` line before every `prepare_batch` call and only then, a non-Gaia `BatchPrepError` retried on the next frame, a fast Gaia failure (0.3 s, and exactly at the 10 s threshold) likewise, a slow one keeping its `batch prep failed: ` reason and starting a 60 s cooldown whose frames are skipped with the short reason without calling `prepare_batch` or emitting QA, the retry after it, doubling to the 600 s cap, a non-Gaia failure leaving the step alone, the caller's `retry_hint` in the cooldown line, a new drop after success and `reset()` starting over |
 | `tests/test_metadata.py` | `validate_metadata`'s required/optional field rules, numeric parsing, and lat/lon range checks |
 | `tests/test_run_state.py` | `RunState` counters — uploaded/processed/skipped/remaining bookkeeping, `finished`, and that `remaining` never goes negative |
 | `tests/test_zip.py` | `build_results_zip` — flattening to basenames, `.star`-only filtering, sorted and byte-deterministic output, and its error cases (empty/missing directory) |

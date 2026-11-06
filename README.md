@@ -1,9 +1,11 @@
 # browser-photom
 
-- [bandaid](https://github.com/mwcraig/bandaid), the photometry pipeline this
-  dashboard runs in the browser.
-- [Adding a new telescope to bandaid](https://mwcraig.github.io/bandaid/howto/add_a_telescope/),
-  bandaid's guide to writing an instrument profile.
+## Help us out: right now photometry is only available on the SeeStar S50, tested on a limited number of units
+
+- Do your SeeStar S50 photometry by [going here](https://mwcraig.github.io/browser-photom/) and follow the instructions on the page. Check the box for sending a report on how it goes.
+- Go to [the actual photometry package -- naming rights available!](https://github.com/mwcraig/bandaid) and look at how to [add a new smart telescope to the photometry software](https://mwcraig.github.io/bandaid/howto/add_a_telescope/). _This looks complicated but you will get a lot of help with the technical side -- providing some sample images is a useful contribution!_
+
+## You can safely ignore the rest of this
 
 browser-photom is a drag-and-drop photometry dashboard that runs entirely in
 the browser. It runs bandaid, compiled to WebAssembly, on a folder of Seestar

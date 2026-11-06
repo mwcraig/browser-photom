@@ -1,291 +1,50 @@
 # browser-photom
 
-A [JupyterLite](https://jupyterlite.readthedocs.io/) site with an
-[xeus-python](https://github.com/jupyterlite/xeus) (WebAssembly) kernel that has
-[astrowidgets](https://github.com/astropy/astrowidgets) installed from the tip of `main`,
-for experimenting with image-display-widget notebooks entirely in the browser.
+- [bandaid](https://github.com/mwcraig/bandaid), the photometry pipeline this
+  dashboard runs in the browser.
+- [Adding a new telescope to bandaid](https://mwcraig.github.io/bandaid/howto/add_a_telescope/),
+  bandaid's guide to writing an instrument profile.
 
-## Usage
+browser-photom is a drag-and-drop photometry dashboard that runs entirely in
+the browser. It runs bandaid, compiled to WebAssembly, on a folder of Seestar
+FITS frames: plate solving, photometry and a `.star` starlist per frame.
+Nothing is uploaded anywhere; the frames stay on your machine, and the
+starlists are downloaded as a zip.
 
-```sh
-pixi run build   # clone/update astrowidgets, solve the WASM env, build the site into dist/
-pixi run serve   # serve dist/ at http://localhost:8000
-```
+The dashboard is live at <https://mwcraig.github.io/browser-photom/>.
 
-Then open <http://localhost:8000>, open `demo.ipynb`, and run it.
+## How to use it
 
-### Local images (any browser)
+1. Open the dashboard and fill in the form (your AAVSO observer code and the
+   site elevation).
+2. Drop a folder of Seestar FITS frames onto the drop zone, and keep the tab
+   visible while it runs.
+3. When the run finishes, download the zip of starlists.
 
-The **local helper** serves a directory of FITS files over localhost HTTP so
-notebooks can list and open them in any browser — no File System Access API, no
-extension, no per-session permission grants. Run it in a second terminal:
+More detail: [docs/using-the-dashboard.md](docs/using-the-dashboard.md).
 
-```sh
-pixi run helper ~/Downloads/ey_uma   # image server + CORS proxy on http://localhost:8001
-```
-
-then in a notebook (see `local_images.ipynb` for the full flow):
-
-```py
-import helper
-helper.list_images()
-hdul = helper.open_fits("ey-uma-S001-R001-C001-rp.fit")
-```
-
-Only requests from the site origin (`http://localhost:8000` by default; see
-`--allow-origin`) are served, so other websites can't read your files while the
-helper runs. An earlier approach using the `jupyterlab-filesystem-access`
-extension was removed; see `docs/filesystem-access-notes.md` for what was
-learned.
-
-### Local images by drag-and-drop (no helper)
-
-An alternative to the helper that needs **no background service**: drop files
-straight into the file browser and let a running notebook process and delete
-them as they arrive, so browser storage only ever holds a file or two.
-
-1. `pixi run build` + `pixi run serve` (the helper is *not* needed).
-2. Open `watch_uploads.ipynb` and run all cells; the last cell polls the
-   `incoming/` folder once a second.
-3. In the file browser, open `incoming/` and drag a **folder** of FITS files
-   into it. Files inside a dropped folder upload sequentially, which keeps
-   storage bounded; loose files dropped together would upload in parallel, so
-   one notebook cell installs a page-level guard (JS run on the main thread)
-   that rejects loose-file drops on the file browser with a warning.
-4. Each image prints one line (filename + header cards) and then disappears
-   from the file browser. Stop the loop by creating a file named `STOP` in
-   `incoming/`, or let the idle timeout expire.
-
-Unlike the helper this works on a static deployment (GitHub Pages etc.), at
-the cost of copying each image through browser storage once.
-
-### Real photometry on dropped folders
-
-`watch_photometry.ipynb` is the drag-and-drop loop above with the simulated
-processing step replaced by the actual
-[bandaid](https://github.com/mwcraig/bandaid) pipeline (pinned to commit `9baaf7c`,
-the bandaid PR #186 merge; photutils >= 3.1.1; its numpy-only Ballet
-centroider needs no jax): the first uploaded frame
-that yields an FWHM drives batch prep (source detection, Gaia-DR3-via-VizieR query, contamination
-flagging), then every frame is plate-solved, photometered, written to a
-per-frame `.star` file in `results/`, and deleted from `incoming/`. A final
-cell plots the light curve of a target star from the accumulated results.
-
-The ~39 MB Ballet CNN weights are downloaded from HuggingFace on first run and
-cached in browser storage (IndexedDB), so later sessions skip the download.
-All the network calls (VizieR or, as a last resort, GAVO for Gaia;
-HuggingFace for the weights) are CORS-clean — no helper or proxy
-is needed. Note `results/` also lives in browser storage; delete it from the
-file browser when done to reclaim space.
-
-Two operational rules matter for timing here (measurements in
-`docs/speedup-plan-2026-08.md`): keep the browser tab in its own **visible**
-window — a backgrounded tab is throttled by Chrome and runs about 7x slower,
-because all contents-drive I/O is brokered on the (throttled) main thread —
-and keep the dropped folder **closed** in the file browser, which is 6.5 vs
-3.4 s/frame: an open listing makes JupyterLab re-poll the drive on every
-tick. The photometry dashboard below removes the second rule; the
-visible-window rule still applies there too, but the dashboard now warns about
-it itself (see below).
-
-### Photometry dashboard (no Jupyter UI)
-
-A [Voici](https://github.com/voila-dashboards/voici) deployment of the same
-real bandaid pipeline as `watch_photometry.ipynb`, for someone who doesn't
-want to touch a notebook: fill in a small metadata form, drag a folder of
-FITS frames onto a drop zone, watch a progress bar, then click one button to
-download a zip of the `.star` starlists. Every `.star` file name and the zip
-name carry the bandaid and browser-photom commit SHAs that produced them
-(`<stem>.bandaid-<sha>.browser-photom-<sha>.star`), since the starlist schema
-cannot record software versions yet; `pixi run build-info` (run by both build
-tasks) writes those SHAs to a gitignored `content/build_info.py`.
+## Development
 
 ```sh
-pixi run build-dash   # build content/ into dist-dash/ with voici, in a separate pixi env
-pixi run serve-dash   # serve dist-dash/ at http://localhost:8010
+pixi run build-dash   # build the dashboard into dist-dash/
+pixi run serve-dash   # serve it at http://localhost:8010
+pixi run test         # host-side pytest
+pixi run test-js      # Node tests for content/dropzone.js
 ```
 
-Then open
-<http://localhost:8010/voici/render/photometry_dashboard.html> directly —
-Voici's own index page also lists the developer notebooks (`demo.ipynb`,
-`watch_photometry.ipynb`, ...), which isn't what a non-Jupyter user should be
-looking at.
+Docs:
 
-The same build is published automatically to GitHub Pages at
-<https://mwcraig.github.io/browser-photom/> on every push to `main`
-(`.github/workflows/pages.yml`). There the root page redirects straight to the
-dashboard (`pages/index.html` replaces Voici's index); the developer notebook
-list is still reachable at
-<https://mwcraig.github.io/browser-photom/voici/>. Only the dashboard is
-meant to work on the public site — `local_images.ipynb` and the astroquery
-notebooks need the `localhost` helper described below.
-
-The form needs an AAVSO **observer code** and the site's **elevation** in
-metres; latitude and longitude come from the frame headers (`SITELAT`/
-`SITELONG`) and only need to be filled in to override what the headers say.
-
-Drop one folder at a time, with its FITS files directly inside it — not
-nested in subfolders — or use the keyboard-accessible "…or choose a folder"
-button next to the drop zone; a nested export has to be dropped one leaf
-folder at a time. `results/` accumulates `.star` files across every folder
-dropped in one browser session, so the download button always bundles
-everything so far, but it's cleared automatically on the very first drop
-after a fresh page load, so a new session never inherits a previous one's
-leftovers.
-
-`watch_photometry.ipynb` remains the developer/debug path — same pipeline,
-run from a notebook one frame at a time, with the file-browser watch loop
-described above (and its two operational rules). The dashboard removes the
-closed-file-browser rule — images never touch the contents drive — but the
-visible-tab rule still applies: a hidden tab slows a dashboard run about 7x
-too. The dashboard says so at each point it matters: a dialog before the run
-starts (with a "Don't show this again" box, remembered in the browser; a
-"Show the tab warning again" button appears under the drop zone to undo it), a
-notice above the progress bar for the whole run, a one-time reminder if the
-pointer leaves the page mid-run, a "⚠ Slowed ~7×" prefix on the tab title
-while the tab is hidden, and, on coming back, a banner saying how long the tab
-was hidden and how many frames finished meanwhile — even when the run finished
-while you were away. To do other things during a run, drag the dashboard's tab
-into its own window and keep at least part of that window uncovered: a window
-that other windows cover completely is throttled just like a hidden tab. See
-`docs/dashboard.md` for the dashboard's architecture, wire protocol, and known
-limits, chief among them: **no resume across a page reload** — refreshing the
-tab mid-run loses progress, unlike the watch-loop notebooks' IndexedDB-backed
-queue.
-
-### astroquery (through the same helper)
-
-astroquery is installed in the kernel, but astronomy services (SIMBAD, VizieR, Gaia,
-MAST, ...) don't send CORS headers, so the browser blocks direct responses. The
-helper proxies them at `/proxy/<full-url>`:
-
-```py
-import helper
-helper.use_proxy()   # routes SIMBAD + VizieR through the proxy
-
-from astroquery.simbad import Simbad
-Simbad.query_object("M31")
-```
-
-**Caveat:** the helper only exists locally. A static deployment (GitHub Pages etc.)
-would need a hosted CORS proxy instead.
-
-## Tests
-
-```sh
-pixi run test      # host-side pytest over content/photom_dashboard.py
-pixi run test-js   # Node's built-in test runner over content/dropzone.js
-```
-
-`pixi run test` needs neither numpy, astropy nor bandaid — the
-photometry step is injected into `PhotometryDashboard` as a plain
-`process_frame(path, name)` callable, so the tests exercise metadata
-validation, chunk assembly, run-state bookkeeping, zip building, and the full
-message-handler protocol against a fake widget. `tests/test_dashboard_view.py`
-also builds the real ipywidgets view headlessly to check the tab-visibility
-notice and banner; it needs ipywidgets and anywidget, which the default pixi
-environment has (anywidget is pinned there for the build).
-`pixi run test-js` has no npm dependencies; it runs directly against
-`content/dropzone.js` with `node --test`.
-
-## Layout
-
-- `environment.yml` — the WASM kernel environment (emscripten-forge + conda-forge noarch).
-  astrowidgets is installed via the `pip:` section from the local `astrowidgets-src/` clone;
-  jupyterlite-xeus's pip support does **not** resolve dependencies, so every runtime dep must
-  be listed as a conda package here. Uses `astropy-base` (full astropy, none of the
-  metapackage's "recommended" extras like pandas/pyarrow/dask — pandas still appears because
-  bqplot requires it).
-- `astrowidgets-src/` — clone of astropy/astrowidgets `main`, refreshed by `pixi run build`.
-- `content/demo.ipynb` — demo notebook using `astrowidgets.bqplot.ImageWidget`
-  (synthetic data, no helper needed).
-- `content/local_images.ipynb` — demo notebook loading local FITS files through the helper.
-- `content/watch_uploads.ipynb` — drag-and-drop plumbing testbed: polls `incoming/`,
-  prints header cards per uploaded FITS file (simulated photometry), deletes it to
-  keep browser storage bounded.
-- `content/watch_photometry.ipynb` — the same watch loop running the real bandaid
-  pipeline: batch prep off the first frame, per-frame photometry + `.star` output in
-  `results/`, light-curve plot at the end.
-- `content/incoming/` — drop target watched by the two watch notebooks.
-- `content/photometry_dashboard.ipynb` — the Voici dashboard as one cell: calls
-  `photom_dashboard.run_dashboard()` and lets the widgets do the rest. Rendered at
-  `/voici/render/photometry_dashboard.html`.
-- `content/photom_dashboard.py` — kernel-side logic for the dashboard: metadata
-  validation, run bookkeeping (`RunState`), chunked-upload assembly straight into MEMFS
-  (`ChunkAssembler`), per-frame processing (`FrameProcessor`), the `.star` zip builder,
-  and the widget message handler (`PhotometryDashboard`); `make_bandaid_processor()`
-  lazily builds the real bandaid pipeline, and is the one place this repo calls it
-  (the watch notebook goes through it too). The centroid policy comes from bandaid
-  itself (CNN for the brightest ~30 stars, a WCS offset plane for the rest; bandaid
-  PR #147), so the dashboard and the bandaid CLI share one policy; `docs/dashboard.md`
-  describes it and what still separates their outputs. Everything above that function is
-  import-free beyond the standard library, so the tests need neither numpy, astropy,
-  nor bandaid.
-- `content/dashboard_view.py` — the ipywidgets shell: one `VBox` with three panels
-  (setup form, running progress, done/download) that are shown and hidden rather than
-  swapped in and out of `children`, so the drop zone's front end is never torn down
-  mid-upload.
-- `content/dropzone.py` / `content/dropzone.js` — the three anywidgets (`DropZone`,
-  `ZipDownload`, and the tester-report opt-in `ConsentCheckbox`, which confirms in a
-  dialog before it ticks) sharing one ESM front end; the JS enumerates a dropped folder itself
-  and streams each FITS file to the kernel over the widget comm in `CHUNK_BYTES`-sized
-  (1 MiB) chunks, so images never touch the contents drive — only the `.star` outputs do.
-- `content/ballet_sgemm.py` — the Ballet CNN loader (weights download/cache plus the
-  sgemm-routed `SgemmBallet`), imported by both `watch_photometry.ipynb` and the
-  dashboard, so there is one implementation instead of two copies to keep in sync.
-- `content/spike_comm.ipynb` — standalone throughput probe: times a binary comm buffer
-  round trip in both directions at several sizes, to check whether `CHUNK_BYTES` (in
-  `content/photom_dashboard.py`) should move off 1 MiB.
-- `bandaid-src/`, `eloy-src/`, `aavso-starlist-schema-src/` — clones fetched by
-  `pixi run build` (bandaid pinned to commit `9baaf7c`, the bandaid PR #186
-  merge; photutils >= 3.1.1; eloy pinned to the commit bandaid pins), installed into the kernel via the `pip:`
-  section.
-- `content/helper.py` — notebook-side client for the local helper: `list_images()`,
-  `open_fits()`, and `use_proxy()` (routes astroquery SIMBAD/VizieR through the proxy);
-  also patches requests via pyodide-http.
-- `scripts/local_helper.py` — stdlib-only local helper (`pixi run helper DIR`, port 8001);
-  serves `DIR` at `/list` + `/files/<name>` (with Range support) and CORS-proxies
-  `/proxy/<full-target-url>`, restricted to allowed browser origins.
-- `scripts/write_build_info.py` — the `build-info` pixi task (a dependency of
-  `build` and `build-dash`): writes the gitignored `content/build_info.py` with the
-  bandaid and browser-photom SHAs that the dashboard stamps into every `.star` and
-  zip name (`-dirty` appended for a checkout with tracked changes).
-- `docs/filesystem-access-notes.md` — record of the abandoned
-  jupyterlab-filesystem-access approach to local file access.
-- `docs/dashboard.md` — the photometry dashboard's architecture, wire protocol, and
-  known limits.
-- `docs/speedup-plan-2026-08.md` — performance facts and the next optimization plan for
-  in-browser photometry (per-stage profile, the original plane-fit design, since
-  retired here in favour of bandaid's own position policy); newer than `PROGRESS.md`'s
-  performance sections and referenced from them.
-- `pytest.ini` — points `pytest` at `tests/` and puts `content/` on `pythonpath`, since
-  the kernel imports these modules by sitting in the same directory rather than as an
-  installed package.
-- `tests/` — host-side tests (`pixi run test`), covering
-  `content/photom_dashboard.py`'s metadata validation, chunk assembly, run-state
-  bookkeeping, zip building, the provenance stamp in output names (and its
-  generator script), and the full message-handler flow including the
-  `hidden_episode` message (all against a fake widget and an injected
-  `process_frame` callable).
-- `tests/test_tab_visibility.py`, `tests/test_dashboard_view.py` — the
-  tab-visibility warnings' kernel side: the banner/notice text builders, and the
-  `DashboardView` built headlessly (needs ipywidgets and anywidget, both in the
-  default pixi env) with messages injected through the drop zone's comm handler.
-- `tests/js/dropzone.test.mjs` — tests (`pixi run test-js`, Node's built-in test
-  runner, no npm dependencies) for `content/dropzone.js`'s FITS-name filtering,
-  folder-entry collection, chunk slicing, the drop-validation rules
-  (`validateFound`: flat-folder-only, empty-file filtering), and the
-  tab-visibility helpers (hidden-episode timing, tab title, the dialog's
-  "Don't show this again" storage).
-- `pixi.toml` — host-side build tooling (jupyterlite-core, jupyterlite-xeus); also the
-  `dash` feature environment (`voici`, pinned `anywidget`) used by `pixi run build-dash`.
-- `PLAN.md` — the original three-step plan (trim the WASM env, local file access,
-  astroquery) this repo started from; historical, kept as written, superseded in part
-  per its own header note.
-- `PROGRESS.md` — dated log of what's been built and browser-verified, in the order it
-  happened; the primary record of what's done vs. still open.
-
-## Notes
-
-- Only the **bqplot** backend of astrowidgets works in the browser. The ginga backend needs
-  `aggdraw`, a compiled C extension with no emscripten-forge build.
+- [docs/using-the-dashboard.md](docs/using-the-dashboard.md): user guide for
+  the dashboard, the Pages URL, and running it locally.
+- [docs/dashboard.md](docs/dashboard.md): the dashboard's architecture, wire
+  protocol, build and environment, known limits, and tests.
+- [docs/development.md](docs/development.md): running the tests and a
+  file-by-file map of the repo.
+- [docs/notebooks.md](docs/notebooks.md): the developer notebooks in the
+  JupyterLite site (local helper, watch notebooks, astroquery).
+- [docs/feedback-deploy.md](docs/feedback-deploy.md): deploying the opt-in
+  tester-report worker.
+- [docs/speedup-plan-2026-08.md](docs/speedup-plan-2026-08.md): performance
+  measurements and the optimization plan for in-browser photometry.
+- [docs/filesystem-access-notes.md](docs/filesystem-access-notes.md): the
+  abandoned jupyterlab-filesystem-access approach to local files.

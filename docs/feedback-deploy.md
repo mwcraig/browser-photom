@@ -146,7 +146,7 @@ never needs it (step 9's token is read-only and scoped to the bucket).
 
 `ALLOWED_ORIGIN` in `wrangler.toml` is already `https://mwcraig.github.io`.
 That is the origin of the published dashboard at
-`https://mwcraig.github.io/browser-photom/voici/` (README, and
+`https://mwcraig.github.io/browser-photom/voici/` (`docs/using-the-dashboard.md`, and
 `.github/workflows/pages.yml`). An origin is scheme plus host with no path,
 so the `/browser-photom/` part is correct to leave off.
 

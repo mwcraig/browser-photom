@@ -291,6 +291,38 @@ def test_catalog_warnings_are_always_shown(build):
 # -- batch prep retries ------------------------------------------------------
 
 
+PREP_LINE = ("Preparing the batch from a.fit: star detection, plate solve and the "
+             "Gaia query (a Gaia server that hangs costs about 70 s before the "
+             "next one is tried)...")
+
+
+def test_prep_is_announced_before_the_call_and_only_when_it_is_attempted(build, fake):
+    # The line comes before prepare_batch runs, so a hung Gaia server is not
+    # a minute of silence; and only on frames that attempt prep: not once
+    # prep exists, and not for a frame skipped inside a Gaia cooldown.
+    proc, lines, clock, _qa = build()
+    assert proc("a.fit", "a.fit") is None
+    assert lines[:2] == [PREP_LINE, "Batch prep done: 3 photometry stars."]
+    assert len(lines) == 3  # then the frame's own line
+    assert proc("b.fit", "b.fit") is None
+    assert len(lines) == 4
+
+    proc, lines, clock, _qa = build()
+    fake.prep_outcomes = [gaia_failure()]
+    proc("a.fit", "a.fit")
+    assert lines[0] == PREP_LINE
+    clock.now += 12
+    proc("b.fit", "b.fit")
+    assert lines.count(PREP_LINE) == 1
+    clock.now += GAIA_RETRY_FIRST_S
+    assert proc("c.fit", "c.fit") is None
+    assert lines[-4:-1] == [
+        f"Retrying batch prep ({GAIA_RETRY_FIRST_S} s Gaia cooldown over).",
+        PREP_LINE.replace("from a.fit", "from c.fit"),
+        "Batch prep done: 3 photometry stars.",
+    ]
+
+
 def test_a_non_gaia_prep_failure_retries_on_the_next_frame(build, fake):
     proc, lines, _clock, qa = build()
     fake.prep_outcomes = [other_failure()]
@@ -298,7 +330,7 @@ def test_a_non_gaia_prep_failure_retries_on_the_next_frame(build, fake):
     assert qa == []
     assert proc("b.fit", "b.fit") is None
     assert fake.prep_calls == ["a.fit", "b.fit"]
-    assert not any("Gaia" in line for line in lines)
+    assert not any("Gaia failed" in line or "cooldown" in line for line in lines)
 
 
 def test_prep_gets_a_copy_of_the_live_form_metadata(build, fake):
@@ -346,7 +378,7 @@ def test_missing_output_metadata_in_prep_is_a_prep_failure(build, fake):
     # Prep is retried at once on the next frame, with no Gaia cooldown.
     assert proc("b.fit", "b.fit") is None
     assert len(fake.prep_calls) == 2
-    assert not any("Gaia" in line for line in lines)
+    assert not any("Gaia failed" in line or "cooldown" in line for line in lines)
 
 
 def test_a_missing_key_the_form_cannot_supply_points_at_the_header(build, fake):

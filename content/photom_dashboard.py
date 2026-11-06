@@ -1408,6 +1408,13 @@ def make_bandaid_processor(
                     )
                 batch["gaia_until"] = None
                 log(f"Retrying batch prep ({batch['gaia_wait']} s Gaia cooldown over).")
+            # Said before the call, because nothing else is until it returns:
+            # bandaid logs nothing until a Gaia server has failed, so a prep
+            # whose first server hangs (70 s to bandaid's cap) followed the
+            # weights download with over a minute of silence (seen 2026-11-05).
+            log(f"Preparing the batch from {name}: star detection, plate solve "
+                "and the Gaia query (a Gaia server that hangs costs about 70 s "
+                "before the next one is tried)...")
             prep_started = clock()
             try:
                 # The form's metadata goes to prep too: since 9baaf7c prep

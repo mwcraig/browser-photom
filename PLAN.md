@@ -6,7 +6,7 @@
 
 Next steps for browser-photom (written 2026-07-19, pre-context-clear). Current state: working
 JupyterLite + xeus-python site with astrowidgets (bqplot backend) from astropy/astrowidgets main;
-`pixi run build` / `pixi run serve`; details in README.md and in Claude's memory directory.
+`pixi run build` / `pixi run serve`; details in docs/notebooks.md and docs/development.md (moved out of the README) and in Claude's memory directory.
 
 ## 1. Trim the WASM environment (biggest memory win)
 

@@ -2,8 +2,8 @@
 
 ## Help us out: right now photometry is only available on the SeeStar S50, tested on a limited number of units
 
-- Do your SeeStar S50 photometry by [going here](https://mwcraig.github.io/browser-photom/) and follow the instructions on the page. Check the box for sending a report on how it goes.
-- Go to [the actual photometry package -- (naming rights available!)](https://github.com/mwcraig/bandaid) and look at how to [add a new smart telescope to the photometry software](https://mwcraig.github.io/bandaid/howto/add_a_telescope/). _This looks complicated but you will get a lot of help with the technical side -- providing some sample images is a useful contribution!_
+- Do photometry on some of your SeeStar S50 images by [going here](https://mwcraig.github.io/browser-photom/) and follow the instructions on the page. Check the box for sending a report on how it goes so that we get some information about it. If you are ok with us contacting you if there were errors include contact information in the comment box.
+- Go to [the actual photometry package -- (naming rights available!)](https://github.com/mwcraig/bandaid) and look at how to [add a new smart telescope to the photometry software](https://mwcraig.github.io/bandaid/howto/add_a_telescope/). _This looks complicated but you will get a lot of help with the technical side -- providing some sample images is a useful contribution!_ Our first priority is adding other SeeStar models.
 
 ## You can safely ignore the rest of this
 

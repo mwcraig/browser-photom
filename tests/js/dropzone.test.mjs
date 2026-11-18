@@ -153,6 +153,18 @@ test('collectEntries filters out non-FITS files but still recurses into non-FITS
   assert.deepEqual(paths, ['data/keeper.fits', 'data/misc/nested.fit']);
 });
 
+test('collectEntries gives dropped loose files bare one-segment paths', async () => {
+  // Files dragged in on their own sit at the drop root, fullPath "/b.fits".
+  const b = fakeFile('b.fits', '/b.fits', 100);
+  const a = fakeFile('a.fit', '/a.fit', 100);
+  const notes = fakeFile('notes.txt', '/notes.txt', 100);
+
+  const found = await collectEntries([b, notes, a]);
+
+  assert.deepEqual(found.map((f) => f.path), ['a.fit', 'b.fits']);
+  assert.equal(validateFound(found).ok, true);
+});
+
 test('collectEntries sorts the result by path regardless of traversal order', async () => {
   const z = fakeFile('z.fits', '/root/z.fits');
   const a = fakeFile('a.fits', '/root/a.fits');
@@ -287,7 +299,49 @@ test('validateFound rejects a folder where every FITS file is 0 bytes', () => {
 
   assert.deepEqual(result, {
     ok: false,
-    message: 'All FITS files in that folder are empty (0 bytes).',
+    message: 'All the FITS files you chose are empty (0 bytes).',
+  });
+});
+
+test('validateFound passes loose files (one path segment) through unchanged', () => {
+  // The files picker and a drag of loose files both give bare names.
+  const found = [
+    { path: 'a.fits', file: { size: 100 } },
+    { path: 'b.fit', file: { size: 200 } },
+  ];
+
+  const result = validateFound(found);
+
+  assert.deepEqual(result, { ok: true, files: found, emptyCount: 0 });
+});
+
+test('validateFound filters 0-byte loose files and rejects all-empty loose files', () => {
+  const some = validateFound([
+    { path: 'a.fits', file: { size: 0 } },
+    { path: 'b.fits', file: { size: 100 } },
+  ]);
+  assert.equal(some.ok, true);
+  assert.deepEqual(some.files.map((f) => f.path), ['b.fits']);
+  assert.equal(some.emptyCount, 1);
+
+  const none = validateFound([{ path: 'a.fits', file: { size: 0 } }]);
+  assert.deepEqual(none, {
+    ok: false,
+    message: 'All the FITS files you chose are empty (0 bytes).',
+  });
+});
+
+test('validateFound rejects loose files mixed with a folder', () => {
+  const found = [
+    { path: 'a.fits', file: { size: 100 } },
+    { path: 'roll/b.fits', file: { size: 200 } },
+  ];
+
+  const result = validateFound(found);
+
+  assert.deepEqual(result, {
+    ok: false,
+    message: 'Choose either one folder or some files, not both.',
   });
 });
 

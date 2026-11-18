@@ -49,10 +49,12 @@ metres; latitude and longitude come from the frame headers (`SITELAT`/
 ## Dropping frames
 
 Drop one folder at a time, with its FITS files directly inside it — not
-nested in subfolders — or use the keyboard-accessible "…or choose a folder"
-button next to the drop zone; a nested export has to be dropped one leaf
-folder at a time. `results/` accumulates `.star` files across every folder
-dropped in one browser session, so the download button always bundles
+nested in subfolders — or drop some FITS files themselves. The
+keyboard-accessible "…or choose a folder" and "…or choose files" buttons
+next to the drop zone do the same. One drop is either a folder or files,
+not both; a nested export has to be dropped one leaf folder at a time.
+Files without a folder go into a run named `run`. `results/` accumulates
+`.star` files across every drop in one browser session, so the download button always bundles
 everything so far, but it's cleared automatically on the very first drop
 after a fresh page load, so a new session never inherits a previous one's
 leftovers.

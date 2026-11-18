@@ -120,16 +120,19 @@ export function sliceChunks(size, chunkBytes) {
  * to actually upload.
  */
 export function validateFound(found) {
-  // "Simple folder" rule: every FITS file must sit exactly one level below
-  // the dropped/picked folder root ("FolderName/file.fits"). Files with
-  // matching basenames in two different subfolders would otherwise
-  // silently overwrite each other's .star results downstream, because the
-  // kernel keys everything on the basename alone -- a single flat folder
-  // makes that collision structurally impossible. Subfolders with no FITS
-  // files in them are harmless and never show up here: collectEntries only
-  // collects FITS files, so an all-non-FITS subfolder contributes nothing.
+  // Two accepted shapes. Loose files ("file.fits", one path segment) come
+  // from the file picker or from dragging files in; they were all chosen
+  // from one place, so no two can share a basename. A "simple folder" has
+  // every FITS file exactly one level below the dropped/picked folder root
+  // ("FolderName/file.fits"). Files with matching basenames in two
+  // different subfolders would otherwise silently overwrite each other's
+  // .star results downstream, because the kernel keys everything on the
+  // basename alone -- a single flat folder makes that collision
+  // structurally impossible. Subfolders with no FITS files in them are
+  // harmless and never show up here: collectEntries only collects FITS
+  // files, so an all-non-FITS subfolder contributes nothing.
   for (const { path } of found) {
-    if (path.split('/').length !== 2) {
+    if (path.split('/').length > 2) {
       return {
         ok: false,
         message:
@@ -139,12 +142,20 @@ export function validateFound(found) {
     }
   }
 
-  // All files must share one top-level folder. The drag-drop handler
-  // already blocks dropping two folders at once (see entries.length > 1
-  // upstream), but the folder-picker <input> has no equivalent chokepoint
-  // -- the OS picker hands back whatever the user selected, from wherever,
-  // with no single "drop event" for this module to intercept first.
-  if (found.length > 0) {
+  const loose = found.filter(({ path }) => !path.includes('/'));
+  if (loose.length > 0 && loose.length < found.length) {
+    return {
+      ok: false,
+      message: 'Choose either one folder or some files, not both.',
+    };
+  }
+
+  // A folder's files must all share one top-level folder. The drag-drop
+  // handler already blocks dropping two folders at once (see entries.length
+  // > 1 upstream), but the folder-picker <input> has no equivalent
+  // chokepoint -- the OS picker hands back whatever the user selected, from
+  // wherever, with no single "drop event" for this module to intercept first.
+  if (found.length > 0 && loose.length === 0) {
     const folder = found[0].path.split('/')[0];
     if (found.some(({ path }) => path.split('/')[0] !== folder)) {
       return { ok: false, message: 'Drop one folder at a time.' };
@@ -159,7 +170,7 @@ export function validateFound(found) {
   const emptyCount = found.length - files.length;
 
   if (found.length > 0 && files.length === 0) {
-    return { ok: false, message: 'All FITS files in that folder are empty (0 bytes).' };
+    return { ok: false, message: 'All the FITS files you chose are empty (0 bytes).' };
   }
 
   return { ok: true, files, emptyCount };
@@ -1001,8 +1012,24 @@ function renderDropZone({ model, el, signal }) {
   pickerInput.multiple = true;
   pickerInput.style.display = 'none';
 
+  // One <input> cannot pick both folders and files (webkitdirectory is
+  // all-or-nothing), so individual files get their own button and input.
+  const filesButton = document.createElement('button');
+  filesButton.type = 'button';
+  filesButton.textContent = '…or choose files';
+  filesButton.className = 'bp-btn';
+  filesButton.style.marginLeft = '0.5em';
+
+  const filesInput = document.createElement('input');
+  filesInput.type = 'file';
+  filesInput.multiple = true;
+  filesInput.accept = '.fit,.fits,.fts';
+  filesInput.style.display = 'none';
+
   pickerRow.appendChild(pickerButton);
   pickerRow.appendChild(pickerInput);
+  pickerRow.appendChild(filesButton);
+  pickerRow.appendChild(filesInput);
   el.appendChild(pickerRow);
 
   // The only way back from "Don't show this again" (the flag is browser-
@@ -1255,8 +1282,10 @@ function renderDropZone({ model, el, signal }) {
     const busy = uploading;
     container.classList.toggle('armed', armed && !busy);
     container.classList.toggle('uploading', armed && busy);
-    pickerButton.disabled = !(armed && !busy);
-    pickerButton.classList.toggle('secondary', armed && !busy);
+    for (const button of [pickerButton, filesButton]) {
+      button.disabled = !(armed && !busy);
+      button.classList.toggle('secondary', armed && !busy);
+    }
     container.setAttribute('aria-disabled', String(!(armed && !busy)));
     showAgainRow.hidden = !readSkipTabWarning(safeStorage());
   }
@@ -1394,9 +1423,10 @@ function renderDropZone({ model, el, signal }) {
     errorLatch.arm();
     model.send({
       type: 'manifest',
-      // validateFound has already enforced a single shared top-level folder,
-      // so any file's first path segment names it.
-      folder: files[0].path.split('/')[0],
+      // validateFound has already enforced either a single shared top-level
+      // folder or all loose files. Loose files have no folder to send, and
+      // the kernel names that run "run".
+      folder: files[0].path.includes('/') ? files[0].path.split('/')[0] : undefined,
       files: files.map((f) => ({ name: basename(f.path), size: f.file.size })),
     });
     // The run is live from here (not from `uploading`, which also covers
@@ -1528,7 +1558,7 @@ function renderDropZone({ model, el, signal }) {
   // otherwise hand the narrowed file list to startUpload.
   async function validateAndUpload(found) {
     if (found.length === 0) {
-      setStatus('No FITS files (.fit/.fits/.fts) found in that folder.');
+      setStatus('No FITS files (.fit/.fits/.fts) found in what you chose.');
       return;
     }
 
@@ -1539,7 +1569,7 @@ function renderDropZone({ model, el, signal }) {
     }
 
     if (!(await confirmRun())) {
-      setStatus('Run not started — drop or choose the folder again when you are ready.');
+      setStatus('Run not started — drop or choose the folder or files again when you are ready.');
       return;
     }
 
@@ -1589,16 +1619,18 @@ function renderDropZone({ model, el, signal }) {
       // loose-file check below: [].every(...) is vacuously true, so without
       // this an empty drop would get the misleading "loose files" message.
       if (entries.length === 0) {
-        setStatus('Nothing usable was dropped — drag a folder of FITS images.');
+        setStatus('Nothing usable was dropped — drag a folder or some FITS files.');
         return;
       }
 
-      // Loose-file drops are rejected on purpose: the workflow is "drop a
-      // single folder of frames". Using .some() (not .every()) here also
-      // catches a folder dropped together with a stray extra file, which
-      // .every() would let through as a silent partial upload.
-      if (entries.some((entry) => entry.isFile)) {
-        setStatus('Drop a single folder of FITS images, not loose files.');
+      // Either loose files (all from one place, so their basenames are
+      // unique) or a single folder -- never a mix. A folder dropped together
+      // with a stray extra file is refused rather than uploaded as a silent
+      // partial run; validateFound would refuse it too, but only after
+      // walking the whole folder.
+      const dirCount = entries.filter((entry) => entry.isDirectory).length;
+      if (dirCount > 0 && dirCount < entries.length) {
+        setStatus('Choose either one folder or some files, not both.');
         return;
       }
 
@@ -1606,7 +1638,7 @@ function renderDropZone({ model, el, signal }) {
       // share a basename with a file in the other, and the kernel flattens
       // everything to basenames -- so one would silently clobber the other's
       // results. One folder at a time sidesteps that entirely.
-      if (entries.length > 1) {
+      if (dirCount > 1) {
         setStatus('Drop one folder at a time.');
         return;
       }
@@ -1615,7 +1647,7 @@ function renderDropZone({ model, el, signal }) {
       try {
         found = await collectEntries(entries);
       } catch (err) {
-        setStatus(`Error reading folder: ${err && err.message ? err.message : err}`);
+        setStatus(`Error reading the dropped files: ${err && err.message ? err.message : err}`);
         return;
       }
 
@@ -1629,33 +1661,41 @@ function renderDropZone({ model, el, signal }) {
     }
   });
 
-  pickerButton.addEventListener('click', () => {
+  function openPicker(input) {
     if (!isArmed()) {
       setStatus('Enter the observer code and site elevation first.');
       return;
     }
-    pickerInput.click();
-  });
+    input.click();
+  }
 
-  pickerInput.addEventListener('change', async () => {
+  // Shared by the folder and files pickers. A folder pick gives each file a
+  // "Folder/name.fits" webkitRelativePath; a files pick leaves it empty, so
+  // the bare name makes a loose one-segment path.
+  async function handlePicked(input) {
     // Same claim as the drop handler: the dialog in validateAndUpload is an
     // await point, and a drop landing behind it must not start a second run.
     uploading = true;
     paint();
     try {
-      const found = [...pickerInput.files]
+      const found = [...input.files]
         .map((file) => ({ path: file.webkitRelativePath || file.name, file }))
         .filter((f) => isFitsName(basename(f.path)))
         .sort(byPath);
-      // Let the same folder be picked again later (e.g. after fixing it).
-      pickerInput.value = '';
+      // Let the same folder or files be picked again later (e.g. after fixing them).
+      input.value = '';
 
       await validateAndUpload(found);
     } finally {
       uploading = false;
       paint();
     }
-  });
+  }
+
+  pickerButton.addEventListener('click', () => openPicker(pickerInput));
+  filesButton.addEventListener('click', () => openPicker(filesInput));
+  pickerInput.addEventListener('change', () => handlePicked(pickerInput));
+  filesInput.addEventListener('change', () => handlePicked(filesInput));
 
   model.on('change:armed', paint);
   model.on('change:hint', paint);

@@ -19,8 +19,8 @@ The dashboard is live at <https://mwcraig.github.io/browser-photom/>.
 
 1. Open the dashboard and fill in the form (your AAVSO observer code and the
    site elevation).
-2. Drop a folder of Seestar FITS frames onto the drop zone, and keep the tab
-   visible while it runs.
+2. Drop a folder of Seestar FITS frames (or some of the frames themselves)
+   onto the drop zone, and keep the tab visible while it runs.
 3. When the run finishes, download the zip of starlists.
 
 More detail: [docs/using-the-dashboard.md](docs/using-the-dashboard.md).

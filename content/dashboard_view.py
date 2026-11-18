@@ -52,9 +52,10 @@ INSTRUCTIONS = f"""
   <li>Enter your <b>AAVSO observer code</b> and the <b>elevation</b> of your
       observing site. Latitude and longitude are read from the image headers;
       fill them in only to override what the headers say.</li>
-  <li>Drag a <b>folder</b> of FITS frames of a <b>single object</b> onto the
-      drop zone below.  The folder can have a single night or multiple nights
-      of observations.</li>
+  <li>Drag a <b>folder</b> of FITS frames of a <b>single object</b>, or some
+      of its frames, onto the drop zone below, or use the buttons under it.
+      The frames can be from a single night or multiple nights of
+      observations.</li>
   <li>When the run finishes, download the starlists as a single zip.</li>
 </ol>
 <p style="line-height:1.6">
@@ -349,7 +350,7 @@ class DashboardView:
         self._meta.update(meta)
         self.drop_zone.armed = not errors
         self.drop_zone.hint = (
-            "Drag a folder of FITS images here"
+            "Drag a folder or some FITS images here"
             if not errors
             else "Fill in the fields above to enable the drop zone"
         )
@@ -733,7 +734,7 @@ class DashboardView:
                 log=self.log,
                 on_qa=self._on_qa,
                 on_result=self._on_result,
-                retry_hint="drop the folder again to retry now",
+                retry_hint="drop the folder or files again to retry now",
             )
         except Exception as exc:  # noqa: BLE001 - any setup failure latches
             self.log(f"Pipeline setup failed: {type(exc).__name__}: {exc}")
@@ -833,7 +834,7 @@ class DashboardView:
                 f"{state.skipped} skipped. Download the starlists below "
                 f"({n_star} file{'' if n_star == 1 else 's'} in &ldquo;{run_name}&rdquo;&rsquo;s zip; "
                 f"{n_runs} night{'' if n_runs == 1 else 's'} this session), or "
-                f"drop another folder to add a new night.</p>"
+                f"drop another folder or more files to add a new night.</p>"
             )
             self.zip_widget.enabled = True
             # A preview left open through the run comes back with the setup

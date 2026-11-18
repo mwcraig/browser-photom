@@ -221,6 +221,11 @@ class DashboardView:
                                layout=layout, placeholder="optional — from header")
         self.longitude = W.Text(description="Longitude (deg E)", style=style,
                                 layout=layout, placeholder="optional — from header")
+        # AAVSO observer codes are uppercase. validate_metadata records the
+        # code uppercased; the .bp-obscode rule in dropzone.css shows it that
+        # way as it is typed. Done in CSS rather than by rewriting the value
+        # from the kernel, so it needs no round trip and never moves the cursor.
+        self.observer.add_class("bp-obscode")
         for field in (self.observer, self.elevation, self.latitude, self.longitude):
             field.observe(lambda _change: self._validate(), names="value")
 

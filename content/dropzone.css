@@ -271,3 +271,13 @@
   border-top: 1px solid var(--jp-border-color2, #ddd);
   gap: 0.4em;
 }
+
+/* The observer-code box in the dashboard form (dashboard_view.py): AAVSO
+   codes are uppercase, and validate_metadata records them that way, so the
+   box shows capitals as they are typed. The placeholder keeps its own case. */
+.bp-obscode input {
+  text-transform: uppercase;
+}
+.bp-obscode input::placeholder {
+  text-transform: none;
+}

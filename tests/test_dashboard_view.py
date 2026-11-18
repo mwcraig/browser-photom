@@ -223,3 +223,11 @@ def test_another_log_line_in_between_starts_a_new_counter(view):
     view.log("bandaid: something")
     view._log_skip("x.fit", COOLDOWN)
     assert list(view._log)[-3:] == [collapsed(1), "bandaid: something", collapsed(1)]
+
+
+def test_the_observer_code_box_shows_and_records_capitals(view):
+    # Shown in capitals by the .bp-obscode CSS rule; recorded in capitals by
+    # validate_metadata, whatever case was typed.
+    assert "bp-obscode" in view.observer._dom_classes
+    view.observer.value = "abc"
+    assert view._meta["observer"] == "ABC"
